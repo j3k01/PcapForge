@@ -62,7 +62,7 @@
     },
     "mitre": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "items": {
         "type": "object",
         "required": [
@@ -488,6 +488,11 @@
                 "description": "what the analyst should notice"
               }
             }
+          },
+          "tolerance": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Allowed absolute error for number answers"
           }
         }
       }

@@ -1,0 +1,261 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-baseline-operations
+title: Baseline of normal OT operations (no incident)
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [baseline, modbus, opcua, s7comm, ics, ot, water, wastewater, hvac, power]
+summary: >
+  Normal operation of an industrial site: SCADA HMI, historian and (on medium/hard) a SCADA
+  OPC UA server poll the PLCs, the engineering workstation makes approved setpoint changes,
+  Windows hosts sync time and resolve names. There is no incident. Use it to learn what
+  normal looks like, to tune detections against false positives and to build baselines.
+
+briefing: |
+  You are joining the OT SOC of the {site_name} site ({domain}), {process_title}.
+  Before you can spot anything abnormal you need a baseline. The attached capture comes
+  from the SPAN port of the control-network switch ({sensor_subnet}) during a normal shift.
+  Document who talks to whom, how often, with which protocols and function codes, and
+  which changes are part of normal operations.
+
+mitre: []
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [wtp, sut, zuw, stw]
+  start_hours: [6, 21]
+  weekdays: [0, 1, 2, 3, 4, 5]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: plc, count: "${vars.plc_count}", device: "${vars.plc_devices}", subnet: control, name: "plc-{code}-{index:02d}"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: s7plc, device: siemens-s7-1500, subnet: control, name: "plc-{code}-tr2", when: vars.s7}
+    - {id: scada, device: scada-server-vm, subnet: control, name: "SCADA-{CODE}-01", when: vars.opcua}
+
+actors:
+  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: scada_poll
+    type: modbus.poller
+    hosts: hmi
+    params: {targets: plc, interval: "${vars.hmi_interval}", jitter: 0.03}
+  - id: historian_poll
+    type: modbus.poller
+    hosts: historian
+    params: {targets: plc, interval: 10, jitter: 0.01, groups: [0, 1]}
+  # Always present so the site model names the approved writer (count may be 0).
+  - id: operator_changes
+    type: modbus.operator
+    hosts: ews
+    params: {targets: plc, count: "${vars.operator_writes}"}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian, ews]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian, ews, plc]
+    when: vars.ntp
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian, ews]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}"}
+  # Second treatment train: OEM package unit on a Siemens S7-1500, monitored over S7comm.
+  - id: s7_service
+    type: s7.server
+    hosts: s7plc
+    when: vars.s7
+    params: {process: "${vars.process}"}
+  - id: scada_s7_poll
+    type: s7.client
+    hosts: hmi
+    when: vars.s7
+    params: {targets: s7plc, interval: "${vars.hmi_interval}", jitter: 0.03, szl_interval: 60}
+  - id: historian_s7_poll
+    type: s7.client
+    hosts: historian
+    when: vars.s7
+    params: {targets: s7plc, interval: 10, jitter: 0.01, dbs: [1], identify: false, szl_interval: 0}
+  # SCADA / OPC UA server: polls the PLCs over Modbus and publishes their points as OPC UA
+  # tags; the historian collects them through a subscription per PLC.
+  - id: opcua_service
+    type: opcua.server
+    hosts: scada
+    when: vars.opcua
+    params: {sources: plc}
+  - id: scada_io_poll
+    type: modbus.poller
+    hosts: scada
+    when: vars.opcua
+    params: {targets: plc, interval: 2.0, jitter: 0.02}
+  - id: historian_opcua
+    type: opcua.client
+    hosts: historian
+    when: vars.opcua
+    params: {server: scada, publishing_interval: 2.0, keepalive_interval: 5.0}
+  - id: scada_time_sync
+    type: ntp.client
+    hosts: scada
+    when: vars.opcua
+    params: {server: dc}
+  - id: scada_chatter
+    type: windows.chatter
+    hosts: scada
+    when: vars.opcua
+    params: {rate: "${vars.chatter_rate}"}
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: 2
+      hmi_interval: 2.0
+      operator_writes: 1
+      dns: false
+      ntp: true
+      chatter: false
+      s7: false
+      opcua: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [2, 4]}
+      hmi_interval: 1.0
+      operator_writes: 3
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 1
+      s7: true
+      opcua: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [3, 5]}
+      hmi_interval: 1.0
+      operator_writes: 8
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 2
+      s7: true
+      opcua: true
+
+questions:
+  - id: hmi_ip
+    text: Which host polls every PLC over Modbus/TCP most frequently (the SCADA HMI)? Give its IP address.
+    answer: "${facts.scada_poll.hosts[0].ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "mbtcp && ip.src == ${facts.scada_poll.hosts[0].ip} && modbus.func_code in {1, 2, 3, 4}"
+      expect: {min: 1}
+  - id: poll_interval
+    text: What is the HMI polling cycle per PLC, in seconds?
+    answer: "${facts.scada_poll.interval_s}"
+    type: number
+    tolerance: 0.2
+    points: 10
+    hint: Look at the time between consecutive identical read requests to one PLC (Statistics > Conversations, or modbus.func_code with frame.time_delta_displayed).
+  - id: plc_count
+    text: How many PLCs answer Modbus/TCP requests in this capture?
+    answer: "${vars.plc_count}"
+    type: number
+    points: 10
+    check:
+      filter: "mbtcp && tcp.srcport == 502 && modbus.func_code in {1, 2, 3, 4}"
+      expect: {min: 1}
+  - id: read_functions
+    text: Which Modbus function codes does normal polling use?
+    answer: [1, 2, 3, 4]
+    type: set
+    points: 10
+    check:
+      filter: "mbtcp && modbus.func_code in {1, 2, 3, 4} && ip.src == ${facts.scada_poll.hosts[0].ip}"
+      expect: {min: 4}
+  - id: approved_writes
+    text: How many Modbus write requests (function codes 5, 6, 15, 16) are in the capture? All of them are approved operator changes.
+    answer: "${facts.operator_changes.write_count}"
+    type: number
+    points: 10
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && !modbus.request_frame"
+      expect: {count: "${facts.operator_changes.write_count}"}
+  - id: approved_writer
+    text: Which host made those approved changes? Give its IP address.
+    answer: "${facts.operator_changes.source.ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.operator_changes.source.ip}"
+      expect: {count: "${facts.operator_changes.write_count}"}
+  - id: time_source
+    text: Which IP address serves time (NTP) to the control network?
+    answer: "${facts.ntp_service.hosts[0].ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "ntp && ntp.flags.mode == 4 && ip.src == ${facts.ntp_service.hosts[0].ip}"
+      expect: {min: 1}
+  - id: opcua_server
+    when: vars.opcua
+    text: Which host serves OPC UA (TCP 4840) and which host consumes it? Give the server IP.
+    answer: "${facts.opcua_service.hosts[0].ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "opcua && tcp.srcport == 4840 && ip.src == ${facts.opcua_service.hosts[0].ip}"
+      expect: {min: 1}
+
+translations:
+  pl:
+    title: Baseline normalnej pracy sieci OT (bez incydentu)
+    briefing: |
+      Dołączasz do OT SOC zakładu {site_name} ({domain}), {process_title}.
+      Zanim zauważysz cokolwiek nietypowego, potrzebujesz baseline'u. Załączone nagranie pochodzi
+      z portu SPAN przełącznika sieci sterowania ({sensor_subnet}) podczas normalnej zmiany.
+      Udokumentuj, kto z kim się komunikuje, jak często, jakimi protokołami i kodami funkcji,
+      oraz które zmiany są częścią normalnej pracy.
+    questions:
+      hmi_ip:
+        text: Który host najczęściej odpytuje wszystkie PLC przez Modbus/TCP (HMI SCADA)? Podaj jego adres IP.
+      poll_interval:
+        text: Jaki jest cykl odpytywania jednego PLC przez HMI, w sekundach?
+        hint: Sprawdź odstęp między kolejnymi identycznymi żądaniami odczytu do jednego PLC (Statistics > Conversations albo modbus.func_code z frame.time_delta_displayed).
+      plc_count:
+        text: Ile PLC odpowiada na żądania Modbus/TCP w tym nagraniu?
+      read_functions:
+        text: Jakich kodów funkcji Modbus używa normalne odpytywanie?
+      approved_writes:
+        text: Ile żądań zapisu Modbus (kody funkcji 5, 6, 15, 16) jest w nagraniu? Wszystkie to zatwierdzone zmiany operatora.
+      approved_writer:
+        text: Który host wykonał te zatwierdzone zmiany? Podaj jego adres IP.
+      time_source:
+        text: Który adres IP udostępnia czas (NTP) sieci sterowania?
+      opcua_server:
+        text: Który host udostępnia OPC UA (TCP 4840), a który z niego korzysta? Podaj adres IP serwera.
