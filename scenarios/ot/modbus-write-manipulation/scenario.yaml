@@ -152,6 +152,7 @@ questions:
   - id: source_ip
     text: Which IP address issued the unauthorized Modbus write requests?
     answer: "${facts.change.source.ip}"
+    type: ip
     points: 10
     hint: Start from Modbus function codes 5, 6, 15 and 16 and compare the writers with the expected roles.
     check:
@@ -168,6 +169,7 @@ questions:
   - id: source_mac
     text: Which MAC address did the sensor see on the frames carrying those write requests?
     answer: "${facts.change.source.observed_mac}"
+    type: mac
     points: 5
     hint: Routed traffic arrives with the MAC of the last hop, not of the originating host.
     check:
@@ -183,6 +185,7 @@ questions:
   - id: target_ip
     text: Which PLC (IP address) received the unauthorized writes?
     answer: "${facts.change.target.ip}"
+    type: ip
     points: 10
     check:
       filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && ip.dst == ${facts.change.target.ip}"
