@@ -79,7 +79,7 @@ Done and committed:
   `plan.py` (Action/Event/Plan, `build_plan`, recording digest)
 
 Next, in order:
-1. `actors/` — registry (`create_actor`), base class (`plan()`, `serve(rt)`, `execute(action, rt)`,
+1. `actors/` — DONE: `ports.py`, `actors/__init__.py` (registry), `actors/base.py`. TODO: registry (`create_actor`), base class (`plan()`, `serve(rt)`, `execute(action, rt)`,
    `close(rt)`, `is_server`, `incident`), `modbus.py` (server, poller, operator, writer),
    `dns.py`, `ntp.py`; record ports in `ports.py` (15020→502, 15353→53, 15123→123).
    pymodbus bit tables: packed LSB-first, bit `i` is `regs[i // 16] >> (i % 16) & 1`.
