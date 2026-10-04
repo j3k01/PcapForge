@@ -69,21 +69,43 @@ live in `src/pcapforge/profiles/` so scenarios stay engine-agnostic.
 
 ## Status (resume point)
 
-Done and committed:
-- `pyproject.toml`, licenses, `rng.py` (named seeded streams), `tools.py` (tshark/dumpcap lookup)
-- `profiles/devices.yaml` (stacks: windows/linux/vxworks; devices with verified OUIs),
-  `profiles/processes/water_treatment.yaml`, `process.py` (virtual-time process model)
-- `scenario/` loader + JSON schema; YAML key is `hosts` (not `on`: YAML 1.1 parses it as bool)
-- `scenarios/ot/modbus-write-manipulation/scenario.yaml` (easy/medium/hard, questions with tshark checks)
-- `topology.py` (world from behaviour seed, addressing from presentation seed, sensor L2 view),
-  `plan.py` (Action/Event/Plan, `build_plan`, recording digest)
+Done and committed (verify with `git log --oneline`):
+- foundation: `pyproject.toml`, licenses, `rng.py`, `tools.py`, `ports.py`
+- `profiles/` (devices/stacks with verified OUIs, `processes/water_treatment.yaml`), `process.py`
+- `scenario/` loader + JSON schema (actor key is `hosts`; tshark set syntax needs commas `{5, 6}`)
+- `scenarios/ot/modbus-write-manipulation/scenario.yaml`
+- `topology.py` — world (hosts, devices, site name/code/domain: these appear in DNS payloads)
+  from the behaviour seed; `assign_addresses(rng)` (IPs/MACs) from the presentation seed
+- `plan.py` — `build_plan(scenario, difficulty, seed, base_seed, duration_override)`,
+  `start_epoch` (behaviour level: NTP payloads carry it), `digest()` = recording cache key
+- `actors/` — `modbus.server|poller|operator|writer`, `dns.server|client`, `ntp.server|client`
+- `record.py` — `recording_for(plan)` → cached pcap (DLT_NULL on Windows) + `.json` meta.
+  Verified: easy plan = 4018 actions, 20 020 packets, 0 drops, 2.9 s wall.
 
-Next, in order:
-1. `actors/` — DONE: `ports.py`, `actors/__init__.py` (registry), `actors/base.py`. TODO: registry (`create_actor`), base class (`plan()`, `serve(rt)`, `execute(action, rt)`,
-   `close(rt)`, `is_server`, `incident`), `modbus.py` (server, poller, operator, writer),
-   `dns.py`, `ntp.py`; record ports in `ports.py` (15020→502, 15353→53, 15123→123).
-   pymodbus bit tables: packed LSB-first, bit `i` is `regs[i // 16] >> (i % 16) & 1`.
-2. `record.py` — dumpcap/tcpdump backend, asyncio server thread, marker per action, cache.
-3. `compose/` — flow assignment, causal retime, header rebuild (struct, own checksums), ARP, write.
-4. `answers.py` (expand `$host` / `$action` refs, questions, register-map handout), `verify.py`.
-5. `cli.py`, tests, README, CI.
+Next: `compose/` (spec below), then `answers.py`, `verify.py`, `cli.py`, tests, README, CI.
+
+### Composer spec
+Input: recording pcap, plan, presentation rng (`Rng("pcapforge", scenario, difficulty, seed).child("present")`).
+1. Parse with `RawPcapReader`; strip link layer (DLT_NULL 4 bytes / Ethernet 14) → IPv4 bytes.
+2. Markers: UDP to `MARKER_SINK:9999`, payload `PFMK`+u32 action id → set `current_action`; drop.
+3. Flow key = sorted 5-tuple. Client side = SYN sender (TCP) / first sender (UDP). A client
+   packet with payload/SYN/FIN binds the flow to `current_action`; others inherit the flow's action.
+   Packets before the first marker or of `teardown` actions are dropped; `setup` actions are dropped
+   when `impairments.mid_session` is true (capture starts mid-session).
+4. Causal retime per action: first packet at `start_epoch + action.t`; each next packet:
+   same sender → +10–60 µs; direction change → + latency(sender) [per-host sensor latency:
+   same subnet 0.1–0.4 ms, routed +0.3–0.8 ms via `forwarding_ms`] + reaction:
+   payload after peer payload → device `processing_ms` lognormal; pure ACK → stack
+   `delayed_ack`; SYN-ACK → 30–80 µs. Enforce per-flow monotonic time.
+5. Retransmission (`retransmit_rate`): duplicate a TCP data segment at t+RTO (Windows 300 ms,
+   Linux 200 ms+RTT, vxworks 500 ms) and shift the rest of that action/flow by RTO.
+6. Visibility: keep only packets `topology.visible(src, dst)`.
+7. Header rebuild (struct, own checksums): IPv4 (stack TTL − routed hops, DF, IP-ID global or
+   per-flow), ports via `ports.WELL_KNOWN`, ephemeral ports per stack (`ephemeral_ports`,
+   `port_allocation`), ISN per flow from rng, TCP options rebuilt per stack on SYN/SYN-ACK
+   (`syn_options`, MSS, WS, timestamps when both sides support), window per stack.
+   DNS answers: rewrite A-record rdata loopback → final IP (same length).
+8. L2 via `topology.l2_view(src, dst)`; synthesize ARP who-has/is-at for on-segment pairs
+   before first contact and again after 30–120 s idle (Windows/Linux cache aging).
+9. Merge sort by time (stable), write classic pcap (Ethernet, µs) or pcapng; return
+   action id → first request frame number for the answer key.
