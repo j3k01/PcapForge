@@ -1,0 +1,38 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  captures:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Wireshark CLI tools with loopback capture rights
+        run: |
+          echo "wireshark-common wireshark-common/install-setuid boolean false" | sudo debconf-set-selections
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark zip
+          sudo setcap cap_net_raw,cap_net_admin=eip "$(command -v dumpcap)"
+      - run: pip install -e .
+      - name: Generate sample captures for every scenario and difficulty
+        run: |
+          for scenario in $(pcapforge list | awk '{print $1}'); do
+            for difficulty in easy medium hard; do
+              pcapforge generate -s "$scenario" -d "$difficulty" --seed release -o dist -q
+            done
+          done
+          cd dist && for d in */; do zip -qr "${d%/}.zip" "$d"; done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          body: |
+            Sample captures generated with `--seed release`. Each zip contains `capture.pcap`,
+            `briefing.md` (student handout) and `answers.json` (instructor key: keep it away from students).

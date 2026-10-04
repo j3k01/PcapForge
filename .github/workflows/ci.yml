@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Wireshark CLI tools with loopback capture rights
+        run: |
+          echo "wireshark-common wireshark-common/install-setuid boolean false" | sudo debconf-set-selections
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
+          sudo setcap cap_net_raw,cap_net_admin=eip "$(command -v dumpcap)"
+          tshark --version | head -1
+      - run: pip install -e .[test]
+      - run: pcapforge validate
+      - run: pytest -q
