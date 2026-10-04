@@ -60,10 +60,10 @@ actors:
     type: modbus.poller
     hosts: historian
     params: {targets: plc, interval: 10, jitter: 0.01, groups: [0, 1]}
+  # Always present so the site model names the approved writer (count may be 0).
   - id: operator_changes
     type: modbus.operator
     hosts: ews
-    when: vars.operator_writes
     params: {targets: plc, count: "${vars.operator_writes}"}
   - id: name_lookups
     type: dns.client
@@ -157,6 +157,14 @@ questions:
     check:
       filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && !modbus.request_frame"
       expect: {min: "${facts.change.write_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true | stats count AS writes, min(ts) AS first, max(ts) AS last, values(dest) AS plcs, values(function) AS functions BY src | sort - writes"
+      kql: "write : true"
+      look_for: >-
+        Every host that writes to a PLC. Only the engineering workstation (${facts.operator_changes.source.ip})
+        is approved to change setpoints. Any other writer is the answer; if the workstation is the only
+        writer, split its writes by `in_normal_band` - the out-of-band ones are unauthorized.
   - id: source_mac
     text: Which MAC address did the sensor see on the frames carrying those write requests?
     answer: "${facts.change.source.observed_mac}"
@@ -165,6 +173,13 @@ questions:
     check:
       filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && eth.src == ${facts.change.source.observed_mac}"
       expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} | stats count BY src, src_mac"
+      kql: "write : true and src : \"${facts.change.source.ip}\""
+      look_for: >-
+        `src_mac` is the MAC the sensor saw. A source outside the capture subnet arrives with the MAC of the
+        router that forwarded it, not of the originating host.
   - id: target_ip
     text: Which PLC (IP address) received the unauthorized writes?
     answer: "${facts.change.target.ip}"
@@ -172,6 +187,11 @@ questions:
     check:
       filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && ip.dst == ${facts.change.target.ip}"
       expect: {min: "${facts.change.write_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | stats count AS writes, values(point) AS points BY dest"
+      kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      look_for: The PLC that received the out-of-band writes.
   - id: first_write
     text: At what time (UTC) was the first unauthorized write request sent?
     answer: "${facts.change.first_write.time}"
@@ -181,6 +201,11 @@ questions:
     check:
       filter: "frame.number == ${facts.change.first_write.frame} && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip}"
       expect: {count: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | sort 0 epoch | head 1 | table ts src dest function point value request_frame"
+      kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      look_for: The earliest out-of-band write; `request_frame` is the frame to open in Wireshark.
   - id: points_changed
     text: Which PLC points (register map names) were changed? List them.
     answer: "${facts.change.point_names}"
@@ -190,6 +215,11 @@ questions:
     check:
       filter: "mbtcp && ip.src == ${facts.change.source.ip} && ip.dst == ${facts.change.target.ip} && modbus.func_code == ${item.function} && (modbus.reference_num == ${item.address} || modbus.regnum16 == ${item.address} || modbus.bitnum == ${item.address}) && !modbus.request_frame"
       expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | stats values(point) AS points BY dest"
+      kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      look_for: The `point` names come from the register map in the briefing (address + table).
   - id: values_written
     text: For every changed point, give the engineering value that was written.
     answer: "${facts.change.values}"
@@ -199,11 +229,24 @@ questions:
     check:
       filter: "mbtcp && ip.src == ${facts.change.source.ip} && modbus.regnum16 == ${item.address} && modbus.regval_uint16 == ${item.raw} && !modbus.request_frame"
       expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | table ts dest point value unit values{}"
+      kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      look_for: >-
+        `value` is the engineering value (raw register `values` / scale). Compare it with the normal band
+        in the register map.
   - id: functions_used
     text: Which Modbus function codes did the writer use?
     answer: "${facts.change.function_codes}"
     type: set
     points: 5
+    hunt:
+      dataset: modbus
+      wireshark: "mbtcp && ip.src == ${facts.change.source.ip} && modbus.func_code in {5, 6, 15, 16} && !modbus.request_frame"
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | stats count BY function_code, function"
+      kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      look_for: 6 = Write Single Register, 16 = Write Multiple Registers (5 / 15 are the coil equivalents).
   - id: discovery
     text: Before writing, did the source query the PLC identity? If so, which vendor/product did the PLC report?
     when: vars.discovery
@@ -212,19 +255,47 @@ questions:
     check:
       filter: "mbtcp && modbus.func_code == 43 && ip.dst == ${facts.change.source.ip} && modbus.object_str_value"
       expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code=43 | table ts src dest device_identity{}"
+      kql: "function_code : 43"
+      look_for: >-
+        Read Device Identification (function 43 / MEI 14) from a host that is not a SCADA client, followed
+        by register enumeration (reads rejected with `illegal_data_address`).
   - id: impact
     text: Which measured process values are driven by the changed setpoints?
     answer: "${facts.change.affected_measurements}"
     type: set
     points: 10
+    hunt:
+      dataset: modbus
+      wireshark: "mbtcp && ip.dst == ${facts.change.target.ip} && modbus.func_code == 4 && modbus.request_frame"
+      spl: "index=* sourcetype=pcapforge:modbus write=true in_normal_band=false | stats values(point) AS changed_setpoints BY dest"
+      kql: "write : true and in_normal_band : false"
+      look_for: >-
+        The logs carry the changed setpoints; the register map links each setpoint to the measured input
+        registers that follow it. Watch those inputs drift in the HMI poll responses after the writes.
   - id: technique
     text: Which MITRE ATT&CK for ICS technique best describes the setpoint changes?
     answer: T0836
     accept: [T0836, "Modify Parameter", T0855, "Unauthorized Command Message"]
     points: 5
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true in_normal_band=false | stats count BY src, dest, function"
+      kql: "write : true and in_normal_band : false"
+      look_for: >-
+        Writes from an unapproved source are Unauthorized Command Message (T0855); their purpose, moving
+        setpoints out of band, is Modify Parameter (T0836).
   - id: legit_vs_unauthorized
     when: vars.operator_writes
     text: The engineering workstation also changed setpoints legitimately. How many write requests in the capture were legitimate operator changes?
     answer: "${facts.operator_changes.write_count}"
     type: number
     points: 15
+    hunt:
+      dataset: modbus
+      wireshark: "mbtcp && ip.src == ${facts.operator_changes.source.ip} && modbus.func_code in {5, 6, 15, 16} && !modbus.request_frame"
+      spl: "index=* sourcetype=pcapforge:modbus write=true | stats count BY src, in_normal_band"
+      kql: "write : true and in_normal_band : true"
+      look_for: Legitimate operator changes come from the workstation and stay inside the normal band (`in_normal_band=true`).

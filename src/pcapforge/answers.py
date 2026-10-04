@@ -121,6 +121,8 @@ def _questions(plan: Plan, ctx: dict) -> list[dict]:
                     checks.append({"filter": check["filter"],
                                    "expect": {k: int(v) for k, v in check["expect"].items()}})
             entry["checks"] = checks
+            if "hunt" in spec:
+                entry["hunt"] = resolve(spec["hunt"], ctx)
         except ScenarioError as exc:
             raise ScenarioError(f"question '{spec['id']}': {exc}") from None
         out.append(entry)
@@ -198,6 +200,8 @@ def build_answers(plan: Plan, result: ComposeResult) -> dict:
             "subnets": topo.describe_subnets(),
             "hosts": topo.describe(),
         },
+        "actors": [{"id": a.id, "type": a.type, "incident": a.incident, "hosts": [h.id for h in a.hosts]}
+                   for a in plan.actors],
         "mitre": [{k: v for k, v in m.items() if k != "when"}
                   for m in doc.get("mitre", []) if evaluate_when(m.get("when"), ctx)],
         "facts": facts,

@@ -163,6 +163,19 @@
                 }
               }
             }
+          },
+          "hunt": {
+            "type": "object",
+            "description": "Instructor hunting content rendered into detections/hunting.md (templated like 'check')",
+            "additionalProperties": false,
+            "properties": {
+              "dataset": {"enum": ["flows", "modbus", "dns", "ntp", "name_resolution", "arp"],
+                          "description": "SIEM export file the SPL/KQL queries search"},
+              "wireshark": {"type": "string", "description": "display filter for questions without a check"},
+              "spl": {"type": "string", "description": "Splunk search over the SIEM export"},
+              "kql": {"type": "string", "description": "Kibana KQL filter over the SIEM export"},
+              "look_for": {"type": "string", "description": "what the analyst should notice"}
+            }
           }
         }
       }
