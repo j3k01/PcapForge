@@ -12,7 +12,7 @@ from pcapforge.compose.packets import (
     Packet,
 )
 from pcapforge.record import parse_marker
-from pcapforge.topology import MARKER_SINK
+from pcapforge.topology import MARKER_SINK, SINKS
 
 if TYPE_CHECKING:
     from pcapforge.plan import Plan
@@ -42,9 +42,10 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> list[Packet]:
     Markers set the current action; a client packet with payload/SYN/FIN binds its flow to
     it and every other packet inherits the flow's action. Packets before the first marker,
     of ``teardown`` actions and (with ``impairments.mid_session``) of ``setup`` actions are
-    dropped.
+    dropped. Datagrams to a sink (multicast group / subnet broadcast) get the sink as peer.
     """
     hosts = {socket.inet_aton(h.loopback): h for h in plan.topology.hosts}
+    sinks = {socket.inet_aton(s.loopback): s for s in SINKS.values()}
     sink = socket.inet_aton(MARKER_SINK)
     actions = {a.id: a for a in plan.actions}
     mid_session = bool(plan.impairments.get("mid_session"))
@@ -78,7 +79,7 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> list[Packet]:
                                        "the recording does not belong to this plan")
                 current = actions[action_id]
             continue
-        src_host, dst_host = hosts.get(src), hosts.get(dst)
+        src_host, dst_host = hosts.get(src), hosts.get(dst) or sinks.get(dst)
         if src_host is None or dst_host is None or current is None:
             continue
 
@@ -91,8 +92,10 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> list[Packet]:
                     flow = live[key] = Flow(TCP, (src_host, dst_host), (here, there))
             elif flow is None:
                 flow = live[key] = _guess_flow(TCP, src_host, dst_host, here, there)
-        elif flow is None or (flow.endpoints[0] == here and flow.action is not current):
-            # Every client datagram of a new action is a new exchange (new client socket).
+        elif flow is None or (flow.endpoints[0] == here and flow.action is not current
+                              and not current.args.get("resend")):
+            # Every client datagram of a new action is a new exchange (new client socket),
+            # unless the action retransmits on the socket of an earlier one.
             flow = live[key] = _guess_flow(UDP, src_host, dst_host, here, there)
 
         side = 0 if flow.endpoints[0] == here else 1

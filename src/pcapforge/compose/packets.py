@@ -10,7 +10,7 @@ from scapy.utils import RawPcapReader
 
 if TYPE_CHECKING:
     from pcapforge.plan import Action
-    from pcapforge.topology import Host
+    from pcapforge.topology import Host, Sink
 
 TCP = 6
 UDP = 17
@@ -77,7 +77,7 @@ class Flow:
     """One transport conversation of the recording (a TCP connection or a UDP exchange)."""
 
     proto: int
-    hosts: tuple[Host, Host]                        # (client, server)
+    hosts: tuple[Host, Host | Sink]                 # (client, server); a sink only receives
     endpoints: tuple[tuple[bytes, int], tuple[bytes, int]]  # recorded (ip, port) of client, server
     isn: list[int | None] = field(default_factory=lambda: [None, None])  # recorded ISNs (TCP)
     sent: list[tuple[int, int] | None] = field(default_factory=lambda: [None, None])  # last (seq, ack)
@@ -111,7 +111,7 @@ class Packet:
         return self.flow.hosts[self.side]
 
     @property
-    def dst(self) -> Host:
+    def dst(self) -> Host | Sink:
         return self.flow.hosts[1 - self.side]
 
     @property

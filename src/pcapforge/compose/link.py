@@ -6,6 +6,8 @@ import socket
 import struct
 from typing import TYPE_CHECKING
 
+from pcapforge.topology import Sink
+
 if TYPE_CHECKING:
     from pcapforge.compose.retime import Network
     from pcapforge.plan import Plan
@@ -42,7 +44,7 @@ class Link:
         self.last_contact: dict[tuple[str, str], float] = {}
         self._views: dict[tuple[str, str], tuple[bytes, int] | None] = {}
 
-    def view(self, src: Host, dst: Host) -> tuple[bytes, int] | None:
+    def view(self, src: Host, dst: Host | Sink) -> tuple[bytes, int] | None:
         """(Ethernet header, routed hops) of src -> dst at the sensor, or None if not seen."""
         key = (src.id, dst.id)
         if key not in self._views:
@@ -57,8 +59,10 @@ class Link:
         """The station on the sensor segment that sends / receives on behalf of ``host``."""
         return host if self.sensor in host.subnets else self.router
 
-    def arp_before(self, t: float, src: Host, dst: Host) -> list[tuple[float, bytes]]:
+    def arp_before(self, t: float, src: Host, dst: Host | Sink) -> list[tuple[float, bytes]]:
         """ARP exchange the L2 sender needs before a frame at ``t`` (empty if cached)."""
+        if isinstance(dst, Sink):
+            return []  # group / broadcast MAC: nothing to resolve
         sender, target = self._neighbour(src), self._neighbour(dst)
         key = (sender.id, target.id) if sender.id < target.id else (target.id, sender.id)
         last = self.last_contact.get(key)

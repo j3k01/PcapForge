@@ -86,12 +86,12 @@ Difficulty levels of `ot-modbus-write-manipulation`:
 
 | | easy | medium | hard |
 |---|---|---|---|
-| length | 15 min, ~14k packets | 45 min, ~116k packets | 2 h, ~414k packets |
+| length | 15 min, ~14k packets | 45 min, ~117k packets | 2 h, ~415k packets |
 | PLCs | 2 | 3 | 4 |
 | writer | unknown Raspberry Pi on the control LAN | laptop on the IT subnet, routed through the firewall (gateway MAC) | the legitimate engineering workstation |
 | discovery | identity read + register enumeration | yes | none |
 | changes | burst of extreme values | spread over 20 min, moderate values | spread over 1 h, values just outside the band, mixed with 6 legitimate operator changes |
-| noise | NTP, ARP | + DNS, retransmissions, capture starts mid-session | + more retransmissions |
+| noise | NTP, ARP | + DNS, Windows chatter (LLMNR, NBNS, mDNS, SSDP, browser announcements), retransmissions, capture starts mid-session | + more retransmissions, twice the Windows chatter |
 
 ## How it works
 
@@ -114,6 +114,7 @@ flowchart LR
    - ISN remap, TTL by OS minus routed hops, IP-ID behaviour per OS
    - TCP options and window per OS, recomputed checksums
    - DNS A records mapped to the final topology
+   - multicast and broadcast discovery traffic gets its group or subnet broadcast address, the matching Ethernet group MAC and the sender OS's TTL, and is seen only from hosts on the sensor segment
    - only packets visible from the SPAN port are kept
    - routed traffic carries the gateway MAC
    - ARP is synthesized
@@ -164,8 +165,9 @@ Built-in actor types:
 - `modbus.writer`
 - `dns.server`, `dns.client`
 - `ntp.server`, `ntp.client`
+- `windows.chatter` (LLMNR, NBNS, mDNS, SSDP, browser host announcements; `params: {rate}`)
 
-Device and OS-stack profiles are in [`profiles/devices.yaml`](src/pcapforge/profiles/devices.yaml). Their OUIs are checked against Wireshark's manufacturer database. Process models are in [`profiles/processes/`](src/pcapforge/profiles/processes/). New actors go in `src/pcapforge/actors/` and implement `plan()`, plus `serve()` for servers or `execute()` for clients.
+Device and OS-stack profiles are in [`profiles/devices.yaml`](src/pcapforge/profiles/devices.yaml). Their OUIs are checked against Wireshark's manufacturer database. Process models are in [`profiles/processes/`](src/pcapforge/profiles/processes/). New actors go in `src/pcapforge/actors/` and implement `plan()`, plus `serve()` for servers or `execute()` for clients. Actors that send one-way multicast or broadcast datagrams list the recording sinks they use in `sinks` (see `topology.SINKS`).
 
 ## Development
 

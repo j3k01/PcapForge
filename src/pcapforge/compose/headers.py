@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from pcapforge import ports
 from pcapforge.compose.packets import ACK, SYN, TCP, UDP, Flow, Packet
+from pcapforge.topology import Sink
 
 if TYPE_CHECKING:
     from pcapforge.plan import Plan
@@ -111,6 +112,16 @@ def rewrite_a_records(payload: bytes, remap) -> bytes:
     return bytes(out) if out is not None else payload
 
 
+# -- NetBIOS datagram service --------------------------------------------------------------
+
+def rewrite_nbdgm_source(payload: bytes, remap) -> bytes:
+    """Replace the header's source IP when ``remap(ip) -> bytes | None`` has a mapping."""
+    if len(payload) < 14:
+        return payload
+    new = remap(payload[4:8])
+    return payload if new is None else payload[:4] + new + payload[8:]
+
+
 # -- per-flow state ---------------------------------------------------------------------
 
 @dataclass(slots=True)
@@ -118,6 +129,8 @@ class _FlowHeaders:
     addrs: tuple[bytes, bytes]       # final IP of client, server (as seen by each other)
     ports: tuple[int, int]           # final client, server port
     stacks: tuple[Stack, Stack]
+    ttl: tuple[int, int]             # IP TTL per side before routed hops
+    df: tuple[bool, bool]
     isn: tuple[int, int]             # final ISN client, server
     ipid: list[int]                  # per-flow IP-ID counters (per_flow stacks)
     ts_base: tuple[int, int]         # TSval clock offset per side
@@ -141,11 +154,15 @@ class Headers:
         self.loopback = {socket.inet_aton(h.loopback): h for h in self.topology.hosts}
         self._addr: dict[tuple[str, str], bytes] = {}
 
-    def address(self, host: Host, peer: Host) -> bytes:
+    def address(self, host: Host | Sink, peer: Host | Sink) -> bytes:
         key = (host.id, peer.id)
         addr = self._addr.get(key)
         if addr is None:
-            addr = self._addr[key] = socket.inet_aton(self.topology.address_towards(host, peer).ip)
+            if isinstance(host, Sink):
+                ip = self.topology.sink_address(host, peer)
+            else:
+                ip = self.topology.address_towards(host, peer).ip
+            addr = self._addr[key] = socket.inet_aton(ip)
         return addr
 
     # -- flow setup -------------------------------------------------------------------
@@ -155,12 +172,22 @@ class Headers:
             return state
         rng = self.rng
         client, server = flow.hosts
-        cstack, sstack = client.device.stack, server.device.stack
+        cstack = client.device.stack
+        if isinstance(server, Sink):
+            # One-way datagram to a group / the broadcast address: the sink never answers.
+            sstack = cstack
+            ttl = cstack.link_local.ttl.get(server.group, cstack.ttl)
+            ttls, dfs = (ttl, ttl), (cstack.link_local.df, cstack.link_local.df)
+        else:
+            sstack = server.device.stack
+            ttls, dfs = (cstack.ttl, sstack.ttl), (cstack.df, sstack.df)
         offered = set(_option_list(cstack, None, False)) if flow.proto == TCP else set()
         state = self.flows[flow] = _FlowHeaders(
             addrs=(self.address(client, server), self.address(server, client)),
             ports=(self._client_port(flow), ports.WELL_KNOWN.get(flow.server_port, flow.server_port)),
             stacks=(cstack, sstack),
+            ttl=ttls,
+            df=dfs,
             isn=(rng.getrandbits(32), rng.getrandbits(32)),
             ipid=[rng.randrange(65536), rng.randrange(65536)],
             ts_base=(rng.getrandbits(32), rng.getrandbits(32)),
@@ -223,7 +250,6 @@ class Headers:
         flow = p.flow
         state = self._flow(flow)
         side = p.side
-        stack = state.stacks[side]
         src, dst = state.addrs[side], state.addrs[1 - side]
         sport, dport = state.ports[side], state.ports[1 - side]
         if flow.proto == TCP:
@@ -232,6 +258,8 @@ class Headers:
             payload = p.payload
             if side == 1 and flow.server_port == ports.DNS:
                 payload = rewrite_a_records(payload, lambda rdata: self._dns_address(rdata, flow))
+            elif side == 0 and flow.server_port == ports.NBDGM:
+                payload = rewrite_nbdgm_source(payload, lambda ip: self._own_address(ip, flow))
             l4 = _UDP.pack(sport, dport, 8 + len(payload), 0) + payload
         pseudo = src + dst + bytes((0, flow.proto)) + len(l4).to_bytes(2, "big")
         csum = checksum(pseudo + l4)
@@ -240,7 +268,8 @@ class Headers:
         offset = 16 if flow.proto == TCP else 6
         l4 = l4[:offset] + csum.to_bytes(2, "big") + l4[offset + 2:]
         header = _IP.pack(0x45, 0, 20 + len(l4), self._ipid(state, side, p.src),
-                          0x4000 if stack.df else 0, max(stack.ttl - hops, 1), flow.proto, 0, src, dst)
+                          0x4000 if state.df[side] else 0, max(state.ttl[side] - hops, 1), flow.proto, 0,
+                          src, dst)
         header = header[:10] + checksum(header).to_bytes(2, "big") + header[12:]
         return header + l4
 
@@ -269,3 +298,8 @@ class Headers:
     def _dns_address(self, rdata: bytes, flow: Flow) -> bytes | None:
         host = self.loopback.get(rdata)
         return None if host is None else self.address(host, flow.hosts[0])
+
+    def _own_address(self, ip: bytes, flow: Flow) -> bytes | None:
+        """Final address of the host whose loopback ``ip`` is, as the flow's server sees it."""
+        host = self.loopback.get(ip)
+        return None if host is None else self.address(host, flow.hosts[1])

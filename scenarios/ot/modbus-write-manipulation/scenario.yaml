@@ -75,6 +75,11 @@ actors:
     hosts: [hmi, historian, ews, plc]
     when: vars.ntp
     params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian, ews]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}"}
   - id: change
     type: modbus.writer
     hosts: "${vars.writer_host}"
@@ -105,6 +110,7 @@ difficulty:
       operator_writes: 0
       dns: false
       ntp: true
+      chatter: false
   medium:
     duration: 45m
     impairments: {retransmit_rate: 0.0005, mid_session: true}
@@ -121,6 +127,8 @@ difficulty:
       operator_writes: 2
       dns: true
       ntp: true
+      chatter: true
+      chatter_rate: 1
   hard:
     duration: 2h
     impairments: {retransmit_rate: 0.001, mid_session: true}
@@ -137,6 +145,8 @@ difficulty:
       operator_writes: 6
       dns: true
       ntp: true
+      chatter: true
+      chatter_rate: 2
 
 questions:
   - id: source_ip

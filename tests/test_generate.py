@@ -4,6 +4,7 @@ Needs Wireshark (tshark + dumpcap) and loopback capture rights; skipped otherwis
 """
 
 import hashlib
+import ipaddress
 import json
 import subprocess
 
@@ -103,6 +104,25 @@ def test_handout_does_not_reveal_an_unknown_source(generated):
     if source["role"] in ("rogue", "itpc"):
         assert source["ip"] not in briefing
         assert source["name"] not in briefing
+
+
+def test_group_and_broadcast_frames_carry_matching_l2_addresses_and_stay_on_the_sensor_segment(generated):
+    result, answers = generated
+    sensor = ipaddress.ip_network(answers["capture"]["sensor_subnet"])
+    broadcasts = ", ".join(str(ipaddress.ip_network(s["cidr"]).broadcast_address)
+                           for s in answers["topology"]["subnets"])
+    display_filter = f"ip && (ip.dst == 224.0.0.0/4 || eth.dst.ig == 1 || ip.dst in {{{broadcasts}}})"
+    rows = tshark_fields(result.pcap, display_filter, ["eth.dst", "ip.src", "ip.dst"])
+    for eth_dst, src, dst in rows:
+        assert ipaddress.ip_address(src) in sensor, f"{src} -> {dst} is not link-local to the sensor"
+        group = ipaddress.ip_address(dst)
+        if group.is_multicast:
+            low = (int(group) & 0x7FFFFF).to_bytes(3, "big")
+            assert eth_dst == "01:00:5e:" + ":".join(f"{b:02x}" for b in low), f"{dst} sent to {eth_dst}"
+        else:
+            assert (dst, eth_dst) == (str(sensor.broadcast_address), "ff:ff:ff:ff:ff:ff")
+    if answers["scenario"]["difficulty"] != "easy":
+        assert rows, "Windows hosts on the sensor segment send link-local chatter"
 
 
 def test_same_seed_is_byte_identical_and_new_seed_changes_presentation(tmp_path):

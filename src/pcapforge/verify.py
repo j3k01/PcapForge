@@ -16,7 +16,7 @@ PREFS = ["-o", "ip.check_checksum:TRUE", "-o", "tcp.check_checksum:TRUE", "-o", 
 PI_SEVERITY_MASK = 0x00F00000
 PI_ERROR = 0x00800000
 CHECKSUM_FIELDS = ["ip.checksum.status", "tcp.checksum.status", "udp.checksum.status"]
-ADDRESS_FIELDS = ["ip.src", "ip.dst", "arp.src.proto_ipv4", "arp.dst.proto_ipv4", "dns.a"]
+ADDRESS_FIELDS = ["ip.src", "ip.dst", "arp.src.proto_ipv4", "arp.dst.proto_ipv4", "dns.a", "nbdgm.src.ip"]
 INTEGRITY_FIELDS = ["frame.number", "frame.protocols", "_ws.malformed", "_ws.expert.severity",
                     *CHECKSUM_FIELDS, *ADDRESS_FIELDS]
 EXAMPLES = 10

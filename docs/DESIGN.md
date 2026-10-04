@@ -78,13 +78,22 @@ Done and committed (verify with `git log --oneline`):
   from the behaviour seed; `assign_addresses(rng)` (IPs/MACs) from the presentation seed
 - `plan.py` — `build_plan(scenario, difficulty, seed, base_seed, duration_override)`,
   `start_epoch` (behaviour level: NTP payloads carry it), `digest()` = recording cache key
-- `actors/` — `modbus.server|poller|operator|writer`, `dns.server|client`, `ntp.server|client`
+- `actors/` — `modbus.server|poller|operator|writer`, `dns.server|client`, `ntp.server|client`,
+  `windows.chatter` (LLMNR, NBNS, mDNS, SSDP M-SEARCH, browser host announcements; timing,
+  ports and payloads checked against a Windows 10 capture)
+- link-local destinations: `topology.SINKS` are loopback stand-ins (`127.77.0.2-5`) for
+  224.0.0.252, 224.0.0.251, 239.255.255.250 and the sender's subnet broadcast; actors
+  declare the `(sink, port)` pairs they use and the recorder binds discard sockets there (no
+  ICMP unreachable). Stack profiles carry `link_local` TTL/DF (Windows: LLMNR 1, SSDP 4,
+  mDNS 255, broadcasts 128, no DF); devices with `browser` announce themselves.
 - `record.py` — `recording_for(plan)` → cached pcap (DLT_NULL on Windows) + `.json` meta.
   Verified: easy plan = 4018 actions, 20 020 packets, 0 drops, 2.9 s wall.
 - `compose/` — `compose(plan, recording, out, seed, fmt)` → `ComposeResult` (spec below).
   Verified with tshark: 0 malformed/checksum/expert errors on easy and medium; ~120k pkt/s.
 
-Status: first scenario complete end-to-end (compose/, answers.py, verify.py, cli.py, tests, README, CI). Next: IT-line scenarios (README roadmap).
+Status: first scenario complete end-to-end (compose/, answers.py, verify.py, cli.py, tests, README, CI),
+with Windows background chatter on medium/hard (`vars.chatter`, `vars.chatter_rate`).
+Next: IT-line scenarios (README roadmap).
 
 ### Composer spec
 Input: recording pcap, plan, presentation rng (`Rng("pcapforge", scenario, difficulty, seed).child("present")`).
@@ -116,7 +125,13 @@ Implementation notes (where `compose/` refines the spec):
 - a delayed pure ACK whose timer would fire after the sender's next segment is not emitted
   (piggybacked); loopback window updates (same seq/ack pure ACK) are dropped since the
   composed windows are constant;
-- UDP: each new action on a 5-tuple is a new exchange (new client socket → new ephemeral port);
+- UDP: each new action on a 5-tuple is a new exchange (new client socket → new ephemeral port),
+  unless the action has `resend: true` (retransmission on the socket of an earlier action:
+  LLMNR / NBNS / SSDP repeats keep their source port);
+- datagrams to a sink: the peer is the `Sink`; final destination is the group or the sender's
+  subnet broadcast, Ethernet dst the group MAC (01:00:5e + low 23 bits) or ff:ff:ff:ff:ff:ff,
+  no ARP, never routed (visible only when the sender is on the sensor subnet), TTL/DF from the
+  stack's `link_local`; the NetBIOS datagram header's source IP is rewritten like DNS A records;
 - RTO comes from the stack profile (`rto: {min_ms, plus_rtt}`);
 - mid-session captures start with warm ARP caches; actions without client payload
   (connect/close) report their SYN/FIN frame.

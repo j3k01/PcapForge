@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 class Actor:
     type: ClassVar[str] = ""
     is_server: ClassVar[bool] = False
+    # (sink name, recording port) pairs the actor sends one-way datagrams to; the recorder
+    # binds discard sockets on them so the OS answers with no ICMP port unreachable.
+    sinks: ClassVar[tuple[tuple[str, int], ...]] = ()
 
     def __init__(self, id: str, hosts: list[Host], params: dict[str, Any], incident: bool,
                  plan: Plan, rng: Rng) -> None:

@@ -25,6 +25,14 @@ class Rto:
 
 
 @dataclass(frozen=True)
+class LinkLocal:
+    """IP header of datagrams to link-local multicast groups and the subnet broadcast."""
+
+    df: bool
+    ttl: dict[str, int]  # per multicast group; other destinations use the stack's ttl
+
+
+@dataclass(frozen=True)
 class Stack:
     name: str
     ttl: int
@@ -40,6 +48,15 @@ class Stack:
     port_allocation: str  # "sequential" | "random"
     delayed_ack: DelayedAck
     rto: Rto
+    link_local: LinkLocal
+
+
+@dataclass(frozen=True)
+class Browser:
+    """Fields of the host's Computer Browser announcements (NetBIOS datagram service)."""
+
+    os_version: tuple[int, int]  # (major, minor) as announced
+    server_type: int             # SV_TYPE_* bit mask
 
 
 @dataclass(frozen=True)
@@ -57,6 +74,7 @@ class Device:
     processing_ms: Latency
     forwarding_ms: Latency | None = None
     identity: dict[str, str] = field(default_factory=dict)
+    browser: Browser | None = None  # None: the device sends no browser announcements
 
 
 @cache
@@ -82,6 +100,8 @@ def stack(name: str) -> Stack:
         port_allocation=raw["port_allocation"],
         delayed_ack=DelayedAck(**raw["delayed_ack"]),
         rto=Rto(**raw["rto"]),
+        link_local=LinkLocal(df=raw.get("link_local", {}).get("df", raw["df"]),
+                             ttl=dict(raw.get("link_local", {}).get("ttl", {}))),
     )
 
 
@@ -99,6 +119,8 @@ def device(name: str) -> Device:
         processing_ms=Latency(**raw["processing_ms"]),
         forwarding_ms=Latency(**raw["forwarding_ms"]) if "forwarding_ms" in raw else None,
         identity=dict(raw.get("identity", {})),
+        browser=Browser(tuple(raw["browser"]["os_version"]), raw["browser"]["server_type"])
+        if "browser" in raw else None,
     )
 
 

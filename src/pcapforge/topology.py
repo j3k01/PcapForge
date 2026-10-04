@@ -19,6 +19,39 @@ from pcapforge.scenario import ScenarioError, evaluate_when, resolve
 
 LOOPBACK_NET = "127.77"
 MARKER_SINK = f"{LOOPBACK_NET}.0.1"
+BROADCAST_MAC = "ff:ff:ff:ff:ff:ff"
+
+
+@dataclass(frozen=True)
+class Sink:
+    """Recording stand-in for a link-local multicast group or the subnet broadcast address.
+
+    Hosts send one-way datagrams to the sink's loopback address; the composer delivers them
+    to ``group`` (or, when ``group`` is None, to the directed broadcast of the sender's
+    subnet) with the matching Ethernet group address. Routers do not forward them.
+    """
+
+    name: str
+    loopback: str
+    group: str | None
+
+    @property
+    def id(self) -> str:
+        return f"sink:{self.name}"
+
+
+SINKS = {s.name: s for s in (
+    Sink("llmnr", f"{LOOPBACK_NET}.0.2", "224.0.0.252"),
+    Sink("mdns", f"{LOOPBACK_NET}.0.3", "224.0.0.251"),
+    Sink("ssdp", f"{LOOPBACK_NET}.0.4", "239.255.255.250"),
+    Sink("broadcast", f"{LOOPBACK_NET}.0.5", None),
+)}
+
+
+def group_mac(ip: str) -> str:
+    """Ethernet destination of an IPv4 multicast group (RFC 1112: 01:00:5e + low 23 bits)."""
+    low = int(ipaddress.IPv4Address(ip)) & 0x7FFFFF
+    return "01:00:5e:" + ":".join(f"{b:02x}" for b in low.to_bytes(3, "big"))
 
 
 @dataclass
@@ -190,12 +223,24 @@ class Topology:
                 return sid
         return None
 
-    def address_towards(self, host: Host, peer: Host) -> Interface:
+    def address_towards(self, host: Host, peer: Host | Sink) -> Interface:
+        if isinstance(peer, Sink):
+            # Link-local datagrams leave on the segment we look at, if the host is on it.
+            return host.interface_on(self.sensor) or host.interfaces[0]
         shared = self.common_subnet(host, peer)
         return host.interface_on(shared) if shared else host.interfaces[0]
 
-    def visible(self, src: Host, dst: Host) -> bool:
+    def sink_address(self, sink: Sink, sender: Host) -> str:
+        """Final destination IP of a datagram ``sender`` sends to ``sink``."""
+        if sink.group is not None:
+            return sink.group
+        subnet = self.address_towards(sender, sink).subnet
+        return str(self.subnets[subnet].network.broadcast_address)
+
+    def visible(self, src: Host, dst: Host | Sink) -> bool:
         """Is a packet src->dst seen on the sensor subnet's SPAN port?"""
+        if isinstance(dst, Sink):
+            return self.sensor in src.subnets  # link-local: never routed
         if self.sensor in src.subnets and not src.router:
             return True
         if self.sensor in dst.subnets and not dst.router:
@@ -208,8 +253,11 @@ class Topology:
     def common_subnet_ids(self, a: Host, b: Host) -> list[str]:
         return [s for s in a.subnets if s in b.subnets]
 
-    def l2_view(self, src: Host, dst: Host) -> tuple[str, str, int]:
+    def l2_view(self, src: Host, dst: Host | Sink) -> tuple[str, str, int]:
         """(src MAC, dst MAC, routed hops before the sensor) as observed at the sensor."""
+        if isinstance(dst, Sink):
+            dst_mac = BROADCAST_MAC if dst.group is None else group_mac(dst.group)
+            return src.interface_on(self.sensor).mac, dst_mac, 0
         router = self.subnets[self.sensor].router
         sensor_side_src = self.sensor in src.subnets
         sensor_side_dst = self.sensor in dst.subnets

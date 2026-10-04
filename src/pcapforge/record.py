@@ -25,7 +25,7 @@ from typing import Callable
 from pcapforge import ports
 from pcapforge.plan import Plan
 from pcapforge.tools import find_tool, require_tool
-from pcapforge.topology import LOOPBACK_NET, MARKER_SINK
+from pcapforge.topology import LOOPBACK_NET, MARKER_SINK, SINKS
 
 MARKER_MAGIC = b"PFMK"
 CAPTURE_FILTER = f"net {LOOPBACK_NET}.0.0/16"
@@ -138,6 +138,10 @@ def _start_services(rt: Runtime) -> tuple[asyncio.AbstractEventLoop, threading.T
     thread.start()
 
     async def boot() -> None:
+        for name, port in sorted({pair for actor in rt.plan.actors for pair in actor.sinks}):
+            transport, _ = await loop.create_datagram_endpoint(
+                asyncio.DatagramProtocol, local_addr=(SINKS[name].loopback, port))
+            rt.transports.append(transport)
         for actor in rt.plan.actors:
             if actor.is_server:
                 await actor.serve(rt)
