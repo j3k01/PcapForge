@@ -34,6 +34,8 @@ UI = {
             "#   pcapforge grade answers.json jane-doe.yaml",
         ],
         "tmpl_answer": "answer",
+        "tmpl_hint": "Hint (using it costs {cost} points):",
+        "tmpl_hints_used": ["# Honour system: list the ids of every question whose hint you read, e.g. [source_ip]."],
         "formats": {
             "ip": "an IP address",
             "mac": "a MAC address",
@@ -64,6 +66,8 @@ UI = {
             "#   pcapforge grade answers.json jan-kowalski.yaml",
         ],
         "tmpl_answer": "odpowiedź",
+        "tmpl_hint": "Podpowiedź (skorzystanie kosztuje {cost} pkt):",
+        "tmpl_hints_used": ["# Uczciwie: wpisz identyfikatory pytań, których podpowiedzi przeczytałeś, np. [source_ip]."],
         "formats": {
             "ip": "adres IP",
             "mac": "adres MAC",

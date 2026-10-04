@@ -270,17 +270,29 @@ def _verdict(fraction: float, given: Any) -> str:
     return "partial" if fraction > 0 else "wrong"
 
 
+HINTS_KEY = "hints_used"
+
+
+def hint_cost(question: dict) -> int:
+    """Points deducted when the student used the question's hint (same rule as the CTFd export)."""
+    return math.ceil(question["points"] * 0.2) if question.get("hint") else 0
+
+
 def grade_submission(answers: dict, sub: Submission) -> dict:
     known = {q["id"] for q in answers["questions"]}
+    used = sub.answers.get(HINTS_KEY) or []
+    used = {str(u).strip() for u in (used if isinstance(used, list) else [used])}
     results = []
     for question in answers["questions"]:
         given = sub.answers.get(question["id"])
         fraction = score_fraction(question, given)
+        penalty = hint_cost(question) if question["id"] in used else 0
         results.append({
             "id": question["id"],
             "type": question.get("type", "text"),
             "points": question["points"],
-            "score": round(fraction * question["points"], 2),
+            "score": max(0.0, round(fraction * question["points"] - penalty, 2)),
+            "hint_penalty": penalty,
             "result": _verdict(fraction, given),
             "given": given,
             "expected": question["answer"],
@@ -294,7 +306,8 @@ def grade_submission(answers: dict, sub: Submission) -> dict:
         "max": total,
         "percent": round(100 * score / total, 1) if total else 0.0,
         "questions": results,
-        "unknown_questions": sorted(set(sub.answers) - known),
+        "unknown_questions": sorted(set(sub.answers) - known - {HINTS_KEY}),
+        "unknown_hints": sorted(used - {q["id"] for q in answers["questions"] if q.get("hint")}),
     }
 
 
@@ -339,6 +352,11 @@ def format_report(report: dict) -> str:
                         for q in student["questions"]])
         if student["unknown_questions"]:
             lines.append("unknown question ids (not scored): " + ", ".join(student["unknown_questions"]))
+        penalties = [f"{q['id']} -{q['hint_penalty']}" for q in student["questions"] if q["hint_penalty"]]
+        if penalties:
+            lines.append("hint penalties: " + ", ".join(penalties))
+        if student["unknown_hints"]:
+            lines.append("hints_used ids without a hint (ignored): " + ", ".join(student["unknown_hints"]))
         lines.append("")
     if len(report["students"]) > 1:
         ids = [q["id"] for q in report["students"][0]["questions"]]
@@ -372,7 +390,10 @@ def submission_template(answers: dict) -> str:
         hint = t["formats"].get(question.get("type", "text"))
         lines.append(f"#    ({question['points']} {t['points']}"
                      + (f"; {t['tmpl_answer']}: {hint})" if hint else ")"))
+        if question.get("hint"):
+            lines.append("#    " + t["tmpl_hint"].format(cost=hint_cost(question)) + " " + str(question["hint"]).strip())
         lines += [f"{question['id']}:", ""]
+    lines += [*t["tmpl_hints_used"], f"{HINTS_KEY}: []", ""]
     return "\n".join(lines)
 
 

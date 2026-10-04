@@ -178,7 +178,22 @@ def test_student_package_holds_no_answer_material(run_dir, tmp_path):
         template = yaml.safe_load(zf.read("demo_easy_42/submission_template.yaml"))
     for secret in (b"10.241.35.164", b"b8:27:eb:23:26:6d", b"11:45:36", b"pid_level_ti", b"T0836", b"1587"):
         assert secret not in content
-    assert template == {q["id"]: None for q in ANSWERS["questions"]}
+    assert template == {**{q["id"]: None for q in ANSWERS["questions"]}, "hints_used": []}
     with zipfile.ZipFile(instructor) as zf:
         assert {"demo_easy_42/answers.json", "demo_easy_42/siem/modbus.jsonl",
                 "demo_easy_42/detections/hunting.md", "demo_easy_42/submission_template.yaml"} <= set(zf.namelist())
+
+
+def test_used_hints_cost_points_and_never_go_below_zero():
+    from pcapforge.grade import Submission, grade_submission
+
+    answers = {"questions": [
+        {"id": "a", "type": "ip", "answer": "10.0.0.1", "points": 10, "hint": "look at writes"},
+        {"id": "b", "type": "ip", "answer": "10.0.0.2", "points": 10, "hint": "ntp"},
+        {"id": "c", "type": "ip", "answer": "10.0.0.3", "points": 10},
+    ]}
+    sub = Submission("s", "s.yaml", {"a": "10.0.0.1", "b": "1.1.1.1", "c": "10.0.0.3", "hints_used": ["a", "b", "c"]})
+    result = grade_submission(answers, sub)
+    scores = {q["id"]: q["score"] for q in result["questions"]}
+    assert scores == {"a": 8, "b": 0, "c": 10}
+    assert result["unknown_hints"] == ["c"] and result["unknown_questions"] == []
