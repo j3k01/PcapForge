@@ -99,3 +99,19 @@ def test_threshold_direction_matches_the_alarm_it_defeats(scenario):
                 assert write["direction"] == "above" and write["value"] > hi, write
             seen.add(write["direction"])
     assert seen == {"above", "below"}
+
+
+def test_polish_translation_covers_every_question_and_keeps_answers(scenario):
+    from pcapforge.grade import submission_template
+    from pcapforge.i18n import localize_answers
+
+    pl = scenario.doc["translations"]["pl"]["questions"]
+    ids = [q["id"] for q in scenario.doc["questions"]]
+    assert set(pl) == set(ids)
+    answers = {"scenario": {"title": scenario.title, "id": scenario.id},
+               "questions": [{"id": q, "text": "x", "answer": f"a-{q}", "points": 1, "type": "ip"} for q in ids]}
+    localized = localize_answers(answers, scenario.doc, "pl", {"vars": {}, "facts": {}})
+    assert [q["answer"] for q in localized["questions"]] == [q["answer"] for q in answers["questions"]]
+    assert localized["questions"][0]["text"] == pl[ids[0]]["text"]
+    template = submission_template(localized)
+    assert "adres IP" in template and "jan-kowalski.yaml" in template

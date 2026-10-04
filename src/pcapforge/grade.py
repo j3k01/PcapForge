@@ -353,33 +353,25 @@ def format_report(report: dict) -> str:
 
 # --- template ----------------------------------------------------------------------
 
-_FORMAT_HINTS = {
-    "ip": "an IP address",
-    "mac": "a MAC address",
-    "number": "a number",
-    "timestamp": "a UTC time, ISO 8601: YYYY-MM-DDTHH:MM:SS.ffffffZ",
-    "set": "a list: [a, b, c]",
-    "map": "a map: {name: value, name: value}",
-}
-
-
 def submission_template(answers: dict) -> str:
     """Blank submission: every question id with an empty answer, the question text as comments."""
+    from pcapforge.i18n import ui
+
+    t = ui(answers.get("lang", "en"))
     scenario = answers.get("scenario", {})
     lines = [
-        f"# pcapforge submission: {scenario.get('title', '')}".rstrip(),
+        t["tmpl_title"].format(title=scenario.get("title", "")).rstrip(),
         f"# {scenario.get('id', '')} ({scenario.get('difficulty', '')}, seed {scenario.get('seed', '')})",
-        "# Write each answer after its colon; quote answers that contain ': ' or start with '[' or '{'.",
-        "# Save under your name (e.g. jane-doe.yaml); your instructor grades it with",
-        "#   pcapforge grade answers.json jane-doe.yaml",
+        *t["tmpl_howto"],
         "",
     ]
     for index, question in enumerate(answers["questions"], 1):
         text_lines = str(question["text"]).strip().splitlines() or [""]
         lines.append(f"# {index}. {text_lines[0]}")
         lines += [f"#    {line}" for line in text_lines[1:]]
-        hint = _FORMAT_HINTS.get(question.get("type", "text"))
-        lines.append(f"#    ({question['points']} points" + (f"; answer: {hint})" if hint else ")"))
+        hint = t["formats"].get(question.get("type", "text"))
+        lines.append(f"#    ({question['points']} {t['points']}"
+                     + (f"; {t['tmpl_answer']}: {hint})" if hint else ")"))
         lines += [f"{question['id']}:", ""]
     return "\n".join(lines)
 

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from pcapforge import __version__
 from pcapforge.plan import Action, Plan
 from pcapforge.process import ProcessProfile
+from pcapforge.i18n import scenario_text, ui
 from pcapforge.scenario import ScenarioError, evaluate_when, lookup, resolve
 from pcapforge.topology import Host
 
@@ -229,11 +230,14 @@ def _number(value: float) -> str:
 
 def write_handout(plan: Plan, answers: dict, out_dir: Path) -> Path:
     """Student-facing ``briefing.md``: briefing, asset inventory, register maps, questions."""
+    lang = answers.get("lang", "en")
+    t = ui(lang)
+    texts = scenario_text(plan.scenario.doc, lang)
     topo = plan.topology
     subnet = answers["capture"]["sensor_subnet"]
-    lines = [f"# {plan.scenario.title}", ""]
+    lines = [f"# {answers['scenario']['title']}", ""]
 
-    briefing = plan.scenario.doc.get("briefing") or plan.scenario.doc.get("summary", "")
+    briefing = texts.get("briefing") or plan.scenario.doc.get("briefing") or plan.scenario.doc.get("summary", "")
     process = plan.vars.get("process")
     title = ProcessProfile(process).title if isinstance(process, str) else ""
     process_title = title[:1].lower() + title[1:]
@@ -243,20 +247,19 @@ def write_handout(plan: Plan, answers: dict, out_dir: Path) -> Path:
     lines += [briefing.strip(), ""]
 
     capture = answers["capture"]
-    lines += [f"Capture: `{capture['file']}` ({capture['packets']} packets, "
-              f"SHA-256 `{capture['sha256']}`).", ""]
+    lines += [t["capture"].format(file=capture["file"], packets=capture["packets"], sha256=capture["sha256"]), ""]
 
     used = {h.id for a in plan.actors if not a.incident for h in a.hosts}
-    lines += ["## Asset inventory", ""]
+    lines += [f"## {t['asset_inventory']}", ""]
     rows = []
     for host in topo.hosts:
         if host.id in used or host.router:
             rows.append([host.name, host.group, ", ".join(i.ip for i in host.interfaces), host.device.vendor])
-    lines += _table(["Name", "Role", "IP", "Vendor"], rows) + [""]
+    lines += _table(t["inventory_cols"], rows) + [""]
 
-    lines += ["## Network", ""]
-    lines += _table(["Subnet", "CIDR", "Gateway", "Capture point"],
-                    [[s["id"], s["cidr"], s["gateway"] or "-", "yes" if s["sensor"] else ""]
+    lines += [f"## {t['network']}", ""]
+    lines += _table(t["network_cols"],
+                    [[s["id"], s["cidr"], s["gateway"] or "-", t["yes"] if s["sensor"] else ""]
                      for s in answers["topology"]["subnets"]]) + [""]
 
     profiles: dict[str, tuple[ProcessProfile, list[str]]] = {}
@@ -267,20 +270,19 @@ def write_handout(plan: Plan, answers: dict, out_dir: Path) -> Path:
         profile, hosts = profiles.setdefault(name, (ProcessProfile(name), []))
         hosts.extend(h.name for h in actor.hosts)
     for profile, hosts in profiles.values():
-        lines += [f"## Register map: {profile.title}", "",
-                  f"Modbus unit id {profile.unit_id}; served by {', '.join(hosts)}. "
-                  "Addresses are 0-based; engineering value = raw register value / scale.", ""]
+        lines += [f"## {t['register_map'].format(title=profile.title)}", "",
+                  t["regmap_note"].format(unit=profile.unit_id, hosts=", ".join(hosts)), ""]
         rows = []
         for table in ("coils", "discrete", "holding", "input"):
             for point in profile.table(table):
                 band = f"{_number(point.normal[0])} – {_number(point.normal[1])}" if point.normal else "-"
                 rows.append([table, point.address, point.name, point.unit or "-", _number(point.scale),
-                             band, "yes" if point.writable else "no"])
-        lines += _table(["Table", "Address", "Name", "Unit", "Scale", "Normal band", "Writable"], rows) + [""]
+                             band, t["yes"] if point.writable else t["no"]])
+        lines += _table(t["regmap_cols"], rows) + [""]
 
-    lines += ["## Questions", ""]
+    lines += [f"## {t['questions']}", ""]
     for index, question in enumerate(answers["questions"], 1):
-        lines.append(f"{index}. **[{question['id']}]** {question['text']} *({question['points']} points)*")
+        lines.append(f"{index}. **[{question['id']}]** {question['text']} *({question['points']} {t['points']})*")
     lines.append("")
 
     out_dir.mkdir(parents=True, exist_ok=True)

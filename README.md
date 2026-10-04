@@ -53,7 +53,10 @@ A class of 25 students, each with a unique variant, or one variant per login:
 ```console
 $ pcapforge generate -s ot-modbus-write-manipulation -d hard --seed course-2026 --count 25
 $ pcapforge generate -s ot-modbus-write-manipulation -d medium --seeds-file students.txt
+$ pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42 --lang pl   # Polish handout, questions and template
 ```
+
+`--lang pl` translates the student-facing prose: `briefing.md`, the question texts in `answers.json` and `submission_template.yaml`. Answers, filters and register names stay unchanged. Scenarios provide translations under `translations: {pl: {title, briefing, questions}}`. Process-profile titles and register names are not translated.
 
 Other commands:
 - `pcapforge show <scenario>` describes the techniques, difficulty knobs and questions.

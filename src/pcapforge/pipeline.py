@@ -13,6 +13,7 @@ from pcapforge.compose import compose
 from pcapforge.detections import write_detections
 from pcapforge.export import export_siem
 from pcapforge.grade import write_submission_template
+from pcapforge.i18n import localize_answers
 from pcapforge.plan import build_plan
 from pcapforge.record import recording_for
 from pcapforge.scenario import Scenario
@@ -54,6 +55,7 @@ def export_run(directory: Path) -> dict[str, Path]:
 def generate(scenario: Scenario, difficulty: str, seed: str, out_root: Path, *,
              base_seed: str | None = None, fmt: str = "pcap", use_cache: bool = True,
              duration: float | None = None, verify: bool = True, siem: bool = False,
+             lang: str = "en",
              progress: Callable[[str], None] = lambda _msg: None) -> Generated:
     if verify:
         require_answer_key_tshark()  # before spending time on recording and composing
@@ -73,6 +75,7 @@ def generate(scenario: Scenario, difficulty: str, seed: str, out_root: Path, *,
     progress(f"composed {result.packets} packets")
 
     answers = build_answers(plan, result)
+    answers = localize_answers(answers, scenario.doc, lang, {"vars": plan.vars, "facts": answers["facts"]})
     answers_path = directory / "answers.json"
     answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     handout = write_handout(plan, answers, directory)

@@ -359,3 +359,39 @@ questions:
       spl: "index=* sourcetype=pcapforge:modbus write=true | stats count BY src, in_normal_band"
       kql: "write : true and in_normal_band : true"
       look_for: Legitimate operator changes come from the workstation and stay inside the normal band (`in_normal_band=true`).
+
+translations:
+  pl:
+    title: Nieautoryzowane zmiany nastaw PLC przez Modbus/TCP
+    briefing: |
+      Jesteś analitykiem OT SOC w zakładzie {site_name} ({domain}), {process_title}.
+      Służby utrzymania ruchu zgłosiły nietypowe zachowanie procesu w trakcie zmiany. Załączone
+      nagranie pochodzi z portu SPAN przełącznika sieci sterowania ({sensor_subnet}).
+      W normalnej pracy z PLC przez Modbus/TCP komunikują się tylko HMI SCADA, serwer SCADA
+      (jeśli zakład go ma) i historian, a nastawy może zmieniać wyłącznie stacja inżynierska.
+      Mapa rejestrów PLC znajduje się poniżej.
+    questions:
+      source_ip:
+        text: Z jakiego adresu IP wysłano nieautoryzowane żądania zapisu Modbus?
+        hint: Zacznij od kodów funkcji Modbus 5, 6, 15 i 16 i porównaj nadawców z oczekiwanymi rolami.
+      source_mac:
+        text: Jaki adres MAC widział sensor w ramkach niosących te żądania zapisu?
+        hint: Ruch routowany dociera z adresem MAC ostatniego przeskoku, a nie hosta źródłowego.
+      target_ip:
+        text: Który PLC (adres IP) otrzymał nieautoryzowane zapisy?
+      first_write:
+        text: O której godzinie (UTC) wysłano pierwsze nieautoryzowane żądanie zapisu?
+      points_changed:
+        text: Które punkty PLC (nazwy z mapy rejestrów) zostały zmienione? Wymień je.
+      values_written:
+        text: Dla każdego zmienionego punktu podaj zapisaną wartość inżynierską.
+      functions_used:
+        text: Jakich kodów funkcji Modbus użył zapisujący?
+      discovery:
+        text: Czy przed zapisem źródło odpytało PLC o identyfikację? Jeśli tak, jakiego producenta/produkt zgłosił PLC?
+      impact:
+        text: Na które mierzone wartości procesowe wpływają zmienione nastawy?
+      technique:
+        text: Która technika MITRE ATT&CK for ICS najlepiej opisuje zmiany nastaw?
+      legit_vs_unauthorized:
+        text: Stacja inżynierska zmieniała też nastawy legalnie. Ile żądań zapisu w nagraniu było legalnymi zmianami operatora?

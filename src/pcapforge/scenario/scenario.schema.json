@@ -3,31 +3,92 @@
   "$id": "https://github.com/pcapforge/pcapforge/scenario.schema.json",
   "title": "pcapforge scenario",
   "type": "object",
-  "required": ["schema", "id", "title", "line", "summary", "mitre", "topology", "actors", "difficulty", "questions"],
+  "required": [
+    "schema",
+    "id",
+    "title",
+    "line",
+    "summary",
+    "mitre",
+    "topology",
+    "actors",
+    "difficulty",
+    "questions"
+  ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"const": "pcapforge/scenario@1"},
-    "id": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
-    "title": {"type": "string", "minLength": 5},
-    "line": {"enum": ["it", "ot"]},
-    "version": {"type": "integer", "minimum": 1},
-    "license": {"type": "string"},
-    "authors": {"type": "array", "items": {"type": "string"}},
-    "tags": {"type": "array", "items": {"type": "string"}},
-    "summary": {"type": "string"},
-    "briefing": {"type": "string", "description": "Student-facing text. Placeholders: {site_name} {domain} {sensor_subnet}"},
+    "schema": {
+      "const": "pcapforge/scenario@1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 5
+    },
+    "line": {
+      "enum": [
+        "it",
+        "ot"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "license": {
+      "type": "string"
+    },
+    "authors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "summary": {
+      "type": "string"
+    },
+    "briefing": {
+      "type": "string",
+      "description": "Student-facing text. Placeholders: {site_name} {domain} {sensor_subnet}"
+    },
     "mitre": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["framework", "id", "name"],
+        "required": [
+          "framework",
+          "id",
+          "name"
+        ],
         "additionalProperties": false,
         "properties": {
-          "framework": {"enum": ["enterprise", "ics", "mobile"]},
-          "id": {"type": "string", "pattern": "^T[0-9]{4}(\\.[0-9]{3})?$"},
-          "name": {"type": "string"},
-          "when": {"$ref": "#/$defs/condition"}
+          "framework": {
+            "enum": [
+              "enterprise",
+              "ics",
+              "mobile"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^T[0-9]{4}(\\.[0-9]{3})?$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "when": {
+            "$ref": "#/$defs/condition"
+          }
         }
       }
     },
@@ -35,34 +96,104 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "names": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-        "codes": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9]{2,6}$"}, "minItems": 1},
-        "domain": {"type": "string"},
-        "start_hours": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 23}, "minItems": 2, "maxItems": 2},
-        "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 6}, "minItems": 1},
-        "year_range": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]{2,6}$"
+          },
+          "minItems": 1
+        },
+        "domain": {
+          "type": "string"
+        },
+        "start_hours": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "weekdays": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 6
+          },
+          "minItems": 1
+        },
+        "year_range": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        }
       }
     },
     "topology": {
       "type": "object",
-      "required": ["sensor", "subnets", "hosts"],
+      "required": [
+        "sensor",
+        "subnets",
+        "hosts"
+      ],
       "additionalProperties": false,
       "properties": {
-        "sensor": {"type": "string", "description": "Subnet whose switch SPAN port is captured"},
+        "sensor": {
+          "type": "string",
+          "description": "Subnet whose switch SPAN port is captured"
+        },
         "subnets": {
           "type": "array",
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["id"],
+            "required": [
+              "id"
+            ],
             "additionalProperties": false,
             "properties": {
-              "id": {"$ref": "#/$defs/ident"},
-              "cidr": {"type": "string"},
-              "pool": {"type": "string"},
-              "prefix": {"type": "integer", "minimum": 8, "maximum": 30}
+              "id": {
+                "$ref": "#/$defs/ident"
+              },
+              "cidr": {
+                "type": "string"
+              },
+              "pool": {
+                "type": "string"
+              },
+              "prefix": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 30
+              }
             },
-            "oneOf": [{"required": ["cidr"]}, {"required": ["pool", "prefix"]}]
+            "oneOf": [
+              {
+                "required": [
+                  "cidr"
+                ]
+              },
+              {
+                "required": [
+                  "pool",
+                  "prefix"
+                ]
+              }
+            ]
           }
         },
         "hosts": {
@@ -70,19 +201,73 @@
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["id", "device"],
+            "required": [
+              "id",
+              "device"
+            ],
             "additionalProperties": false,
             "properties": {
-              "id": {"$ref": "#/$defs/ident"},
-              "device": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "minItems": 1}]},
-              "subnet": {"type": "string"},
-              "subnets": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-              "name": {"type": "string", "description": "Hostname template: {code} {CODE} {index}"},
-              "count": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}]},
-              "router": {"type": "boolean"},
-              "when": {"$ref": "#/$defs/condition"}
+              "id": {
+                "$ref": "#/$defs/ident"
+              },
+              "device": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  }
+                ]
+              },
+              "subnet": {
+                "type": "string"
+              },
+              "subnets": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              },
+              "name": {
+                "type": "string",
+                "description": "Hostname template: {code} {CODE} {index}"
+              },
+              "count": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              },
+              "router": {
+                "type": "boolean"
+              },
+              "when": {
+                "$ref": "#/$defs/condition"
+              }
             },
-            "oneOf": [{"required": ["subnet"]}, {"required": ["subnets"]}]
+            "oneOf": [
+              {
+                "required": [
+                  "subnet"
+                ]
+              },
+              {
+                "required": [
+                  "subnets"
+                ]
+              }
+            ]
           }
         }
       }
@@ -92,15 +277,44 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "type", "hosts"],
+        "required": [
+          "id",
+          "type",
+          "hosts"
+        ],
         "additionalProperties": false,
         "properties": {
-          "id": {"$ref": "#/$defs/ident"},
-          "type": {"type": "string", "pattern": "^[a-z0-9_]+\\.[a-z0-9_]+$"},
-          "hosts": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "minItems": 1}]},
-          "incident": {"type": "boolean", "description": "Events of this actor form the answer-key timeline"},
-          "when": {"$ref": "#/$defs/condition"},
-          "params": {"type": "object"}
+          "id": {
+            "$ref": "#/$defs/ident"
+          },
+          "type": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]+\\.[a-z0-9_]+$"
+          },
+          "hosts": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              }
+            ]
+          },
+          "incident": {
+            "type": "boolean",
+            "description": "Events of this actor form the answer-key timeline"
+          },
+          "when": {
+            "$ref": "#/$defs/condition"
+          },
+          "params": {
+            "type": "object"
+          }
         }
       }
     },
@@ -111,19 +325,31 @@
       "patternProperties": {
         "^(easy|medium|hard)$": {
           "type": "object",
-          "required": ["duration"],
+          "required": [
+            "duration"
+          ],
           "additionalProperties": false,
           "properties": {
-            "duration": {"$ref": "#/$defs/duration"},
+            "duration": {
+              "$ref": "#/$defs/duration"
+            },
             "impairments": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "retransmit_rate": {"type": "number", "minimum": 0, "maximum": 0.05},
-                "mid_session": {"type": "boolean"}
+                "retransmit_rate": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 0.05
+                },
+                "mid_session": {
+                  "type": "boolean"
+                }
               }
             },
-            "vars": {"type": "object"}
+            "vars": {
+              "type": "object"
+            }
           }
         }
       }
@@ -133,33 +359,98 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "text", "answer"],
+        "required": [
+          "id",
+          "text",
+          "answer"
+        ],
         "additionalProperties": false,
         "properties": {
-          "id": {"$ref": "#/$defs/ident"},
-          "text": {"type": "string"},
+          "id": {
+            "$ref": "#/$defs/ident"
+          },
+          "text": {
+            "type": "string"
+          },
           "answer": {},
-          "accept": {"type": "array"},
-          "type": {"enum": ["text", "ip", "mac", "number", "timestamp", "set", "map"]},
-          "tolerance_s": {"type": "number", "minimum": 0},
-          "points": {"type": "integer", "minimum": 0},
-          "hint": {"type": "string"},
-          "when": {"$ref": "#/$defs/condition"},
-          "foreach": {"type": "string"},
+          "accept": {
+            "type": "array"
+          },
+          "type": {
+            "enum": [
+              "text",
+              "ip",
+              "mac",
+              "number",
+              "timestamp",
+              "set",
+              "map"
+            ]
+          },
+          "tolerance_s": {
+            "type": "number",
+            "minimum": 0
+          },
+          "points": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "hint": {
+            "type": "string"
+          },
+          "when": {
+            "$ref": "#/$defs/condition"
+          },
+          "foreach": {
+            "type": "string"
+          },
           "check": {
             "type": "object",
-            "required": ["filter", "expect"],
+            "required": [
+              "filter",
+              "expect"
+            ],
             "additionalProperties": false,
             "properties": {
-              "filter": {"type": "string", "description": "Wireshark display filter"},
+              "filter": {
+                "type": "string",
+                "description": "Wireshark display filter"
+              },
               "expect": {
                 "type": "object",
                 "additionalProperties": false,
                 "minProperties": 1,
                 "properties": {
-                  "count": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
-                  "min": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
-                  "max": {"oneOf": [{"type": "integer"}, {"type": "string"}]}
+                  "count": {
+                    "oneOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "min": {
+                    "oneOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "max": {
+                    "oneOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -169,12 +460,64 @@
             "description": "Instructor hunting content rendered into detections/hunting.md (templated like 'check')",
             "additionalProperties": false,
             "properties": {
-              "dataset": {"enum": ["flows", "modbus", "dns", "ntp", "name_resolution", "arp"],
-                          "description": "SIEM export file the SPL/KQL queries search"},
-              "wireshark": {"type": "string", "description": "display filter for questions without a check"},
-              "spl": {"type": "string", "description": "Splunk search over the SIEM export"},
-              "kql": {"type": "string", "description": "Kibana KQL filter over the SIEM export"},
-              "look_for": {"type": "string", "description": "what the analyst should notice"}
+              "dataset": {
+                "enum": [
+                  "flows",
+                  "modbus",
+                  "dns",
+                  "ntp",
+                  "name_resolution",
+                  "arp"
+                ],
+                "description": "SIEM export file the SPL/KQL queries search"
+              },
+              "wireshark": {
+                "type": "string",
+                "description": "display filter for questions without a check"
+              },
+              "spl": {
+                "type": "string",
+                "description": "Splunk search over the SIEM export"
+              },
+              "kql": {
+                "type": "string",
+                "description": "Kibana KQL filter over the SIEM export"
+              },
+              "look_for": {
+                "type": "string",
+                "description": "what the analyst should notice"
+              }
+            }
+          }
+        }
+      }
+    },
+    "translations": {
+      "type": "object",
+      "description": "Student-facing prose per language code (e.g. pl)",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "briefing": {
+            "type": "string"
+          },
+          "questions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "hint": {
+                  "type": "string"
+                }
+              }
             }
           }
         }
@@ -182,8 +525,31 @@
     }
   },
   "$defs": {
-    "ident": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-    "duration": {"oneOf": [{"type": "number", "exclusiveMinimum": 0}, {"type": "string", "pattern": "^\\s*\\d+(\\.\\d+)?\\s*(ms|s|m|h|d)?\\s*$"}]},
-    "condition": {"oneOf": [{"type": "boolean"}, {"type": "string"}]}
+    "ident": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "duration": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*\\d+(\\.\\d+)?\\s*(ms|s|m|h|d)?\\s*$"
+        }
+      ]
+    },
+    "condition": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
   }
 }

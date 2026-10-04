@@ -9,6 +9,7 @@ import textwrap
 from pathlib import Path
 
 from pcapforge import __version__
+from pcapforge.i18n import LANGS
 from pcapforge.scenario import DIFFICULTIES, ScenarioError, discover, find, load, parse_duration
 from pcapforge.tools import ToolNotFound
 
@@ -87,7 +88,7 @@ def cmd_generate(args) -> int:
                 print(f"  [{seed}] {msg}", file=sys.stderr, flush=True)
 
         out = generate(sc, args.difficulty, seed, Path(args.out), base_seed=args.base_seed,
-                       fmt=args.format, use_cache=not args.no_cache, duration=duration,
+                       fmt=args.format, use_cache=not args.no_cache, duration=duration, lang=args.lang,
                        verify=not args.no_verify, siem=args.siem, progress=progress)
         verdict = "not verified" if out.report is None else ("verified" if out.report.ok else "VERIFY FAILED")
         print(f"{out.pcap}  ({out.packets} packets, {verdict})")
@@ -183,6 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base-seed", help="share the recorded behaviour across seeds (faster batches)")
     p.add_argument("--out", "-o", default="out")
     p.add_argument("--format", choices=("pcap", "pcapng"), default="pcap")
+    p.add_argument("--lang", choices=LANGS, default="en", help="language of briefing.md, questions and submission template")
     p.add_argument("--duration", help="override capture length, e.g. 20m")
     p.add_argument("--no-cache", action="store_true", help="always record fresh")
     p.add_argument("--no-verify", action="store_true", help="skip tshark verification")
