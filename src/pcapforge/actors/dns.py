@@ -28,6 +28,19 @@ def zone_records(topology) -> dict[str, str]:
     return {f"{h.name.lower()}.{topology.domain}": h.id for h in topology.hosts}
 
 
+def query_server(rt, host_id: str, server_id: str, name: str, qtype: str, txid: int) -> None:
+    """Recursive query from ``host_id`` to the DNS server on ``server_id``; waits for the reply."""
+    query = DNS(id=txid, rd=1, qd=DNSQR(qname=name, qtype=qtype))
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((rt.loopback(host_id), 0))
+        sock.settimeout(2)
+        sock.sendto(bytes(query), (rt.loopback(server_id), ports.DNS))
+        sock.recvfrom(1500)
+    finally:
+        sock.close()
+
+
 class _DnsServerProtocol(asyncio.DatagramProtocol):
     def __init__(self, rt, topology, dc_id: str) -> None:
         self.rt = rt
@@ -114,12 +127,4 @@ class DnsClient(Actor):
 
     def execute(self, action, rt) -> None:
         a = action.args
-        query = DNS(id=a["txid"], rd=1, qd=DNSQR(qname=a["name"], qtype=a["qtype"]))
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            sock.bind((rt.loopback(action.host), 0))
-            sock.settimeout(2)
-            sock.sendto(bytes(query), (rt.loopback(a["server"]), ports.DNS))
-            sock.recvfrom(1500)
-        finally:
-            sock.close()
+        query_server(rt, action.host, a["server"], a["name"], a["qtype"], a["txid"])

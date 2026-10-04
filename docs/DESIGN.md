@@ -80,7 +80,9 @@ Done and committed (verify with `git log --oneline`):
   `start_epoch` (behaviour level: NTP payloads carry it), `digest()` = recording cache key
 - `actors/` — `modbus.server|poller|operator|writer`, `dns.server|client`, `ntp.server|client`,
   `windows.chatter` (LLMNR, NBNS, mDNS, SSDP M-SEARCH, browser host announcements; timing,
-  ports and payloads checked against a Windows 10 capture)
+  ports and payloads checked against a Windows 10 capture). Lookups only use names the site
+  DNS zone does not resolve; hosts with a `dns.client` first query the site server for
+  `name.<domain>` (shared `dns.query_server`), get NXDOMAIN and fall back 5–30 ms later
 - link-local destinations: `topology.SINKS` are loopback stand-ins (`127.77.0.2-5`) for
   224.0.0.252, 224.0.0.251, 239.255.255.250 and the sender's subnet broadcast; actors
   declare the `(sink, port)` pairs they use and the recorder binds discard sockets there (no

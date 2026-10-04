@@ -5,9 +5,11 @@ All of it is one-way: datagrams go to recording sinks that the composer turns in
 multicast group or the subnet broadcast address (see ``topology.SINKS``). Timing, ports and
 payloads follow a Windows 10 capture:
 
-* a name DNS cannot resolve is looked up in parallel over NBNS (three broadcasts from port
-  137, 750 ms apart, same transaction ID), LLMNR (A and AAAA, each from its own ephemeral
-  port and repeated once ~420 ms later with the same ID) and mDNS (``name.local`` from 5353);
+* a name the site DNS does not know is resolved like the Windows resolver does it: when the
+  host has DNS (a ``dns.client`` actor) the site server is asked for ``name.<domain>`` first
+  and answers NXDOMAIN; then NBNS (three broadcasts from port 137, 750 ms apart, same
+  transaction ID), LLMNR (A and AAAA, each from its own ephemeral port and repeated once
+  ~420 ms later with the same ID) and mDNS (``name.local`` from 5353) run in parallel;
 * SSDPSRV searches for an Internet gateway device in three rounds 3 s apart;
 * the Computer Browser announces the host to its domain every 12 minutes.
 
@@ -26,6 +28,7 @@ from scapy.layers.smb import BRWS_HostAnnouncement, SMB_Header, SMBMailslot_Writ
 from pcapforge import ports
 from pcapforge.actors import register
 from pcapforge.actors.base import Actor
+from pcapforge.actors.dns import DnsClient, query_server, zone_records
 from pcapforge.scenario import ScenarioError
 from pcapforge.topology import SINKS
 
@@ -36,6 +39,7 @@ SSDP_COPIES = (3, 3, 2)       # M-SEARCH copies in each round of one search, rou
 NBNS_TRIES = 3                # NetBT BcastNameQueryCount
 NBNS_INTERVAL = 0.75          # NetBT BcastQueryTimeout (s)
 LLMNR_RESEND = (0.41, 0.44)   # delay of the single LLMNR retransmission (s)
+FALLBACK = (0.005, 0.030)     # NXDOMAIN from the DNS server -> link-local lookups (s)
 ANNOUNCE_PERIOD = 720.0       # browser announcement interval of a host that has been up a while
 NB_WORKSTATION, NB_SERVER, NB_MASTER_BROWSER = 0x00, 0x20, 0x1D
 
@@ -64,23 +68,24 @@ class WindowsChatter(Actor):
         rate = float(self.param("rate", 1.0))
         lookups = self.span(self.param("lookups_per_hour", [4, 10]))
         searches = self.span(self.param("ssdp_per_hour", [1, 3]))
-        unknown = self._unknown_names(self.rng.child("names"))
+        names = [("wpad", NB_WORKSTATION)] + self._unknown_names(self.rng.child("names"))
         self._exchanges = 0
         for host in self.hosts:
             if host.device.stack.name != "windows":
                 raise ScenarioError(f"{self.type} needs Windows hosts; '{host.id}' runs "
                                     f"{host.device.stack.name}")
             rng = self.rng.child(host.id)
-            names = [("wpad", NB_WORKSTATION)] + self._silent_site_names(host) + unknown
-            self._plan_lookups(host, rng.child("lookups"), rng.uniform(*lookups) * rate / 3600.0, names)
+            self._plan_lookups(host, rng.child("lookups"), rng.uniform(*lookups) * rate / 3600.0, names,
+                               self._dns_server(host))
             self._plan_searches(host, rng.child("ssdp"), rng.uniform(*searches) * rate / 3600.0)
             if host.device.browser is not None:
                 self._plan_announcements(host, rng.child("browser"))
 
     # -- names ----------------------------------------------------------------------
     def _unknown_names(self, rng) -> list[tuple[str, int]]:
-        """(name, NetBIOS suffix) nobody on the site answers for: typos, retired servers,
-        printers that left the network."""
+        """(name, NetBIOS suffix) the site DNS zone does not resolve and nobody answers for:
+        typos, retired servers, printers that left the network. Names the zone resolves never
+        reach the link-local fallback."""
         topo = self.plan_.topology
         code = topo.site_code.upper()
         names: dict[str, int] = {}
@@ -94,23 +99,15 @@ class WindowsChatter(Actor):
         names[f"PRN-{code}-{rng.randint(1, 4):02d}"] = NB_WORKSTATION
         names[f"NPI{rng.getrandbits(24):06X}"] = NB_WORKSTATION
         names[f"BRN{rng.choice(BROTHER_OUIS)}{rng.getrandbits(24):06X}"] = NB_WORKSTATION
-        taken = {h.name.upper() for h in topo.hosts}
-        return [(name, suffix) for name, suffix in names.items() if name.upper() not in taken]
+        zone = zone_records(topo)
+        return [(name, suffix) for name, suffix in names.items() if f"{name.lower()}.{topo.domain}" not in zone]
 
-    def _silent_site_names(self, querier) -> list[tuple[str, int]]:
-        """Site hosts the querier may look up by short name that do not answer it: field
-        devices and routers (no LLMNR/NetBIOS) and Windows hosts off its segment. Hosts that
-        only take part in the incident are not part of anybody's routine."""
-        topo = self.plan_.topology
-        routine = {h.id for actor in self.plan_.actors if not actor.incident for h in actor.hosts}
-        out = []
-        for host in topo.hosts:
-            if host is querier or not (host.router or host.id in routine):
-                continue
-            if host.device.stack.name == "windows" and topo.common_subnet(host, querier):
-                continue  # it would answer
-            out.append((host.name, NB_SERVER))
-        return out
+    def _dns_server(self, host):
+        """Site DNS server of the host's resolver (its ``dns.client`` actor), if it has DNS."""
+        for actor in self.plan_.actors:
+            if isinstance(actor, DnsClient) and any(h.id == host.id for h in actor.hosts):
+                return self.plan_.topology.select(actor.param("server"))[0]
+        return None
 
     # -- planning -------------------------------------------------------------------
     def _exchange(self) -> int:
@@ -118,10 +115,11 @@ class WindowsChatter(Actor):
         self._exchanges += 1
         return self._exchanges
 
-    def _plan_lookups(self, host, rng, rate: float, names: list[tuple[str, int]]) -> None:
+    def _plan_lookups(self, host, rng, rate: float, names: list[tuple[str, int]], dns_server) -> None:
         if rate <= 0:
             return
         plan = self.plan_
+        domain = plan.topology.domain
         habitual = rng.sample(names[1:], min(3, len(names) - 1))  # stale shortcuts, mapped drives
         txid = rng.randrange(65536)  # NetBT counts its transaction IDs up
         t = rng.expovariate(rate)
@@ -129,14 +127,20 @@ class WindowsChatter(Actor):
             roll = rng.random()
             pool = habitual if roll < 0.85 and habitual else names
             name, suffix = names[0] if roll < 0.4 else rng.choice(pool)
+            start = t
+            if dns_server is not None:
+                # The resolver tries DNS (primary suffix) first and falls back on NXDOMAIN.
+                plan.add(t, self.id, host.id, "dns.query", server=dns_server.id, name=f"{name}.{domain}",
+                         qtype="A", txid=rng.randrange(1, 65536))
+                start = t + rng.uniform(*FALLBACK)
             if len(name) <= 15:
                 txid = (txid + (1 if rng.random() < 0.7 else 2)) & 0xFFFF
-                at = t
+                at = start
                 for attempt in range(NBNS_TRIES):
                     plan.add(at, self.id, host.id, "nbns.query", name=nb_name(name), suffix=suffix,
                              txid=txid, resend=attempt > 0)
                     at += rng.uniform(NBNS_INTERVAL - 0.01, NBNS_INTERVAL + 0.02)
-            sent = t + rng.uniform(0.0002, 0.0008)
+            sent = start + rng.uniform(0.0002, 0.0008)
             resent = sent + rng.uniform(*LLMNR_RESEND)
             queries = []
             for qtype in ("A", "AAAA"):
@@ -147,7 +151,7 @@ class WindowsChatter(Actor):
             for query in reversed(queries):  # the AAAA query goes out first again
                 plan.add(resent, self.id, host.id, "llmnr.query", **query, resend=True, last=True)
                 resent += rng.uniform(0.0002, 0.0012)
-            at = t + rng.uniform(0.0005, 0.002)
+            at = start + rng.uniform(0.0005, 0.002)
             for qtype in ("A", "AAAA"):
                 plan.add(at, self.id, host.id, "mdns.query", name=f"{name}.local", qtype=qtype)
                 at += rng.uniform(0.0001, 0.0004)
@@ -187,7 +191,9 @@ class WindowsChatter(Actor):
     def execute(self, action, rt) -> None:
         a = action.args
         source = rt.loopback(action.host)
-        if action.op == "nbns.query":
+        if action.op == "dns.query":
+            query_server(rt, action.host, a["server"], a["name"], a["qtype"], a["txid"])
+        elif action.op == "nbns.query":
             query = (NBNSHeader(NAME_TRN_ID=a["txid"], NM_FLAGS="RD+B", QDCOUNT=1)
                      / NBNSQueryRequest(QUESTION_NAME=a["name"], SUFFIX=nb_suffix(a["suffix"])))
             self._send(source, ports.NBNS, "broadcast", ports.NBNS, bytes(query))

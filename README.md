@@ -165,7 +165,7 @@ Built-in actor types:
 - `modbus.writer`
 - `dns.server`, `dns.client`
 - `ntp.server`, `ntp.client`
-- `windows.chatter` (LLMNR, NBNS, mDNS, SSDP, browser host announcements; `params: {rate}`)
+- `windows.chatter` (names the site DNS does not know: NXDOMAIN, then LLMNR, NBNS and mDNS fallback; SSDP; browser host announcements; `params: {rate}`)
 
 Device and OS-stack profiles are in [`profiles/devices.yaml`](src/pcapforge/profiles/devices.yaml). Their OUIs are checked against Wireshark's manufacturer database. Process models are in [`profiles/processes/`](src/pcapforge/profiles/processes/). New actors go in `src/pcapforge/actors/` and implement `plan()`, plus `serve()` for servers or `execute()` for clients. Actors that send one-way multicast or broadcast datagrams list the recording sinks they use in `sinks` (see `topology.SINKS`).
 
