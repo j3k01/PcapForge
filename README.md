@@ -1,5 +1,11 @@
 # pcapforge
 
+[![ci](https://github.com/j3k01/PcapForge/actions/workflows/ci.yml/badge.svg)](https://github.com/j3k01/PcapForge/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/j3k01/PcapForge)](https://github.com/j3k01/PcapForge/releases)
+[![license: Apache-2.0](https://img.shields.io/badge/code-Apache--2.0-blue)](LICENSE)
+[![scenarios: CC BY 4.0](https://img.shields.io/badge/scenarios-CC%20BY%204.0-lightgrey)](scenarios/LICENSE)
+[![python](https://img.shields.io/badge/python-3.13-blue)](pyproject.toml)
+
 Generate realistic, labeled packet captures with answer keys for blue-team, SOC and
 detection-engineering training.
 
@@ -64,7 +70,8 @@ Other commands:
 - `pcapforge verify capture.pcap -a answers.json` re-checks a capture against its key.
 - `pcapforge export <run dir>` (re)creates `siem/` and `detections/` for an existing run.
 - `pcapforge package <run dir>` writes a student zip and an instructor zip (see [Grading and packaging](#grading-and-packaging)).
-- `pcapforge grade answers.json <submissions>` scores student answers.
+- `pcapforge grade answers.json <submissions>` scores student answers. Hints listed under `hints_used` cost 20 % of the question's points (rounded up).
+- `pcapforge export-ctfd <run dir>` writes one CTFd challenge per question in the `ctfcli` format (`ctfd/qNN-<id>/challenge.yml`). Install each with `ctf challenge install <dir>`. The first challenge carries the capture and the briefing. Sets, maps and timestamps use a canonical flag format that each challenge description states.
 
 ### What the analyst sees (easy, seed 42)
 
@@ -237,6 +244,7 @@ the out-of-band rules fire; the unapproved-writer rule fires on easy and medium.
 | id | line | techniques | what happens |
 |---|---|---|---|
 | `ot-modbus-write-manipulation` | OT | T0855, T0836 (+T0888, T0861 with discovery) | An HMI and a historian poll the water-treatment PLCs (medium/hard: also a SCADA/OPC UA server and an S7comm-monitored S7-1500). A host outside the approved change path writes setpoints outside their normal band. |
+| `ot-baseline-operations` | OT | none (no incident) | Normal operations only: polling, OPC UA/S7 monitoring (medium/hard), approved operator changes, NTP/DNS/Windows chatter. Process drawn per seed on every level. For baselining exercises, false-positive tuning and anomaly-detection datasets. |
 
 Difficulty levels of `ot-modbus-write-manipulation`:
 

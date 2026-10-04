@@ -1,0 +1,31 @@
+name: Scenario proposal
+description: Propose a new training scenario (defensive only, see CONTRIBUTING.md)
+labels: [scenario]
+body:
+  - type: input
+    id: title
+    attributes:
+      label: Working title and line (IT/OT)
+    validations:
+      required: true
+  - type: textarea
+    id: story
+    attributes:
+      label: What the analyst should find
+      description: The observable network behaviour, the MITRE ATT&CK technique ids, and what the questions would ask
+    validations:
+      required: true
+  - type: textarea
+    id: benign
+    attributes:
+      label: Benign implementation
+      description: Which local, benign services/clients produce the traffic. Nothing may work against real systems or contain functional payloads.
+    validations:
+      required: true
+  - type: checkboxes
+    id: policy
+    attributes:
+      label: Policy
+      options:
+        - label: The scenario needs no malware, exploit code, implant or real target; all traffic stays between local simulators.
+          required: true

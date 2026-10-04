@@ -101,13 +101,18 @@ Scenarios outside the repository are found with `--scenarios-dir DIR` or `PCAPFO
 ### Metadata and briefing
 
 `title`, `summary` (instructor-facing), `briefing` (student-facing; placeholders `{site_name}`, `{domain}`,
-`{sensor_subnet}`), `mitre` (framework `enterprise`/`ics`/`mobile`, technique id and name; an entry may
-carry `when`), `tags`, `version` (bump it when the recorded behaviour changes: it is part of the
+`{sensor_subnet}`, `{process_title}`), `mitre` (framework `enterprise`/`ics`/`mobile`, technique id and name;
+an entry may carry `when`; an empty list is allowed for baseline scenarios without an incident),
+`tags`, `version` (bump it when the recorded behaviour changes: it is part of the
 recording cache key). The optional `site` block lists site names, codes, a domain, start hours,
 weekdays and a year range the seed picks from.
 
 The briefing must not give away the answers: describe the site and the normal roles ("only the
 engineering workstation changes setpoints"), never the attacker.
+
+Optional `translations: {pl: {title, briefing, questions: {<id>: {text, hint}}}}` provides the student-facing
+prose for `pcapforge generate --lang pl`. Answers, filters and register names are never translated. A test
+checks that every question has a translation, so translate all of them.
 
 ### Topology, hosts and devices
 
@@ -187,6 +192,10 @@ difficulty:
   to *find*, not just bigger: a source that blends in (approved host, routed host behind a gateway MAC),
   values just outside the normal band, events spread over a longer window, legitimate look-alike activity,
   more protocol noise.
+- Per-seed variation: a var written as `{choose: [a, b, c]}` picks one item per seed, and `{range: [lo, hi]}`
+  picks an integer. Use this for the story structure (process profile, PLC count, device pool such as
+  `plc_devices`), so that every seed is a qualitatively different exercise. Host `device:` and `count:`
+  accept `${vars.*}`.
 
 Provide all three levels unless a level would be meaningless, and describe them in the README table.
 
@@ -219,7 +228,9 @@ questions:
   (`tolerance_s`), `set` (partial credit), `map` (partial credit per key, 0.5 % numeric tolerance) or
   `text` (default; alternatives in `accept`). Pick the most specific type: `ip`/`mac` accept any spelling
   of the address.
-- `points` defaults to 10. `hint` is instructor-only.
+- `points` defaults to 10. `tolerance` (absolute) applies to `number` answers. `hint` is shown in the
+  submission template and costs 20 % of the points (rounded up) when the student lists the question under
+  `hints_used`. `pcapforge export-ctfd` uses the same cost.
 - `check` is a Wireshark display filter plus `expect` (`count`, `min`, `max`) that proves the answer is in
   the capture. Every question that can be proven from packets needs one; `foreach: facts.x.list` repeats
   the check per item with `${item.*}`. Display-filter sets need commas: `{5, 6, 15, 16}`.
@@ -279,6 +290,7 @@ Add `src/pcapforge/profiles/processes/<id>.yaml` with `id`, `title`, `unit_id` a
 (`const`, `follow`, `daily`, `walk`, `counter`, `above`/`below`; see the header of
 `water_treatment.yaml`). Reference it from a `modbus.server` actor with `params: {process: <id>}`. The
 register map is printed in the student briefing.
+Optional `translations: {pl: {title: ...}}` gives the localized process title used in handouts.
 
 ## Testing checklist
 

@@ -34,9 +34,9 @@ Status: `[ ]` open, `[~]` partly done.
   - Modbus device discovery on the control subnet: T0846, T0888;
   - replay of captured legitimate commands;
   - alarm-threshold masking followed by a setpoint change.
-- [ ] **Baseline-only scenarios per process profile** (S). Normal operation of water, wastewater, HVAC and substation sites with no incident, for false-positive tuning, baselining exercises and anomaly-detection datasets.
+- [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
 - [ ] **More protocols as background actors** (M each): IEC 60870-5-104 (`c104`), BACnet/IP (`bacpypes3`), EtherNet/IP/CIP, DNP3.
-- [ ] **Process-model polish** (S): translated process titles and point descriptions, more device profiles (ABB, Honeywell, Phoenix Contact), and per-vendor register-map styles (1-based addressing, 32-bit floats across two registers).
+- [~] **Process-model polish** (S): translated process titles (pl: done); still open: point descriptions, more device profiles (ABB, Honeywell, Phoenix Contact), and per-vendor register-map styles (1-based addressing, 32-bit floats across two registers).
 
 ## 3. IT line (benign equivalents only, see CONTRIBUTING.md)
 
@@ -54,8 +54,8 @@ Status: `[ ]` open, `[~]` partly done.
   - the incident timeline, with frame numbers;
   - before/after charts of the affected process values, from `siem/modbus.jsonl`;
   - the questions with answers, and the class score summary from `pcapforge grade --json`.
-- [ ] **Graded hints** (S): hints that cost points, recorded in the submission and applied by `grade`.
-- [ ] **CTF platform export** (S): `pcapforge export-ctfd <run>` turns questions and answers into CTFd challenges (JSON/YAML), with flags in the expected formats.
+- [x] **Graded hints** (S): the submission template shows each hint with its cost (20 % of the points, rounded up, same as the CTFd export); students list the ids they used under `hints_used`, and `grade` deducts the cost (never below 0). Honour system for offline use.
+- [x] **CTF platform export** (S): `pcapforge export-ctfd <run>` writes ctfcli `challenge.yml` files with static/regex flags, hint costs, and the capture attached to the first challenge. Still open: tested only by unit tests, not yet imported into a live CTFd instance.
 - [ ] **More languages** (S per language): the UI strings in `i18n.py` and the scenario `translations`.
 
 ## 5. Detection engineering
@@ -73,7 +73,7 @@ Status: `[ ]` open, `[~]` partly done.
 - [ ] **Docs site** (S): MkDocs with the scenario authoring guide, the actor/profile reference generated from code, and the answers.json schema.
 - [ ] **LLM "director"** (M, optional): turn a text description into a draft scenario YAML that a human reviews and that `pcapforge validate` checks. It never generates packets.
 - [ ] **Web UI** (L, optional): pick scenario, difficulty and seeds, then download the class packages.
-- [ ] **Repository housekeeping** (S):
+- [~] **Repository housekeeping** (S; badges, Dependabot and issue templates done; GitHub description/topics and labels still open):
   - README badges (CI, release, license);
   - GitHub description and topics;
   - Dependabot;

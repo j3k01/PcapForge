@@ -1,0 +1,26 @@
+name: Realism or decoding problem
+description: Something in a generated capture looks unrealistic, fails to decode or contradicts answers.json
+labels: [realism]
+body:
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact pcapforge command (scenario, difficulty, seed, options)
+      placeholder: pcapforge generate -s ot-modbus-write-manipulation -d medium --seed 42
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What looks wrong
+      description: Frame numbers, a tshark/Wireshark filter that shows it, and why a real network would look different
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, `tshark --version` first line, pcapforge version or commit
+    validations:
+      required: true
