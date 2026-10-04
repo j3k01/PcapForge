@@ -184,3 +184,156 @@ class ModbusPoller(ModbusClientActor):
         plan.facts[self.id] = {"hosts": [host_ref(h.id) for h in self.hosts],
                                "targets": [host_ref(t.id) for t in targets],
                                "interval_s": interval}
+
+
+def _holding_group(profile: ProcessProfile) -> dict:
+    return next((g for g in profile.poll_groups if g["function"] == 3),
+                {"function": 3, "start": 0, "count": profile.size("holding")})
+
+
+class _SessionPlanner:
+    """Adds connect / ops / close actions for one short client session."""
+
+    def __init__(self, actor: Actor, host_id: str, target_id: str, unit: int, t: float, rng) -> None:
+        self.actor, self.host_id, self.target_id, self.unit, self.t, self.rng = actor, host_id, target_id, unit, t, rng
+        self.add("modbus.connect", gap=(0.0, 0.0))
+
+    def add(self, op: str, gap=(0.05, 0.4), **args):
+        self.t += self.rng.uniform(*gap)
+        extra = {} if op in ("modbus.connect", "modbus.close") else {"unit": self.unit}
+        return self.actor.plan_.add(self.t, self.actor.id, self.host_id, op, target=self.target_id,
+                                    **extra, **args)
+
+    def read(self, function: int, start: int, count: int, gap=(0.05, 0.4)):
+        return self.add("modbus.read", gap=gap, function=function, start=start, count=count)
+
+    def write(self, function: int, address: int, values: list[int], gap=(0.2, 2.0)):
+        return self.add("modbus.write", gap=gap, function=function, address=address, values=values)
+
+    def close(self):
+        return self.add("modbus.close", gap=(0.01, 0.3))
+
+
+@register
+class ModbusOperator(ModbusClientActor):
+    """Engineering workstation: occasional legitimate setpoint adjustments inside the normal band."""
+
+    type = "modbus.operator"
+
+    def plan(self) -> None:
+        plan = self.plan_
+        targets = plan.topology.select(self.param("targets"))
+        count = int(self.param("count", 0))
+        host = self.hosts[0]
+        slots = sorted(self.rng.uniform(0.05, 0.95) * plan.duration for _ in range(count))
+        writes = []
+        for t in slots:
+            target = self.rng.choice(targets)
+            profile = serving_profile(plan, target.id)
+            choice = self.rng.choice(profile.operator_adjustable)
+            point = profile.by_name[choice["name"]]
+            lo, hi = point.normal
+            step = self.rng.uniform(*choice["step"]) * self.rng.choice((-1, 1))
+            value = min(max(point.nominal + step, lo), hi)
+            raw = point.encode(value)
+            session = _SessionPlanner(self, host.id, target.id, profile.unit_id, t, self.rng)
+            group = _holding_group(profile)
+            session.read(3, group["start"], group["count"])
+            action = session.write(16, point.address, [raw])
+            session.read(3, group["start"], group["count"])
+            session.close()
+            writes.append({"target": host_ref(target.id), "point": point.name, "address": point.address,
+                           "raw": raw, "value": point.decode(raw), "unit": point.unit,
+                           "function": 16, "request": {"$action": action}})
+            plan.event(action, self.id, f"Operator adjusts {point.name} on {target.id}", [],
+                       point=point.name, value=point.decode(raw), legitimate=True)
+        plan.facts[self.id] = {"source": host_ref(host.id), "write_count": len(writes), "writes": writes}
+
+
+DEVIATION = {"extreme": (2.5, 5.0), "moderate": (0.5, 1.2), "subtle": (0.08, 0.25)}
+
+
+@register
+class ModbusWriter(ModbusClientActor):
+    """Host outside the approved change path writing setpoints outside their normal band."""
+
+    type = "modbus.writer"
+
+    def plan(self) -> None:
+        plan, rng = self.plan_, self.rng
+        host = self.hosts[0]
+        target = rng.choice(plan.topology.select(self.param("targets")))
+        profile = serving_profile(plan, target.id)
+        unit = profile.unit_id
+        lo_n, hi_n = (int(v) for v in self.span(self.param("writes", [2, 3])))
+        candidates = [p for p in profile.table("holding") if p.writable and p.normal and p.name != "mode"]
+        points = sorted(rng.sample(candidates, min(rng.randint(lo_n, hi_n), len(candidates))),
+                        key=lambda p: p.address)
+        rng.shuffle(points)
+        factor_lo, factor_hi = DEVIATION[self.param("deviation", "moderate")]
+        function_mode = self.param("function", "single")
+        start_lo, start_hi = self.span(self.param("start", [0.3, 0.6]))
+        spread = float(self.param("spread", 120))
+        t0 = plan.duration * rng.uniform(start_lo, start_hi)
+        t0 = min(t0, max(plan.duration - spread - 60, plan.duration * 0.1))
+        one_session = spread <= 180
+
+        identity = target.device.identity
+        discovery_action = None
+        session = _SessionPlanner(self, host.id, target.id, unit, t0, rng)
+        if self.param("discovery", False):
+            discovery_action = session.add("modbus.identify", gap=(0.0, 0.05))
+            # Tag enumeration: oversized reads are rejected before the real map size is found.
+            session.read(3, 0, 64)
+            session.read(3, 0, 32)
+            session.read(3, 0, 16)
+            session.read(3, 0, profile.size("holding"))
+            session.read(4, 0, profile.size("input"))
+            session.read(1, 0, profile.size("coils"))
+            plan.event(discovery_action, self.id, "Device identification and register enumeration",
+                       ["T0888", "T0861"], vendor=identity.get("VendorName"), product=identity.get("ProductCode"))
+        if not one_session:
+            session.close()
+
+        write_times = sorted(rng.uniform(0, spread) for _ in points)
+        writes = []
+        for point, offset in zip(points, write_times):
+            lo, hi = point.normal
+            value = hi + (hi - lo) * rng.uniform(factor_lo, factor_hi)
+            raw = point.encode(value)
+            function = {"single": 6, "multiple": 16}.get(function_mode) or rng.choice((6, 16))
+            if not one_session:
+                session = _SessionPlanner(self, host.id, target.id, unit, t0 + 20 + offset, rng)
+            action = session.write(function, point.address, [raw])
+            session.read(3, point.address, 1)
+            if not one_session:
+                session.close()
+            writes.append({"point": point.name, "table": "holding", "address": point.address,
+                           "function": function, "raw": raw, "value": point.decode(raw), "unit": point.unit,
+                           "normal": list(point.normal), "nominal": point.nominal,
+                           "request": {"$action": action}})
+            plan.event(action, self.id, f"Write {point.name} = {point.decode(raw)} {point.unit}".rstrip(),
+                       ["T0855", "T0836"], function=function, address=point.address, raw=raw,
+                       normal=list(point.normal))
+        if one_session:
+            session.close()
+
+        affected = sorted({p.name for p in profile.points
+                           if p.model and p.name not in {w["point"] for w in writes}
+                           and {p.model.get("source"), p.model.get("b")} & {w["point"] for w in writes}})
+        plan.facts[self.id] = {
+            "source": host_ref(host.id),
+            "target": host_ref(target.id),
+            "unit_id": unit,
+            "write_count": len(writes),
+            "writes": writes,
+            "register_writes": [w for w in writes if w["table"] == "holding"],
+            "point_names": [w["point"] for w in writes],
+            "values": {w["point"]: w["value"] for w in writes},
+            "function_codes": sorted({w["function"] for w in writes}),
+            "first_write": min((w["request"] for w in writes), key=lambda r: r["$action"].t),
+            "last_write": max((w["request"] for w in writes), key=lambda r: r["$action"].t),
+            "discovery": discovery_action is not None,
+            "reported_identity": f"{identity.get('VendorName', '')} {identity.get('ProductCode', '')}".strip(),
+            "affected_measurements": affected,
+        }
