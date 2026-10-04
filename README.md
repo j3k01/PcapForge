@@ -390,6 +390,8 @@ Platform notes:
 
 ## Roadmap
 
+The full, prioritised plan is in [ROADMAP.md](ROADMAP.md). Highlights:
+
 - IT line, using benign equivalents only:
   - HTTPS beaconing to a local test server
   - DNS tunnelling against a local resolver
