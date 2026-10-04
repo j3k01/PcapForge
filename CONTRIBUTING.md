@@ -49,7 +49,7 @@ Requirements:
 ```console
 $ git clone <your fork> && cd pcapforge
 $ python -m venv .venv
-$ .venv/bin/pip install -e .[test]          # Windows: .venv\Scripts\pip install -e .[test]
+$ .venv/bin/pip install -e .[test,opcua,s7]  # Windows: .venv\Scripts\pip install -e .[test,opcua,s7]
 $ pcapforge validate
 $ pytest -q
 ```
@@ -255,8 +255,13 @@ generate each level and read the result like a student would.
    (see `topology.SINKS`).
 5. The same plan must give the same actions: no wall-clock time, no unseeded randomness, no iteration
    over unordered sets. Action args are part of the recording cache key.
-6. If the protocol needs SIEM fields or Suricata rules, extend `export.py` / `detections.py`.
-7. Document the actor in the README's built-in actor list.
+6. A third-party protocol library is an optional extra in `pyproject.toml`
+   (`[project.optional-dependencies]`): set `requires = (import name, distribution, extra)` on the actor
+   and import the library only inside `serve()` / `execute()` via `actors.base.optional_import`, so a
+   core install still plans every scenario and the recorder stops before capturing with the install
+   command. Enable such actors in a scenario only behind a difficulty variable.
+7. If the protocol needs SIEM fields or Suricata rules, extend `export.py` / `detections.py`.
+8. Document the actor in the README's built-in actor list.
 
 ### A new device or OS stack
 

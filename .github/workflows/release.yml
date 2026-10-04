@@ -25,7 +25,7 @@ jobs:
           sudo setcap cap_net_raw,cap_net_admin=eip "$(command -v dumpcap)"
           # Immediate loopback ACKs for the recording network (pcapforge adds it itself when permitted).
           sudo ip route add local 127.77.0.0/16 dev lo table local quickack 1
-      - run: pip install -e .
+      - run: pip install -e .[opcua,s7]
       - name: Generate and package sample captures for every scenario and difficulty
         run: |
           for scenario in $(pcapforge list | awk '{print $1}'); do

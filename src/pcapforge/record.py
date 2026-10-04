@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from pcapforge import ports
+from pcapforge.actors.base import check_requirements
 from pcapforge.plan import Plan
 from pcapforge.tools import find_tool, require_tool
 from pcapforge.topology import LOOPBACK_NET, MARKER_SINK, SINKS
@@ -205,8 +206,7 @@ def _stop_services(rt: Runtime, loop, thread) -> None:
 
 def record(plan: Plan, path: Path, progress: Callable[[int, int], None] | None = None) -> dict:
     logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
-    for actor in plan.actors:
-        actor.check()  # missing optional packages fail before anything is captured
+    check_requirements(plan.actors)  # missing optional packages fail before anything is captured
     path.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform == "linux":
         _prepare_linux_loopback()

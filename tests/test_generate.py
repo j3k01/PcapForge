@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import subprocess
+from collections import Counter
 
 import pytest
 from scapy.layers.inet import IP, TCP, UDP
@@ -182,6 +183,21 @@ def test_flow_totals_account_for_every_ip_packet_and_byte(generated):
     flows = jsonl(result.exports["siem/flows.jsonl"])
     assert sum(f["packets_out"] + f["packets_in"] for f in flows) == packets
     assert sum(f["bytes_out"] + f["bytes_in"] for f in flows) == octets
+
+
+def test_opcua_background_runs_only_between_the_historian_and_the_scada_server(generated):
+    result, answers = generated
+    rows = tshark_fields(result.pcap, "tcp.port == 4840 || opcua", ["ip.src", "ip.dst", "opcua.servicenodeid.numeric"])
+    if answers["scenario"]["difficulty"] == "easy":
+        assert not rows
+        return
+    collector = answers["facts"]["historian_opcua"]
+    assert {frozenset(r[:2]) for r in rows} == {frozenset((collector["hosts"][0]["ip"], collector["server"]["ip"]))}
+    services = Counter(int(r[2]) for r in rows if r[2])
+    # The session predates the capture: watchdog Reads (631/634) and Publish (826/829) only.
+    assert services[631] == services[634] > 0
+    assert services[826] == services[829] > services[631]
+    assert set(services) <= {631, 634, 826, 829, 446, 449}  # + OpenSecureChannel renewals
 
 
 def _eve_epoch(timestamp: str) -> float:

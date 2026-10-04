@@ -11,7 +11,7 @@ detection-engineering exercises. All traffic comes from benign services and clie
    facts for the answer key. `behavior_seed` (recorded behaviour) can be shared via
    `--base-seed` so many students reuse one recording; `seed` drives presentation.
 2. **Record**: every host gets its own address in `127.77.0.0/16`. Servers (pymodbus
-   `SimDevice`, NTP, DNS) run in one asyncio thread; the orchestrator executes actions
+   `SimDevice`, NTP, DNS, asyncua OPC UA, python-snap7 S7) run in one asyncio thread; the orchestrator executes actions
    sequentially, sending a UDP marker (`<host-ip> -> 127.77.0.1:9999`) before each
    action. Capture: dumpcap (`\Device\NPF_Loopback` on Windows, `lo` on Linux) or
    tcpdump. On Linux the recorder first brings `lo` up if needed and adds
@@ -22,7 +22,7 @@ detection-engineering exercises. All traffic comes from benign services and clie
      marker; server replies and pure ACKs inherit the flow's current action;
    - causal retime: packets keep recorded order; gaps replaced by
      latency-to-sensor (per host) + processing time (per profile) + jitter;
-   - rewrite: IP/MAC/ports (15020→502, 15353→53, 15123→123), ephemeral ports per OS
+   - rewrite: IP/MAC/ports (15020→502, 15353→53, 15123→123, 14840→4840, 10102→102), ephemeral ports per OS
      profile, ISN per flow, TTL (−1 per routed hop), IP-ID behaviour, TCP options /
      window per OS profile, checksums recomputed;
    - L2: sensor = SPAN on one subnet; routed packets carry gateway MAC; ARP synthesized
@@ -114,7 +114,9 @@ Done and committed (verify with `git log --oneline`):
   Verified with tshark: 0 malformed/checksum/expert errors on easy and medium; ~120k pkt/s.
 
 Status: first scenario complete end-to-end (compose/, answers.py, verify.py, cli.py, tests, README, CI),
-with Windows background chatter on medium/hard (`vars.chatter`, `vars.chatter_rate`).
+with Windows background chatter on medium/hard (`vars.chatter`, `vars.chatter_rate`) and industrial
+background protocols on medium/hard: S7comm (`vars.s7`) and a SCADA OPC UA server with a historian
+subscription (`vars.opcua`), see below.
 - SIEM export + detection content (`generate --siem`, `pcapforge export <run>`):
   - `export.py` — one tshark pass (`-T fields`, ~70 fields, occurrence aggregator `\x1f`), streamed and
     aggregated in Python into `siem/{flows,modbus,dns,ntp,name_resolution,arp}.jsonl`. Modbus pairs
@@ -145,6 +147,34 @@ with Windows background chatter on medium/hard (`vars.chatter`, `vars.chatter_ra
     rendered from answers.json for older runs without one), instructor zip is the whole run; members
     sorted with a fixed timestamp, so zips are byte-identical. `release.yml` packages every run.
 - Linux: full suite (85 tests incl. Suricata) passes rootless under `unshare -rn pytest`; see Linux results.
+- Industrial background protocols (medium/hard only, `vars.s7` / `vars.opcua`; easy's plan digest is
+  unchanged). Their libraries are optional extras (`pyproject.toml`: `opcua` = asyncua 2.x, `s7` =
+  python-snap7 3.x); actors declare `requires = (module, distribution, extra)` and import lazily, and
+  `record()` calls `actors.base.check_requirements` before capturing, so a core install fails in about a
+  second with one line per missing extra and its `pip install` command.
+  - **S7comm** (`actors/s7.py`): the PLC side is a python-snap7 3.x server subclass bound to the host's
+    loopback address on port 10102 (mapped to 102). DB reads refresh the block from the process simulation at
+    the action's virtual time (shared with a `modbus.server` on the same host, so both protocols report the same
+    plant); SZL 0x0011/0x001C/0x0424 answers and the largest PDU the CPU accepts (240 on S7-1200, 960 on
+    S7-1500; the client proposes 480) follow the device profile. The client is a small hand-written S7comm
+    client because snap7's client cannot bind a source address; it frames COTP/S7 PDUs itself and keeps request
+    sizes inside the negotiated PDU.
+  - **OPC UA** (`actors/opcua.py`): `scada` (device `scada-server-vm`, BuildInfo from its `identity`) runs an
+    asyncua `Server` subclass on loopback port 14840 (mapped to 4840) with one folder per source PLC and one
+    tag group per process table; it also polls the PLCs over Modbus (`scada_io_poll`, 2 s). The historian's
+    `opcua.client` drives asyncua's `UASocketProtocol` directly from its own event-loop thread, one service per
+    action, with no asyncua background tasks. Back-to-back recording rules out wall-clock timers: the server's
+    subscription loops are cancelled and a Publish request is answered at once by the session's next
+    subscription in creation order (data changes since its last publish, or a keep-alive), which matches the
+    client's per-subscription publish phases; the composer therefore sees ordinary request/response pairs.
+    Request/response header timestamps, DataValue timestamps, PublishTime, the security token's CreatedAt and
+    ServerStatus come from the scenario clock (host skew ±8 ms, server boot 2–40 days before the capture);
+    nonces come from the behaviour seed, session/token counters are reset per recording, and the Browse view
+    timestamp is null, so two recordings of a plan carry identical OPC UA bytes. Messages stay below one
+    1460-byte MSS (asyncua has no BrowseNext, so the client browses one tag group per request; one subscription
+    per PLC; CreateMonitoredItems per tag group); the composer does not segment. Seed 42, `--siem`: medium
+    198 636 packets (OPC UA on 4840: 15 115 frames; 4 044 Publish and 539 Read request/response pairs), hard
+    693 656 (52 647; 14 396 Publish, 1 439 Read, 2 OpenSecureChannel Renew), both verified.
 Next: IT-line scenarios (README roadmap).
 
 ### Composer spec

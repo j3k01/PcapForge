@@ -4,8 +4,8 @@ Generate realistic, labeled packet captures with answer keys for blue-team, SOC 
 detection-engineering training.
 
 Pick a scenario, a difficulty and a seed. pcapforge records **real protocol stacks** (OS
-TCP/IP, pymodbus, DNS, NTP) talking to each other on loopback addresses, composes the
-traffic into a believable site topology, and writes:
+TCP/IP, pymodbus, asyncua OPC UA, S7comm, DNS, NTP) talking to each other on loopback addresses,
+composes the traffic into a believable site topology, and writes:
 
 - `capture.pcap` / `capture.pcapng`: decodes cleanly in Wireshark, tshark, Zeek, Suricata and Splunk Stream
 - `answers.json`: IOCs, timeline with frame numbers, MITRE ATT&CK (Enterprise/ICS) mapping, questions with answers and the tshark filter that proves each answer
@@ -32,7 +32,7 @@ Requirements:
     plus, once per boot, `sudo ip route add local 127.77.0.0/16 dev lo table local quickack 1`
 
 ```console
-$ pip install -e .
+$ pip install -e .                # medium/hard of the OT scenario also need: pip install -e .[opcua,s7]
 $ pcapforge list
 ot-modbus-write-manipulation  OT  easy/medium/hard  T0855,T0836     Unauthorized Modbus/TCP setpoint changes on a water-treatment PLC
 
@@ -42,6 +42,11 @@ $ pcapforge generate --scenario ot-modbus-write-manipulation --difficulty easy -
   [42] composed 13739 packets
 out/ot-modbus-write-manipulation_easy_42/capture.pcap  (13739 packets, verified)
 ```
+
+Optional protocol extras record more industrial background traffic: `pip install -e .[opcua]` (OPC UA,
+asyncua) and `pip install -e .[s7]` (Siemens S7comm, python-snap7). Scenarios enable these actors only on
+levels that need them (medium and hard of `ot-modbus-write-manipulation`); generating such a level without
+the extra stops before recording with a message naming the extra to install.
 
 A class of 25 students, each with a unique variant, or one variant per login:
 
@@ -228,17 +233,18 @@ the out-of-band rules fire; the unapproved-writer rule fires on easy and medium.
 
 | id | line | techniques | what happens |
 |---|---|---|---|
-| `ot-modbus-write-manipulation` | OT | T0855, T0836 (+T0888, T0861 with discovery) | An HMI and a historian poll the water-treatment PLCs. A host outside the approved change path writes setpoints outside their normal band. |
+| `ot-modbus-write-manipulation` | OT | T0855, T0836 (+T0888, T0861 with discovery) | An HMI and a historian poll the water-treatment PLCs (medium/hard: also a SCADA/OPC UA server and an S7comm-monitored S7-1500). A host outside the approved change path writes setpoints outside their normal band. |
 
 Difficulty levels of `ot-modbus-write-manipulation`:
 
 | | easy | medium | hard |
 |---|---|---|---|
-| length | 15 min, ~14k packets | 45 min, ~117k packets | 2 h, ~415k packets |
-| PLCs | 2 | 3 | 4 |
+| length | 15 min, ~14k packets | 45 min, ~199k packets | 2 h, ~694k packets |
+| PLCs | 2 | 3 Modbus + 1 Siemens S7-1500 | 4 Modbus + 1 Siemens S7-1500 |
 | writer | unknown Raspberry Pi on the control LAN | laptop on the IT subnet, routed through the firewall (gateway MAC) | the legitimate engineering workstation |
 | discovery | identity read + register enumeration | yes | none |
 | changes | burst of extreme values | spread over 20 min, moderate values | spread over 1 h, values just outside the band, mixed with 6 legitimate operator changes |
+| OT background | HMI and historian poll the PLCs (Modbus/TCP) | + SCADA server polls the PLCs and serves them over OPC UA to the historian (one subscription per PLC: Publish every 2 s, ServerStatus Read every 5 s); HMI and historian read the S7-1500 over S7comm | + OPC UA secure-channel renewals |
 | noise | NTP, ARP | + DNS, Windows chatter (LLMNR, NBNS, mDNS, SSDP, browser announcements), retransmissions, capture starts mid-session | + more retransmissions, twice the Windows chatter |
 
 ## How it works
@@ -256,7 +262,7 @@ flowchart LR
 ```
 
 1. **Plan.** The seed decides the site (name, domain, devices), the actions on a virtual timeline, and the facts the answer key is built from.
-2. **Record.** Each host gets its own loopback address. pymodbus PLCs run a physical-process model (water treatment), so polled values evolve over the virtual timeline, and a written setpoint visibly drives the measurements and alarms that follow it. Clients run back-to-back, which captures hours of activity in seconds. A UDP marker before each action ties packets to actions. Recordings are cached by plan hash.
+2. **Record.** Each host gets its own loopback address. pymodbus PLCs run a physical-process model (see [Process profiles](#process-profiles) below), so polled values evolve over the virtual timeline, and a written setpoint visibly drives the measurements and alarms that follow it. OPC UA tags of a SCADA server and S7 data blocks read the same models. Clients run back-to-back, which captures hours of activity in seconds; payload timestamps (NTP, OPC UA) come from the virtual clock. A UDP marker before each action ties packets to actions. Recordings are cached by plan hash.
 3. **Compose.** Packets keep their recorded order and bytes. Timing is rebuilt causally from device profiles: per-host link latency, PLC processing time, the OS delayed-ACK behaviour and retransmission timeouts. The rest of the realism layer:
    - IP/MAC/port rewrite with ephemeral ports per OS
    - ISN remap, TTL by OS minus routed hops, IP-ID behaviour per OS
@@ -320,27 +326,41 @@ Built-in actor types:
 - `modbus.writer`
 - `dns.server`, `dns.client`
 - `ntp.server`, `ntp.client`
+- `s7.server`, `s7.client` (Siemens S7comm on ISO-TSAP port 102, optional extra `s7`): an S7-1200/1500 CPU whose data blocks mirror its process model (DB1 measurements and DB2 setpoints as REAL, DB3 status bits) and whose SZL identity (order code, firmware, module name, serial) follows the device profile; the client keeps one session per PLC (COTP connect, setup communication, SZL identification), reads the DBs with cyclic multi-item Read Var jobs and the CPU state (SZL 0x0424) every `szl_interval` seconds. `params: {process, rack, slot}` / `{targets, interval, jitter, dbs, identify, szl_interval}`
+- `opcua.server`, `opcua.client` (OPC UA binary on port 4840, SecurityPolicy None, optional extra `opcua`): a SCADA / OPC UA server that publishes the process points of the PLCs in `sources` (hosts of a `modbus.server`) as tags `ns=2;s=PLC01.clearwell_level`, grouped per PLC into `Measurements`, `Setpoints`, `Commands` and `Status`, with values from the PLC's process model at the request's virtual time and its BuildInfo from the device profile's `identity`; the client (historian / MES collector) opens one long-lived session (Hello, OpenSecureChannel, CreateSession, ActivateSession, NamespaceArray read, browse of the tag tree), creates one subscription per PLC with monitored items per tag group, sends Publish requests every `publishing_interval`, reads ServerStatus State/CurrentTime every `keepalive_interval` and renews the secure channel at 75 % of `token_lifetime`. `params: {sources}` / `{server, publishing_interval, keepalive_interval, token_lifetime, jitter, application, product_uri}`
 - `windows.chatter` (names the site DNS does not know: NXDOMAIN, then LLMNR, NBNS and mDNS fallback; SSDP; browser host announcements; `params: {rate}`)
 
-Device and OS-stack profiles are in [`profiles/devices.yaml`](src/pcapforge/profiles/devices.yaml). Their OUIs are checked against Wireshark's manufacturer database. Process models are in [`profiles/processes/`](src/pcapforge/profiles/processes/). New actors go in `src/pcapforge/actors/` and implement `plan()`, plus `serve()` for servers or `execute()` for clients. Actors that send one-way multicast or broadcast datagrams list the recording sinks they use in `sinks` (see `topology.SINKS`). [CONTRIBUTING.md](CONTRIBUTING.md#extending-the-engine) has the details.
+Device and OS-stack profiles are in [`profiles/devices.yaml`](src/pcapforge/profiles/devices.yaml). Their OUIs are checked against Wireshark's manufacturer database. Process models are in [`profiles/processes/`](src/pcapforge/profiles/processes/). New actors go in `src/pcapforge/actors/` and implement `plan()`, plus `serve()` for servers or `execute()` for clients. Actors that send one-way multicast or broadcast datagrams list the recording sinks they use in `sinks` (see `topology.SINKS`). Actors built on a third-party library declare it as an optional extra in `requires` and import it lazily. [CONTRIBUTING.md](CONTRIBUTING.md#extending-the-engine) has the details.
+
+### Process profiles
+
+A `modbus.server` actor serves one process profile (`params: {process: <id>}`) from `src/pcapforge/profiles/processes/`. Each is a register map with normal bands and a deterministic process model, so polled values move over the virtual day and a written setpoint drives the measurements and alarm bits that depend on it:
+
+- `water_treatment`: drinking-water clearwell and chlorination (level, chlorine residual, pH, pump speed, daily inlet/outlet flow).
+- `wastewater_treatment`: activated-sludge aeration basin and clarifier. The DO setpoint and the daily influent curve drive blower speed, dissolved oxygen and effluent ammonia; return-sludge flow sets the sludge blanket level; plus pH, MLSS and alarm bits.
+- `hvac_building`: AHU, three fan-coil zones and a chiller. A daily occupancy curve and outdoor temperature load the zones; zone temperatures track their setpoints while the fan-coil valves, CO2-driven outdoor-air damper, chilled-water return and chiller load absorb the load; plus fan and chiller status bits.
+- `power_substation`: 33/11 kV transformer with on-load tap changer and four feeders. Feeder breaker commands (coils) are mirrored by status bits (discretes). The load curve drives feeder currents, power factor, Mvar and transformer oil/winding temperature. The tap-position setpoint moves the busbar voltage (1.25 % per step) and can trip the voltage alarms.
 
 ## Development
 
 ```console
-$ pip install -e .[test]
+$ pip install -e .[test,opcua,s7]
 $ pytest
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the defensive policy, the setup on Windows and Linux, and the
 checklist for pull requests.
 
-The end-to-end tests record real traffic, so they need tshark 4.4+, dumpcap (or tcpdump) and loopback capture rights; they are skipped otherwise. `tests/test_grade.py` (grading rules, the student zip holds no answer material) needs neither. The end-to-end tests check that:
+The end-to-end tests record real traffic, so they need tshark 4.4+, dumpcap (or tcpdump) and loopback capture rights; they are skipped otherwise. Medium and hard also need the `opcua` and `s7` extras. `tests/test_grade.py` (grading rules, the student zip holds no answer material) needs neither. The end-to-end tests check that:
 - every capture passes the tshark integrity checks and all answer-key filters;
 - every write in the key points at a frame with the right source, target, function, register and value;
 - Scapy recomputes the same checksums;
 - the same seed gives byte-identical output;
 - `siem/modbus.jsonl` flags exactly the incident writes as out of band and the operator writes as in band, and `siem/flows.jsonl` accounts for every IP packet and byte;
-- with `suricata` on PATH (CI installs it), the generated rules alert on every incident write and on no operator write, and the unapproved-writer rule fires on easy/medium but not hard.
+- with `suricata` on PATH (CI installs it), the generated rules alert on every incident write and on no operator write, and the unapproved-writer rule fires on easy/medium but not hard;
+- OPC UA runs only between the historian and the SCADA server (medium/hard: mid-session Publish and watchdog Read; easy: none), every message fits one Ethernet segment, every payload timestamp is on the scenario clock and the published tag values follow the process model (`tests/test_opcua.py`, which also records a full session from Hello to subscriptions and secure-channel renewals);
+- S7comm sessions decode and their data blocks mirror the process (`tests/test_s7.py`);
+- recording without an optional extra stops before capturing, with the install command.
 
 Platform notes:
 - **Windows:** Npcap's `\Device\NPF_Loopback` adapter is used; administrator rights are not needed.
@@ -370,7 +390,7 @@ Platform notes:
   - DNS tunnelling against a local resolver
   - port scan followed by authentication failures against local test services
   - volumetric floods against a local sink
-- More OT protocols: S7comm, EtherNet/IP, DNP3.
+- More OT protocols: EtherNet/IP, DNP3.
 - Optional LLM "director" that drafts scenario YAML from a text description. It will never generate packets.
 
 ## License

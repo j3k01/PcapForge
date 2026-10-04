@@ -103,13 +103,17 @@ devices:
     stack: windows
     processing_ms: {median: 0.3, sigma: 0.5}
     browser: {os_version: [10, 0], server_type: 0x00019003}  # ... + NT Server
-  # SCADA / OPC UA server VM: the OPC UA stack answers in about a millisecond.
+  # SCADA / OPC UA server VM: the OPC UA stack answers in about a millisecond; `identity` is
+  # the BuildInfo its OPC UA server reports (opcua.server).
   scada-server-vm:
     vendor: VMware
     ouis: ["00:50:56", "00:0C:29"]
     stack: windows
     processing_ms: {median: 1.1, sigma: 0.5}
     browser: {os_version: [10, 0], server_type: 0x00019003}
+    identity: {ManufacturerName: Plant Automation Systems, ProductName: SCADA OPC UA Server,
+               ProductUri: "urn:plant-automation:scada:opcua-server", SoftwareVersion: 6.12.361.0,
+               BuildNumber: "361", BuildDate: "2024-03-12"}
   hp-workstation:
     vendor: HP
     ouis: ["3C:D9:2B", "00:1A:4B"]

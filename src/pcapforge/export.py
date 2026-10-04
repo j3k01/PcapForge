@@ -56,7 +56,7 @@ APPS = {
     "modbus": "modbus", "mbtcp": "modbus", "dns": "dns", "llmnr": "llmnr", "mdns": "mdns",
     "nbns": "nbns", "ssdp": "ssdp", "browser": "browser", "nbdgm": "nbdgm", "ntp": "ntp",
     "dhcp": "dhcp", "http": "http", "tls": "tls", "smb": "smb", "smb2": "smb", "ssh": "ssh",
-    "icmp": "icmp", "snmp": "snmp", "syslog": "syslog",
+    "icmp": "icmp", "snmp": "snmp", "syslog": "syslog", "opcua": "opcua", "s7comm": "s7comm",
 }
 NAME_RESOLUTION = ("llmnr", "nbns", "mdns", "ssdp", "browser")
 TRANSPORTS = {"1": "icmp", "6": "tcp", "17": "udp", "58": "icmpv6"}

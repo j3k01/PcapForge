@@ -16,8 +16,9 @@ briefing: |
   You are the OT SOC analyst for the {site_name} water-treatment plant ({domain}).
   Operations reported unusual process behaviour during the shift. The attached capture
   comes from the SPAN port of the control-network switch ({sensor_subnet}).
-  Normally only the SCADA HMI and the historian talk Modbus/TCP to the PLCs, and only
-  the engineering workstation is allowed to change setpoints.
+  Normally only the SCADA HMI, the SCADA server (where the site has one) and the historian
+  talk Modbus/TCP to the PLCs, and only the engineering workstation is allowed to change
+  setpoints.
   The PLC register map is included below.
 
 mitre:
@@ -48,6 +49,7 @@ topology:
     - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.writer_host == 'rogue'"}
     - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.writer_host == 'itpc'"}
     - {id: s7plc, device: siemens-s7-1500, subnet: control, name: "plc-{code}-tr2", when: vars.s7}
+    - {id: scada, device: scada-server-vm, subnet: control, name: "SCADA-{CODE}-01", when: vars.opcua}
 
 actors:
   - {id: plc_service, type: modbus.server, hosts: plc, params: {process: water_treatment}}
@@ -97,6 +99,33 @@ actors:
     hosts: historian
     when: vars.s7
     params: {targets: s7plc, interval: 10, jitter: 0.01, dbs: [1], identify: false, szl_interval: 0}
+  # SCADA / OPC UA server: polls the PLCs over Modbus and publishes their points as OPC UA
+  # tags; the historian collects them through a subscription per PLC.
+  - id: opcua_service
+    type: opcua.server
+    hosts: scada
+    when: vars.opcua
+    params: {sources: plc}
+  - id: scada_io_poll
+    type: modbus.poller
+    hosts: scada
+    when: vars.opcua
+    params: {targets: plc, interval: 2.0, jitter: 0.02}
+  - id: historian_opcua
+    type: opcua.client
+    hosts: historian
+    when: vars.opcua
+    params: {server: scada, publishing_interval: 2.0, keepalive_interval: 5.0}
+  - id: scada_time_sync
+    type: ntp.client
+    hosts: scada
+    when: vars.opcua
+    params: {server: dc}
+  - id: scada_chatter
+    type: windows.chatter
+    hosts: scada
+    when: vars.opcua
+    params: {rate: "${vars.chatter_rate}"}
   - id: change
     type: modbus.writer
     hosts: "${vars.writer_host}"
@@ -129,6 +158,7 @@ difficulty:
       ntp: true
       chatter: false
       s7: false
+      opcua: false
   medium:
     duration: 45m
     impairments: {retransmit_rate: 0.0005, mid_session: true}
@@ -146,8 +176,9 @@ difficulty:
       dns: true
       ntp: true
       chatter: true
-      s7: true
       chatter_rate: 1
+      s7: true
+      opcua: true
   hard:
     duration: 2h
     impairments: {retransmit_rate: 0.001, mid_session: true}
@@ -167,6 +198,7 @@ difficulty:
       chatter: true
       chatter_rate: 2
       s7: true
+      opcua: true
 
 questions:
   - id: source_ip
