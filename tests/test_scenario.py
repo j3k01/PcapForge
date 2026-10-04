@@ -115,3 +115,12 @@ def test_polish_translation_covers_every_question_and_keeps_answers(scenario):
     assert localized["questions"][0]["text"] == pl[ids[0]]["text"]
     template = submission_template(localized)
     assert "adres IP" in template and "jan-kowalski.yaml" in template
+
+
+def test_recording_key_changes_when_only_the_site_naming_changes(scenario):
+    plan = build_plan(scenario, "easy", "names", duration_override=120)
+    before = plan.digest()
+    plan.topology.site_code = "zz"
+    for host in plan.topology.hosts:
+        host.name = host.name + "x"
+    assert plan.digest() != before

@@ -239,7 +239,8 @@ def write_handout(plan: Plan, answers: dict, out_dir: Path) -> Path:
 
     briefing = texts.get("briefing") or plan.scenario.doc.get("briefing") or plan.scenario.doc.get("summary", "")
     process = plan.vars.get("process")
-    title = ProcessProfile(process).title if isinstance(process, str) else ""
+    profile = ProcessProfile(process) if isinstance(process, str) else None
+    title = (profile.titles.get(lang) or profile.title) if profile else ""
     process_title = title[:1].lower() + title[1:]
     for key, value in (("site_name", topo.site_name), ("domain", topo.domain), ("sensor_subnet", subnet),
                        ("process_title", process_title)):
@@ -270,7 +271,7 @@ def write_handout(plan: Plan, answers: dict, out_dir: Path) -> Path:
         profile, hosts = profiles.setdefault(name, (ProcessProfile(name), []))
         hosts.extend(h.name for h in actor.hosts)
     for profile, hosts in profiles.values():
-        lines += [f"## {t['register_map'].format(title=profile.title)}", "",
+        lines += [f"## {t['register_map'].format(title=profile.titles.get(lang, profile.title))}", "",
                   t["regmap_note"].format(unit=profile.unit_id, hosts=", ".join(hosts)), ""]
         rows = []
         for table in ("coils", "discrete", "holding", "input"):

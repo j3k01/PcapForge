@@ -30,7 +30,7 @@ mitre:
   - {framework: ics, id: T0861, name: Point & Tag Identification, when: vars.discovery}
 
 site:
-  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Riverbend, Oak Hollow, Millbrook]
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
   codes: [wtp, sut, zuw, stw]
   start_hours: [6, 21]
   weekdays: [0, 1, 2, 3, 4, 5]
@@ -43,7 +43,7 @@ topology:
     - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
   hosts:
     - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
-    - {id: plc, count: "${vars.plc_count}", device: [schneider-m340, schneider-m340, siemens-s7-1200, rockwell-micro850], subnet: control, name: "plc-{code}-{index:02d}"}
+    - {id: plc, count: "${vars.plc_count}", device: "${vars.plc_devices}", subnet: control, name: "plc-{code}-{index:02d}"}
     - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
     - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
     - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
@@ -146,6 +146,7 @@ difficulty:
     duration: 15m
     impairments: {retransmit_rate: 0.0, mid_session: false}
     vars:
+      plc_devices: [schneider-m340, schneider-m340, siemens-s7-1200, rockwell-micro850]
       process: water_treatment
       plc_count: 2
       hmi_interval: 2.0
@@ -166,6 +167,7 @@ difficulty:
     duration: 45m
     impairments: {retransmit_rate: 0.0005, mid_session: true}
     vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
       process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
       plc_count: {range: [2, 4]}
       hmi_interval: 1.0
@@ -187,6 +189,7 @@ difficulty:
     duration: 2h
     impairments: {retransmit_rate: 0.001, mid_session: true}
     vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
       process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
       plc_count: {range: [3, 5]}
       hmi_interval: 1.0

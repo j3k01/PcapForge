@@ -73,3 +73,6 @@ operator_adjustable:
   - {name: clearwell_level_sp, step: [5, 15]}
   - {name: chlorine_dose_sp, step: [0.05, 0.2]}
   - {name: pump1_speed_sp, step: [2, 6]}
+
+translations:
+  pl: {title: "Uzdatnianie wody pitnej — zbiornik wody czystej i chlorowanie"}

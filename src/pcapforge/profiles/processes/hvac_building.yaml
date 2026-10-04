@@ -90,3 +90,6 @@ operator_adjustable:
   - {name: zone3_temp_sp, step: [0.5, 1.0]}
   - {name: supply_air_temp_sp, step: [0.5, 1.0]}
   - {name: duct_static_pressure_sp, step: [10, 30]}
+
+translations:
+  pl: {title: "HVAC budynku — centrala wentylacyjna, strefy klimakonwektorów i agregat wody lodowej"}

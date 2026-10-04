@@ -81,3 +81,6 @@ operator_adjustable:
   - {name: do_sp, step: [0.1, 0.3]}
   - {name: ras_flow_sp, step: [5, 15]}
   - {name: was_flow_sp, step: [0.5, 2]}
+
+translations:
+  pl: {title: "Oczyszczalnia ścieków — komora napowietrzania i osadnik wtórny"}

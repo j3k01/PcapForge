@@ -94,7 +94,9 @@ class Plan:
             "scenario_version": self.scenario.doc.get("version", 1),
             "start_epoch": self.start_epoch,
             "behaviour": self.rng.key,
-            "hosts": [(h.id, h.device.name, h.loopback) for h in self.topology.hosts],
+            # Names travel inside payloads (DNS, S7 SZL, OPC UA), so they must key the recording.
+            "site": (self.topology.site_name, self.topology.site_code, self.topology.domain),
+            "hosts": [(h.id, h.name, h.device.name, h.loopback) for h in self.topology.hosts],
             "actions": [(a.t, a.host, a.op, a.args, a.phase) for a in self.actions],
         }
         blob = json.dumps(payload, sort_keys=True, default=str).encode()

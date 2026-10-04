@@ -85,6 +85,36 @@ devices:
     stack: vxworks
     processing_ms: {median: 5.0, sigma: 0.5}
     identity: {VendorName: Rockwell Automation, ProductCode: 2080-LC50-24QWB, MajorMinorRevision: "21.011"}
+  abb-ac500:
+    vendor: ABB
+    ouis: ["00:0C:DE"]
+    stack: vxworks
+    processing_ms: {median: 5.0, sigma: 0.5}
+    identity: {VendorName: ABB, ProductCode: PM5650-2ETH, MajorMinorRevision: "3.6.0"}
+  phoenix-axc-f2152:
+    vendor: Phoenix Contact
+    ouis: ["00:A0:45", "A8:74:1D"]
+    stack: linux  # PLCnext Linux runtime
+    processing_ms: {median: 3.0, sigma: 0.5}
+    identity: {VendorName: Phoenix Contact, ProductCode: AXC F 2152, MajorMinorRevision: "2024.0.4"}
+  wago-pfc200:
+    vendor: WAGO
+    ouis: ["00:30:DE"]
+    stack: linux  # embedded Linux controller
+    processing_ms: {median: 3.5, sigma: 0.5}
+    identity: {VendorName: WAGO, ProductCode: 750-8212, MajorMinorRevision: "04.04.03(26)"}
+  beckhoff-cx9020:
+    vendor: Beckhoff
+    ouis: ["00:01:05"]
+    stack: windows  # TwinCAT on Windows Embedded
+    processing_ms: {median: 2.5, sigma: 0.5}
+    identity: {VendorName: Beckhoff Automation, ProductCode: CX9020, MajorMinorRevision: "3.1.4024"}
+  honeywell-controledge:
+    vendor: Honeywell
+    ouis: ["00:40:84"]
+    stack: vxworks
+    processing_ms: {median: 6.0, sigma: 0.5}
+    identity: {VendorName: Honeywell, ProductCode: ControlEdge PLC 900, MajorMinorRevision: "R170"}
   moxa-gateway:
     vendor: Moxa
     ouis: ["00:90:E8"]

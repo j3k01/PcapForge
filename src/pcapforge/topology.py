@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from pcapforge.profiles import Device, device
@@ -106,14 +107,16 @@ class Topology:
         # Names travel inside DNS payloads, so they belong to the recorded world.
         self.site_name: str = world_rng.choice(site.get("names", ["Plant"]))
         self.site_code: str = world_rng.choice(site.get("codes", ["site"]))
-        slug = re.sub(r"[^a-z0-9]+", "", self.site_name.lower())
+        ascii_name = unicodedata.normalize("NFKD", self.site_name.replace("ł", "l").replace("Ł", "L"))
+        slug = re.sub(r"[^a-z0-9]+", "", ascii_name.encode("ascii", "ignore").decode().lower())
         self.domain: str = site.get("domain") or f"{slug}.local"
         loop_index = 10
         for spec in topo["hosts"]:
             if not evaluate_when(spec.get("when"), ctx):
                 continue
             count = int(resolve(spec.get("count", 1), ctx))
-            choices = spec["device"] if isinstance(spec["device"], list) else [spec["device"]]
+            device_spec = resolve(spec["device"], ctx)
+            choices = device_spec if isinstance(device_spec, list) else [device_spec]
             members = []
             for index in range(1, count + 1):
                 host_id = spec["id"] if count == 1 else f"{spec['id']}{index}"

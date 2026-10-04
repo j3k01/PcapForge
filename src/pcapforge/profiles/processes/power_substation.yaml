@@ -85,3 +85,6 @@ poll_groups:
 # Setpoints a legitimate operator adjusts during a shift, and by how much.
 operator_adjustable:
   - {name: tap_position_sp, step: [1, 1]}
+
+translations:
+  pl: {title: "Stacja elektroenergetyczna SN — transformator 33/11 kV i pola odpływowe"}

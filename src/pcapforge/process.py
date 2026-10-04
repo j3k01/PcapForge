@@ -53,6 +53,7 @@ class ProcessProfile:
         doc = process_doc(name)
         self.id: str = doc["id"]
         self.title: str = doc["title"]
+        self.titles: dict[str, str] = {lang: t["title"] for lang, t in doc.get("translations", {}).items()}
         self.unit_id: int = doc.get("unit_id", 1)
         self.points: list[Point] = []
         for table in TABLES:
