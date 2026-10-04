@@ -15,24 +15,31 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install Wireshark CLI tools with loopback capture rights
+      - name: Install Wireshark >= 4.4 CLI tools with loopback capture rights
         run: |
+          # Ubuntu 24.04 ships Wireshark 4.2; answer-key verification needs 4.4+.
+          sudo add-apt-repository -y ppa:wireshark-dev/stable
           echo "wireshark-common wireshark-common/install-setuid boolean false" | sudo debconf-set-selections
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark zip
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
           sudo setcap cap_net_raw,cap_net_admin=eip "$(command -v dumpcap)"
+          # Immediate loopback ACKs for the recording network (pcapforge adds it itself when permitted).
+          sudo ip route add local 127.77.0.0/16 dev lo table local quickack 1
       - run: pip install -e .
-      - name: Generate sample captures for every scenario and difficulty
+      - name: Generate and package sample captures for every scenario and difficulty
         run: |
           for scenario in $(pcapforge list | awk '{print $1}'); do
-            for difficulty in easy medium hard; do
-              pcapforge generate -s "$scenario" -d "$difficulty" --seed release -o dist -q
+            for difficulty in $(pcapforge list | awk -v s="$scenario" '$1 == s {print $3}' | tr / ' '); do
+              pcapforge generate -s "$scenario" -d "$difficulty" --seed release --siem -o runs -q
             done
           done
-          cd dist && for d in */; do zip -qr "${d%/}.zip" "$d"; done
+          pcapforge package runs/*/ --out dist
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
           body: |
-            Sample captures generated with `--seed release`. Each zip contains `capture.pcap`,
-            `briefing.md` (student handout) and `answers.json` (instructor key: keep it away from students).
+            Sample captures generated with `--seed release`, two zips per scenario and difficulty:
+            - `<run>-student.zip`: `capture.pcap`, `briefing.md` (handout) and `submission_template.yaml`
+              (fill it in, then grade it with `pcapforge grade answers.json <submission>`).
+            - `<run>-instructor.zip`: the whole run, including `answers.json`, `siem/` and `detections/`.
+              Keep it away from students.

@@ -1,4 +1,4 @@
-"""End-to-end generation: plan -> record (cached) -> compose -> answer key -> verify."""
+"""End-to-end generation: plan -> record (cached) -> compose -> answer key + handout -> verify."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pcapforge.answers import build_answers, write_handout
 from pcapforge.compose import compose
 from pcapforge.detections import write_detections
 from pcapforge.export import export_siem
+from pcapforge.grade import write_submission_template
 from pcapforge.plan import build_plan
 from pcapforge.record import recording_for
 from pcapforge.scenario import Scenario
@@ -25,6 +26,7 @@ class Generated:
     pcap: Path
     answers: Path
     handout: Path
+    template: Path
     packets: int
     cached_recording: bool
     report: VerifyReport | None
@@ -74,9 +76,10 @@ def generate(scenario: Scenario, difficulty: str, seed: str, out_root: Path, *,
     answers_path = directory / "answers.json"
     answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     handout = write_handout(plan, answers, directory)
+    template = write_submission_template(answers, directory)
 
     report = verify_capture(pcap, answers) if verify else None
     exports = write_exports(pcap, answers, directory) if siem else {}
     if exports:
         progress(f"exported {len(exports)} SIEM / detection files")
-    return Generated(directory, pcap, answers_path, handout, result.packets, cached, report, exports)
+    return Generated(directory, pcap, answers_path, handout, template, result.packets, cached, report, exports)

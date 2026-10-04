@@ -1,4 +1,4 @@
-"""Command-line interface: `pcapforge list|show|validate|generate|verify|export`."""
+"""Command-line interface: `pcapforge list|show|validate|generate|verify|export|grade|package`."""
 
 from __future__ import annotations
 
@@ -127,6 +127,36 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_grade(args) -> int:
+    from pcapforge.grade import GradeError, format_report, grade, load_submissions
+
+    try:
+        answers = json.loads(Path(args.answers).read_text(encoding="utf-8"))
+        report = grade(answers, load_submissions([Path(p) for p in args.submissions]))
+    except (OSError, json.JSONDecodeError, KeyError, GradeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_report(report), end="")
+    return 0
+
+
+def cmd_package(args) -> int:
+    from pcapforge.package import PackageError, package_run
+
+    out = Path(args.out) if args.out else None
+    for run_dir in args.run_dirs:
+        try:
+            for path in package_run(Path(run_dir), out):
+                print(path)
+        except (OSError, KeyError, PackageError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pcapforge", description=(
         "Generate realistic, labeled PCAPs with answer keys for blue-team training."))
@@ -144,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("paths", nargs="*")
     p.set_defaults(func=cmd_validate)
 
-    p = sub.add_parser("generate", help="generate capture + answers.json + briefing.md")
+    p = sub.add_parser("generate", help="generate capture + answers.json + briefing.md + submission_template.yaml")
     p.add_argument("--scenario", "-s", required=True, help="scenario id or path to scenario.yaml")
     p.add_argument("--difficulty", "-d", choices=DIFFICULTIES, default="medium")
     p.add_argument("--seed", default="1", help="any string; same seed = same exercise")
@@ -169,6 +199,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("export", help="(re)create siem/ and detections/ for an existing run directory")
     p.add_argument("run_dir", help="directory containing the capture and answers.json")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("grade", help="score student submissions against answers.json")
+    p.add_argument("answers", help="the run's answers.json")
+    p.add_argument("submissions", nargs="+",
+                   help="YAML/JSON {question_id: answer} per student, or a CSV with student,question,answer")
+    p.add_argument("--json", action="store_true", help="print the full report as JSON")
+    p.set_defaults(func=cmd_grade)
+
+    p = sub.add_parser("package", help="write <run>-student.zip and <run>-instructor.zip")
+    p.add_argument("run_dirs", nargs="+", metavar="run_dir", help="run directory from generate")
+    p.add_argument("--out", "-o", help="output directory (default: next to the run directory)")
+    p.set_defaults(func=cmd_package)
     return parser
 
 
