@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import struct
@@ -29,6 +30,8 @@ from pcapforge.topology import LOOPBACK_NET, MARKER_SINK, SINKS
 
 MARKER_MAGIC = b"PFMK"
 CAPTURE_FILTER = f"net {LOOPBACK_NET}.0.0/16"
+ROOTLESS = "unshare -rn pcapforge ..."
+QUICKACK_ROUTE = ["local", f"{LOOPBACK_NET}.0.0/16", "dev", "lo", "table", "local", "quickack", "1"]
 
 
 class RecordingError(RuntimeError):
@@ -83,10 +86,14 @@ class Capture:
         iface = loopback_interface()
         dumpcap = find_tool("dumpcap")
         if dumpcap:
-            cmd = [dumpcap, "-i", iface, "-f", CAPTURE_FILTER, "-w", str(self.path), "-F", "pcap", "-B", "128"]
+            cmd = [dumpcap, "-i", iface, "-f", CAPTURE_FILTER, "-w", str(self.path), "-P", "-B", "128"]
             ready = "Capturing on"
         else:
             cmd = [require_tool("tcpdump"), "-i", iface, "-U", "-w", str(self.path), CAPTURE_FILTER]
+            if sys.platform != "win32" and os.geteuid() == 0:
+                # Run as root, tcpdump drops to its own user before opening the output file, which
+                # then cannot write the cache (or, in a user namespace, cannot switch user at all).
+                cmd[1:1] = ["-Z", "root"]
             ready = "listening on"
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
         self.proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True,
@@ -127,7 +134,36 @@ def _capture_hint() -> str:
         return "\nHint: install Npcap with 'Support loopback traffic capture'."
     if sys.platform == "darwin":
         return f"\nHint: add loopback aliases, e.g. 'sudo ifconfig lo0 alias {LOOPBACK_NET}.0.10'."
-    return "\nHint: grant capture rights, e.g. 'sudo setcap cap_net_raw,cap_net_admin=eip $(which dumpcap)'."
+    return (f"\nHint: run pcapforge in its own user and network namespace: {ROOTLESS}\n"
+            "or grant capture rights: 'sudo setcap cap_net_raw,cap_net_admin=eip $(which dumpcap)'.")
+
+
+def _prepare_linux_loopback() -> None:
+    """Linux delays loopback ACKs and piggybacks them on the next segment, so a recording would
+    hold almost no pure ACKs. The composer expects every segment acknowledged at once (as on
+    Windows loopback) and models each device's delayed ACK itself; a local route with
+    ``quickack 1`` for the recording network makes Linux acknowledge immediately. In a fresh
+    network namespace (rootless recording) ``lo`` also starts down."""
+    ip = shutil.which("ip", path=os.pathsep.join([os.environ.get("PATH", ""), "/usr/sbin", "/sbin"]))
+    if ip is None:
+        raise RecordingError("'ip' (iproute2) not found; recording uses it to prepare the loopback interface")
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([ip, *args], capture_output=True, text=True, check=False)
+
+    steps = []
+    flags = run("-o", "link", "show", "lo").stdout.partition("<")[2].partition(">")[0].split(",")
+    if "UP" not in flags:
+        steps.append(["link", "set", "lo", "up"])
+    if "quickack 1" not in run("route", "show", "table", "local", QUICKACK_ROUTE[1]).stdout:
+        steps.append(["route", "add", *QUICKACK_ROUTE])
+    for step in steps:
+        done = run(*step)
+        if done.returncode != 0:
+            raise RecordingError(
+                f"'ip {' '.join(step)}' failed: {done.stderr.strip()}\n"
+                f"Hint: run pcapforge in its own user and network namespace: {ROOTLESS}\n"
+                f"or add the route once per boot: 'sudo ip route add {' '.join(QUICKACK_ROUTE)}'.")
 
 
 # --- recording ---------------------------------------------------------------------
@@ -170,6 +206,8 @@ def _stop_services(rt: Runtime, loop, thread) -> None:
 def record(plan: Plan, path: Path, progress: Callable[[int, int], None] | None = None) -> dict:
     logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "linux":
+        _prepare_linux_loopback()
     rt = Runtime(plan)
     actors = {a.id: a for a in plan.actors}
     capture = Capture(path)
