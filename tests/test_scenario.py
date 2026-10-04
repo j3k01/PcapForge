@@ -1,0 +1,74 @@
+import copy
+
+import pytest
+
+from pcapforge.process import ProcessProfile
+from pcapforge.plan import build_plan
+from pcapforge.scenario import ScenarioError, evaluate_when, find, parse_duration, resolve, validate
+
+SCENARIO = "ot-modbus-write-manipulation"
+
+
+@pytest.fixture(scope="module")
+def scenario():
+    return find(SCENARIO)
+
+
+def test_references_keep_type_when_whole_string_and_interpolate_otherwise():
+    ctx = {"vars": {"n": 3, "flag": True}, "facts": {"w": [{"a": 7}]}}
+    assert resolve("${vars.n}", ctx) == 3
+    assert resolve("${facts.w[0].a}", ctx) == 7
+    assert resolve("n=${vars.n} f=${vars.flag}", ctx) == "n=3 f=true"
+    with pytest.raises(ScenarioError, match="unresolved reference"):
+        resolve("${vars.missing}", ctx)
+
+
+@pytest.mark.parametrize("expr, expected", [
+    ("vars.flag", True), ("not vars.flag", False), ("vars.host == 'ews'", True),
+    ("vars.host != 'ews'", False), ("vars.absent", False), (None, True),
+])
+def test_conditions(expr, expected):
+    assert evaluate_when(expr, {"vars": {"flag": 1, "host": "ews"}}) is expected
+
+
+@pytest.mark.parametrize("text, seconds", [(90, 90), ("90s", 90), ("15m", 900), ("2h", 7200), ("1.5h", 5400)])
+def test_durations(text, seconds):
+    assert parse_duration(text) == seconds
+
+
+def test_schema_rejects_unknown_keys_and_dangling_hosts(scenario):
+    doc = copy.deepcopy(scenario.doc)
+    doc["actors"][0]["on"] = "plc"
+    with pytest.raises(ScenarioError, match="Additional properties"):
+        validate(doc)
+    doc = copy.deepcopy(scenario.doc)
+    doc["actors"][0]["hosts"] = "nonexistent"
+    with pytest.raises(ScenarioError, match="unknown host"):
+        validate(doc)
+
+
+def test_same_seed_same_plan_different_seed_different_variant(scenario):
+    a = build_plan(scenario, "medium", "student-1", duration_override=900)
+    b = build_plan(scenario, "medium", "student-1", duration_override=900)
+    c = build_plan(scenario, "medium", "student-2", duration_override=900)
+    assert a.digest() == b.digest()
+    assert a.digest() != c.digest()
+    assert a.facts["change"]["values"] == b.facts["change"]["values"]
+
+
+def test_base_seed_shares_recording_between_students(scenario):
+    a = build_plan(scenario, "easy", "alice", base_seed="class-a", duration_override=600)
+    b = build_plan(scenario, "easy", "bob", base_seed="class-a", duration_override=600)
+    assert a.digest() == b.digest()
+
+
+@pytest.mark.parametrize("difficulty", ["easy", "medium", "hard"])
+def test_incident_writes_leave_normal_band_and_operator_writes_stay_inside(scenario, difficulty):
+    plan = build_plan(scenario, difficulty, "band-check", duration_override=1800)
+    profile = ProcessProfile("water_treatment")
+    for write in plan.facts["change"]["writes"]:
+        lo, hi = write["normal"]
+        assert not lo <= write["value"] <= hi, write
+    for write in plan.facts.get("operator_changes", {}).get("writes", []):
+        lo, hi = profile.by_name[write["point"]].normal
+        assert lo <= write["value"] <= hi, write
