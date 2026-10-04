@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from pymodbus.client import ModbusTcpClient
 from pymodbus.pdu.device import ModbusDeviceIdentification
-from pymodbus.server import StartAsyncTcpServer
+from pymodbus.server import ModbusTcpServer
 from pymodbus.simulator import DataType, SimData, SimDevice
 
 from pcapforge import ports
@@ -37,8 +35,9 @@ class ModbusServer(Actor):
             sim = ProcessSim(self.profile, self.rng.child(host.id), self.plan_.start_hour)
             rt.sims[host.id] = sim
             device = self._device(host, sim, rt)
-            rt.tasks.append(asyncio.create_task(
-                StartAsyncTcpServer(device, address=(host.loopback, ports.MODBUS))))
+            server = ModbusTcpServer(device, address=(host.loopback, ports.MODBUS))
+            await server.serve_forever(background=True)
+            rt.servers.append(server)
 
     def _device(self, host, sim: ProcessSim, rt) -> SimDevice:
         profile = self.profile

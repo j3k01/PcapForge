@@ -145,7 +145,7 @@ questions:
     points: 10
     hint: Start from Modbus function codes 5, 6, 15 and 16 and compare the writers with the expected roles.
     check:
-      filter: "mbtcp && modbus.func_code in {5 6 15 16} && ip.src == ${facts.change.source.ip} && !modbus.request_frame"
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && !modbus.request_frame"
       expect: {min: "${facts.change.write_count}"}
   - id: source_mac
     text: Which MAC address did the sensor see on the frames carrying those write requests?
@@ -153,14 +153,14 @@ questions:
     points: 5
     hint: Routed traffic arrives with the MAC of the last hop, not of the originating host.
     check:
-      filter: "mbtcp && modbus.func_code in {5 6 15 16} && ip.src == ${facts.change.source.ip} && eth.src == ${facts.change.source.observed_mac}"
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && eth.src == ${facts.change.source.observed_mac}"
       expect: {min: 1}
   - id: target_ip
     text: Which PLC (IP address) received the unauthorized writes?
     answer: "${facts.change.target.ip}"
     points: 10
     check:
-      filter: "mbtcp && modbus.func_code in {5 6 15 16} && ip.src == ${facts.change.source.ip} && ip.dst == ${facts.change.target.ip}"
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && ip.dst == ${facts.change.target.ip}"
       expect: {min: "${facts.change.write_count}"}
   - id: first_write
     text: At what time (UTC) was the first unauthorized write request sent?
@@ -169,7 +169,7 @@ questions:
     tolerance_s: 1
     points: 10
     check:
-      filter: "frame.number == ${facts.change.first_write.frame} && modbus.func_code in {5 6 15 16} && ip.src == ${facts.change.source.ip}"
+      filter: "frame.number == ${facts.change.first_write.frame} && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip}"
       expect: {count: 1}
   - id: points_changed
     text: Which PLC points (register map names) were changed? List them.
