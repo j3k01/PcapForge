@@ -1,11 +1,15 @@
-"""End-to-end: record real loopback traffic, compose, and check the result with tshark/Scapy.
+"""End-to-end: record real loopback traffic, compose, and check the result with tshark/Scapy
+(and Suricata, when installed, for the generated detection rules).
 
 Needs Wireshark (tshark + dumpcap) and loopback capture rights; skipped otherwise.
 """
 
+import datetime as dt
 import hashlib
 import ipaddress
 import json
+import re
+import shutil
 import subprocess
 
 import pytest
@@ -13,6 +17,7 @@ from scapy.layers.inet import IP, TCP, UDP
 from scapy.utils import PcapReader
 
 from pcapforge.compose import compose
+from pcapforge.detections import SID_BASE
 from pcapforge.pipeline import generate
 from pcapforge.plan import build_plan
 from pcapforge.record import recording_for
@@ -31,9 +36,14 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module", params=["easy", "medium", "hard"])
 def generated(request, tmp_path_factory):
     out = tmp_path_factory.mktemp(request.param)
-    result = generate(find(SCENARIO), request.param, "pytest", out, duration=DURATION)
+    result = generate(find(SCENARIO), request.param, "pytest", out, duration=DURATION, siem=True)
     answers = json.loads(result.answers.read_text(encoding="utf-8"))
     return result, answers
+
+
+def jsonl(path):
+    with open(path, encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh]
 
 
 def tshark_fields(pcap, display_filter, fields):
@@ -138,3 +148,77 @@ def test_same_seed_is_byte_identical_and_new_seed_changes_presentation(tmp_path)
     assert digests[0] == digests[1]
     assert digests[0] != digests[2]
     assert sources[0] != sources[2]
+
+
+def test_modbus_log_flags_exactly_the_incident_writes_as_out_of_band(generated):
+    result, answers = generated
+    records = jsonl(result.exports["siem/modbus.jsonl"])
+    change, operator = answers["facts"]["change"], answers["facts"]["operator_changes"]
+    writes = [r for r in records if r["write"]]
+    assert len(writes) == change["write_count"] + operator["write_count"]
+
+    flagged = {(r["src"], r["dest"], r["address"], tuple(r["values"]), r["request_frame"], r["point"], r["value"])
+               for r in writes if r["in_normal_band"] is False}
+    assert flagged == {(change["source"]["ip"], change["target"]["ip"], w["address"], (w["raw"],),
+                        w["request"]["frame"], w["point"], w["value"]) for w in change["writes"]}
+
+    by_frame = {r["request_frame"]: r for r in writes}
+    for w in operator["writes"]:
+        record = by_frame[w["request"]["frame"]]
+        assert (record["src"], record["dest"], record["address"], record["values"], record["point"]) == (
+            operator["source"]["ip"], w["target"]["ip"], w["address"], [w["raw"]], w["point"])
+        assert record["in_normal_band"] is True
+
+
+def test_flow_totals_account_for_every_ip_packet_and_byte(generated):
+    result, _ = generated
+    packets = octets = 0
+    with PcapReader(str(result.pcap)) as reader:
+        for pkt in reader:
+            if IP in pkt:
+                packets += 1
+                octets += pkt[IP].len
+    flows = jsonl(result.exports["siem/flows.jsonl"])
+    assert sum(f["packets_out"] + f["packets_in"] for f in flows) == packets
+    assert sum(f["bytes_out"] + f["bytes_in"] for f in flows) == octets
+
+
+def _eve_epoch(timestamp: str) -> float:
+    return dt.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f%z").timestamp()
+
+
+@pytest.mark.skipif(not shutil.which("suricata"), reason="requires suricata on PATH")
+def test_suricata_rules_alert_on_out_of_band_writes_and_unapproved_writers(generated, tmp_path):
+    result, answers = generated
+    rules = result.exports["detections/suricata.rules"]
+    # --init-errors-fatal: a rule Suricata cannot load fails the run instead of being skipped.
+    run = subprocess.run([shutil.which("suricata"), "-r", str(result.pcap), "-S", str(rules),
+                          "--set", "app-layer.protocols.modbus.enabled=true", "-l", str(tmp_path), "-k", "none",
+                          "--init-errors-fatal"], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr + run.stdout
+    alerts = [e for e in jsonl(tmp_path / "eve.json") if e.get("event_type") == "alert"]
+
+    band_sids = {(m["point"], m["side"]): int(m["sid"]) for m in re.finditer(
+        r'msg:"PCAPFORGE OT (?P<point>\w+) written (?P<side>above|below) normal band.*?sid:(?P<sid>\d+);',
+        rules.read_text(encoding="utf-8"))}
+    band_alerts = [a for a in alerts if a["alert"]["signature_id"] in band_sids.values()]
+    change = answers["facts"]["change"]
+    pair = {change["source"]["ip"], change["target"]["ip"]}
+    expected = []
+    for w in change["writes"]:
+        sid = band_sids[(w["point"], "above" if w["value"] > w["normal"][1] else "below")]
+        expected.append(sid)
+        assert any(a["alert"]["signature_id"] == sid and {a["src_ip"], a["dest_ip"]} == pair
+                   and 0 <= _eve_epoch(a["timestamp"]) - w["request"]["epoch"] < 5 for a in band_alerts), \
+            f"no out-of-band alert for {w['point']} written in frame {w['request']['frame']}"
+    # One band alert per incident write and none for the in-band operator writes.
+    assert sorted(a["alert"]["signature_id"] for a in band_alerts) == sorted(expected)
+
+    unapproved = [a for a in alerts if a["alert"]["signature_id"] == SID_BASE + 1]
+    approved_writer = change["source"]["id"] == answers["facts"]["operator_changes"]["source"]["id"]
+    assert approved_writer == (answers["scenario"]["difficulty"] == "hard")
+    if approved_writer:
+        assert not unapproved
+    else:
+        assert len(unapproved) >= change["write_count"]
+        assert all({a["src_ip"], a["dest_ip"]} == pair for a in unapproved)

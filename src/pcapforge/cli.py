@@ -1,4 +1,4 @@
-"""Command-line interface: `pcapforge list|show|validate|generate|verify`."""
+"""Command-line interface: `pcapforge list|show|validate|generate|verify|export`."""
 
 from __future__ import annotations
 
@@ -87,9 +87,11 @@ def cmd_generate(args) -> int:
 
         out = generate(sc, args.difficulty, seed, Path(args.out), base_seed=args.base_seed,
                        fmt=args.format, use_cache=not args.no_cache, duration=duration,
-                       verify=not args.no_verify, progress=progress)
+                       verify=not args.no_verify, siem=args.siem, progress=progress)
         verdict = "not verified" if out.report is None else ("verified" if out.report.ok else "VERIFY FAILED")
         print(f"{out.pcap}  ({out.packets} packets, {verdict})")
+        if out.exports:
+            print(f"{out.directory / 'siem'}  {out.directory / 'detections'}")
         if out.report is not None and not out.report.ok:
             status = 2
             for check in out.report.checks:
@@ -106,6 +108,22 @@ def cmd_verify(args) -> int:
     for check in report.checks:
         print(f"{'ok  ' if check['ok'] else 'FAIL'}  {check['name']}: {check['detail']}")
     return 0 if report.ok else 2
+
+
+def cmd_export(args) -> int:
+    from pcapforge.pipeline import export_run
+
+    directory = Path(args.run_dir)
+    if not (directory / "answers.json").is_file():
+        print(f"error: {directory} has no answers.json (not a pcapforge run directory)", file=sys.stderr)
+        return 1
+    for _name, path in sorted(export_run(directory).items()):
+        if path.suffix == ".jsonl":
+            with open(path, encoding="utf-8") as fh:
+                print(f"{path}  ({sum(1 for _ in fh)} records)")
+        else:
+            print(path)
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -137,6 +155,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", help="override capture length, e.g. 20m")
     p.add_argument("--no-cache", action="store_true", help="always record fresh")
     p.add_argument("--no-verify", action="store_true", help="skip tshark verification")
+    p.add_argument("--siem", action="store_true",
+                   help="also write siem/*.jsonl logs and detections/ (Suricata rules, hunting guide)")
     p.add_argument("--quiet", "-q", action="store_true")
     p.set_defaults(func=cmd_generate)
 
@@ -144,6 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("pcap")
     p.add_argument("--answers", "-a")
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("export", help="(re)create siem/ and detections/ for an existing run directory")
+    p.add_argument("run_dir", help="directory containing the capture and answers.json")
+    p.set_defaults(func=cmd_export)
     return parser
 
 

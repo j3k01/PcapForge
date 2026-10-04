@@ -95,6 +95,22 @@ Done and committed (verify with `git log --oneline`):
 
 Status: first scenario complete end-to-end (compose/, answers.py, verify.py, cli.py, tests, README, CI),
 with Windows background chatter on medium/hard (`vars.chatter`, `vars.chatter_rate`).
+- SIEM export + detection content (`generate --siem`, `pcapforge export <run>`):
+  - `export.py` — one tshark pass (`-T fields`, ~70 fields, occurrence aggregator `\x1f`), streamed and
+    aggregated in Python into `siem/{flows,modbus,dns,ntp,name_resolution,arp}.jsonl`. Modbus pairs
+    request/response by (TCP stream, transaction id) because exception responses carry no
+    `modbus.request_frame`; TCP retransmissions are skipped. Writes are annotated from the register map
+    of the PLC's process profile.
+  - `detections.py` — `suricata.rules` + `hunting.md` from `answers.json` alone. answers.json now has
+    `actors` (id, type, incident, host ids) so roles come from actor types: PLCs = `modbus.server`,
+    approved writers = non-incident `modbus.operator`, SCADA clients = `modbus.poller` + operators.
+    The scenario's `operator_changes` actor is present at every level (count 0 on easy) so the approved
+    writer is always modelled. Suricata `modbus: access ... address` is 1-based (wire address + 1;
+    see `rust/src/modbus/detect.rs` tests); band rules use raw register units.
+  - questions may carry a templated `hunt` block (`dataset`, `wireshark`, `spl`, `kql`, `look_for`),
+    copied resolved into answers.json.
+  - Verified locally: invariants in tests (out-of-band writes == incident writes, flows sum to IP
+    packets/bytes). Suricata test runs only where `suricata` is on PATH (CI); SPL/KQL not machine-verified.
 Next: IT-line scenarios (README roadmap).
 
 ### Composer spec

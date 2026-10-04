@@ -10,6 +10,7 @@ traffic into a believable site topology, and writes:
 - `capture.pcap` / `capture.pcapng`: decodes cleanly in Wireshark, tshark, Zeek, Suricata and Splunk Stream
 - `answers.json`: IOCs, timeline with frame numbers, MITRE ATT&CK (Enterprise/ICS) mapping, questions with answers and the tshark filter that proves each answer
 - `briefing.md`: the student handout (scenario text, asset inventory, register map, questions without answers)
+- with `--siem`: `siem/*.jsonl` logs for Splunk/Elastic and `detections/` (Suricata rules, hunting guide)
 
 The same seed always gives the same exercise, and every student can get their own variant.
 
@@ -50,6 +51,7 @@ Other commands:
 - `pcapforge show <scenario>` describes the techniques, difficulty knobs and questions.
 - `pcapforge validate` checks scenario files.
 - `pcapforge verify capture.pcap -a answers.json` re-checks a capture against its key.
+- `pcapforge export <run dir>` (re)creates `siem/` and `detections/` for an existing run.
 
 ### What the analyst sees (easy, seed 42)
 
@@ -75,6 +77,62 @@ And the matching entry in `answers.json`:
               "expect": {"count": 1}}]
 }
 ```
+
+## SIEM export and detection content
+
+`--siem` (or `pcapforge export <run dir>` later) turns a run into a detection-engineering lab:
+
+```console
+$ pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42 --siem
+$ pcapforge export out/ot-modbus-write-manipulation_easy_42
+out/ot-modbus-write-manipulation_easy_42/detections/hunting.md
+out/ot-modbus-write-manipulation_easy_42/detections/suricata.rules
+out/ot-modbus-write-manipulation_easy_42/siem/arp.jsonl  (20 records)
+out/ot-modbus-write-manipulation_easy_42/siem/dns.jsonl  (0 records)
+out/ot-modbus-write-manipulation_easy_42/siem/flows.jsonl  (38 records)
+out/ot-modbus-write-manipulation_easy_42/siem/modbus.jsonl  (3975 records)
+out/ot-modbus-write-manipulation_easy_42/siem/name_resolution.jsonl  (0 records)
+out/ot-modbus-write-manipulation_easy_42/siem/ntp.jsonl  (33 records)
+```
+
+`siem/` holds one JSON event per line, decoded by a single tshark pass:
+
+| file | one record per | main fields |
+|---|---|---|
+| `flows.jsonl` | TCP connection / UDP 5-tuple exchange / other IP pair | `src`, `dest`, `src_port`, `dest_port`, `transport`, `app`, `duration`, `packets_out/in`, `bytes_out/in` (IP bytes), `state` (`established`, `mid_session` = no SYN seen, `closed` = FIN, `reset`; UDP `bidirectional` / `one_way`) |
+| `modbus.jsonl` | request/response transaction | `unit_id`, `trans_id`, `function_code`, `function`, `write`, `table`, `address`, `quantity`, `values` (written raw registers), `exception`, `response_time_ms`, `request_frame`; for writes to a PLC with a known register map: `point`, `unit`, `value` (engineering), `in_normal_band` |
+| `dns.jsonl` | query/response | `query`, `qtype`, `rcode`, `answers`, `ttl`, `response_time_ms` |
+| `ntp.jsonl` | client request/server response | `version`, `stratum`, `refid`, `server_time`, `offset_ms`, `response_time_ms` |
+| `name_resolution.jsonl` | LLMNR / NBNS / mDNS / SSDP / browser datagram | `app`, `message`, `query`, `qtype`, `answers` |
+| `arp.jsonl` | ARP packet | `operation`, `src`, `src_mac`, `dest`, `dest_mac`, `gratuitous` |
+
+Every record has `ts` (ISO-8601 UTC, microseconds, `Z`) for Splunk `_time` / Elastic `@timestamp`
+and `epoch`; field names follow the Splunk CIM (`src`, `dest`, `src_port`, `dest_port`, `transport`, `app`).
+A write from the easy run above:
+
+```json
+{"ts": "2025-03-22T11:45:36.016219Z", "src": "10.241.35.164", "src_port": 42462, "dest": "10.241.35.159", "dest_port": 502,
+ "src_mac": "b8:27:eb:23:26:6d", "function_code": 6, "function": "write_single_register", "write": true, "table": "holding",
+ "address": 8, "quantity": 1, "values": [1587], "response_time_ms": 2.932, "request_frame": 7191,
+ "point": "pid_level_ti", "unit": "s", "value": 1587.0, "in_normal_band": false, ...}
+```
+
+Loading: in Splunk use sourcetype `pcapforge:<file stem>` (e.g. `pcapforge:modbus`) with
+`INDEXED_EXTRACTIONS = json`, `TIMESTAMP_FIELDS = ts`, `TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%6NZ`; in Elastic
+use one index per file (`pcapforge-modbus`, ...) with `ts` as the timestamp field.
+
+`detections/` is generated from the site model in `answers.json`:
+- `suricata.rules` (sids 9100000+): any Modbus write to a PLC from a host that is not an approved writer
+  (hosts of `modbus.operator` actors), device identification (function 43) from a host that is not a
+  SCADA client, and per writable holding register with a normal band, writes above / below the band
+  (raw register units). Suricata's Modbus parser is off by default:
+  `suricata -r capture.pcap -S suricata.rules --set app-layer.protocols.modbus.enabled=true -k none -l logs`.
+- `hunting.md`: per question, the answer, the verified Wireshark filters from the answer key, and a
+  Splunk SPL search and Kibana KQL filter over the export with a "what to look for" note. The SPL/KQL
+  are templates from the scenario's `hunt` blocks and are not machine-verified.
+
+On the hard level the unauthorized writes come from the approved engineering workstation, so only
+the out-of-band rules fire; the unapproved-writer rule fires on easy and medium.
 
 ## Scenarios
 
@@ -156,6 +214,11 @@ questions:
     text: Which IP address issued the unauthorized Modbus write requests?
     answer: "${facts.change.source.ip}"
     check: {filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip}", expect: {min: 1}}
+    hunt:                                       # optional, rendered into detections/hunting.md
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true | stats count BY src, dest"
+      kql: "write : true"
+      look_for: Writers other than the engineering workstation.
 ```
 
 Built-in actor types:
@@ -180,7 +243,9 @@ The end-to-end tests record real traffic, so they need tshark, dumpcap and loopb
 - every capture passes the tshark integrity checks and all answer-key filters;
 - every write in the key points at a frame with the right source, target, function, register and value;
 - Scapy recomputes the same checksums;
-- the same seed gives byte-identical output.
+- the same seed gives byte-identical output;
+- `siem/modbus.jsonl` flags exactly the incident writes as out of band and the operator writes as in band, and `siem/flows.jsonl` accounts for every IP packet and byte;
+- with `suricata` on PATH (CI installs it), the generated rules alert on every incident write and on no operator write, and the unapproved-writer rule fires on easy/medium but not hard.
 
 Platform notes:
 - **Windows:** Npcap's `\Device\NPF_Loopback` adapter is used; administrator rights are not needed.
