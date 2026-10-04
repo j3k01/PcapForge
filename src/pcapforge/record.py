@@ -205,6 +205,8 @@ def _stop_services(rt: Runtime, loop, thread) -> None:
 
 def record(plan: Plan, path: Path, progress: Callable[[int, int], None] | None = None) -> dict:
     logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
+    for actor in plan.actors:
+        actor.check()  # missing optional packages fail before anything is captured
     path.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform == "linux":
         _prepare_linux_loopback()

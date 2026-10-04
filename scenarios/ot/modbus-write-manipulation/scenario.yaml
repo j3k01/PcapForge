@@ -47,6 +47,7 @@ topology:
     - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
     - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.writer_host == 'rogue'"}
     - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.writer_host == 'itpc'"}
+    - {id: s7plc, device: siemens-s7-1500, subnet: control, name: "plc-{code}-tr2", when: vars.s7}
 
 actors:
   - {id: plc_service, type: modbus.server, hosts: plc, params: {process: water_treatment}}
@@ -80,6 +81,22 @@ actors:
     hosts: [hmi, historian, ews]
     when: vars.chatter
     params: {rate: "${vars.chatter_rate}"}
+  # Second treatment train: OEM package unit on a Siemens S7-1500, monitored over S7comm.
+  - id: s7_service
+    type: s7.server
+    hosts: s7plc
+    when: vars.s7
+    params: {process: water_treatment}
+  - id: scada_s7_poll
+    type: s7.client
+    hosts: hmi
+    when: vars.s7
+    params: {targets: s7plc, interval: "${vars.hmi_interval}", jitter: 0.03, szl_interval: 60}
+  - id: historian_s7_poll
+    type: s7.client
+    hosts: historian
+    when: vars.s7
+    params: {targets: s7plc, interval: 10, jitter: 0.01, dbs: [1], identify: false, szl_interval: 0}
   - id: change
     type: modbus.writer
     hosts: "${vars.writer_host}"
@@ -111,6 +128,7 @@ difficulty:
       dns: false
       ntp: true
       chatter: false
+      s7: false
   medium:
     duration: 45m
     impairments: {retransmit_rate: 0.0005, mid_session: true}
@@ -128,6 +146,7 @@ difficulty:
       dns: true
       ntp: true
       chatter: true
+      s7: true
       chatter_rate: 1
   hard:
     duration: 2h
@@ -147,6 +166,7 @@ difficulty:
       ntp: true
       chatter: true
       chatter_rate: 2
+      s7: true
 
 questions:
   - id: source_ip
