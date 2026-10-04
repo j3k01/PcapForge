@@ -14,7 +14,9 @@ detection-engineering exercises. All traffic comes from benign services and clie
    `SimDevice`, NTP, DNS) run in one asyncio thread; the orchestrator executes actions
    sequentially, sending a UDP marker (`<host-ip> -> 127.77.0.1:9999`) before each
    action. Capture: dumpcap (`\Device\NPF_Loopback` on Windows, `lo` on Linux) or
-   tcpdump. Recording is cached by plan hash → byte-identical output for the same seed.
+   tcpdump. On Linux the recorder first brings `lo` up if needed and adds
+   `local 127.77.0.0/16 dev lo table local quickack 1` (immediate ACKs, see Linux results).
+   Recording is cached by plan hash → byte-identical output for the same seed.
 3. **Compose**:
    - flow assignment: a client-sent payload/SYN/FIN packet binds its flow to the latest
      marker; server replies and pure ACKs inherit the flow's current action;
@@ -49,6 +51,24 @@ detection-engineering exercises. All traffic comes from benign services and clie
   it is called with `set_values` then again with `None`. Writes to unmapped addresses →
   exception code 2. FC43 device identification works via `identity=`.
   Pin `pymodbus~=3.15`.
+
+## Linux results (WSL 2 Ubuntu 24.04, kernel 6.18, pymodbus 3.15, tshark 4.6.6 from ppa:wireshark-dev/stable, Suricata 7.0.3)
+
+- Rootless: `unshare -rn pcapforge ...` / `unshare -rn pytest` make the user root of a private user +
+  network namespace; dumpcap and tcpdump capture its `lo` (Ethernet link type, zeroed MACs; the
+  composer strips it) and the recorder can configure it. No sudo, setcap or Docker.
+- Linux loopback delays and piggybacks ACKs (pingpong mode), so a Modbus poll recording had 24 pure
+  ACKs instead of ~5.7k and easy composed to ~8k packets instead of ~14k. The composer assumes the
+  Windows behaviour (every segment ACKed at once, delayed ACK modelled per device); the `quickack 1`
+  route restores it: easy seed 42 composes to 13 739 packets with the first write in frame 7197, as in
+  the README's Windows run.
+- dumpcap 4.2 has no `-F`; `-P` (classic pcap) works on 4.2 to 4.6. tcpdump run as root switches to
+  user `tcpdump` before opening the output file (failed in the namespace): `-Z root` when euid is 0.
+- Wireshark < 4.4 does not decode Write Single Register values (`modbus.data` only) and prints
+  absolute times as `Mar 22, 2025 11:38:00.7 UTC`; answer-key verification requires 4.4
+  (`tools.MIN_TSHARK`), the SIEM export also handles 4.2 (identical JSONL for seed 42 on all levels).
+- Debian/Ubuntu's `suricata.yaml` enables the unix command socket under `/var/run`; offline runs as a
+  normal user need `--set unix-command.enabled=no` with `--init-errors-fatal`.
 
 ## Scenario format
 
@@ -110,7 +130,10 @@ with Windows background chatter on medium/hard (`vars.chatter`, `vars.chatter_ra
   - questions may carry a templated `hunt` block (`dataset`, `wireshark`, `spl`, `kql`, `look_for`),
     copied resolved into answers.json.
   - Verified locally: invariants in tests (out-of-band writes == incident writes, flows sum to IP
-    packets/bytes). Suricata test runs only where `suricata` is on PATH (CI); SPL/KQL not machine-verified.
+    packets/bytes); SPL/KQL not machine-verified. Suricata test verified on Linux (Suricata 7.0.3): seed 42
+    gives one band alert per incident write (fc 6 and 16), none for operator writes, and the
+    unapproved-writer rule once per incident write on easy/medium, never on hard.
+- Linux: full suite (49 tests incl. Suricata) passes rootless under `unshare -rn pytest`; see Linux results.
 Next: IT-line scenarios (README roadmap).
 
 ### Composer spec

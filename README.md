@@ -23,10 +23,12 @@ The same seed always gives the same exercise, and every student can get their ow
 
 Requirements:
 - Python 3.13
-- Wireshark 4.x (`tshark` and `dumpcap`)
+- Wireshark 4.4 or newer (`tshark` and `dumpcap`); Ubuntu 24.04 ships 4.2, so add `ppa:wireshark-dev/stable` there
 - loopback capture rights:
   - Windows: Npcap with *loopback support*, the Wireshark installer default
-  - Linux: `sudo setcap cap_net_raw,cap_net_admin=eip $(which dumpcap)`
+  - Linux: none when pcapforge runs in its own user and network namespace (`unshare -rn pcapforge ...`, see
+    [Platform notes](#development)), otherwise `sudo setcap cap_net_raw,cap_net_admin=eip $(which dumpcap)`
+    plus, once per boot, `sudo ip route add local 127.77.0.0/16 dev lo table local quickack 1`
 
 ```console
 $ pip install -e .
@@ -63,6 +65,10 @@ $ tshark -r capture.pcap -Y "modbus.func_code in {6, 43} && !modbus.request_fram
 2025-03-22T11:45:37.918517Z  b8:27:eb:23:26:6d  10.241.35.164  10.241.35.159  6  4  635
 ...
 ```
+
+Wireshark 4.2 and older (the Ubuntu 24.04 package) do not decode the value of a Write Single Register
+(function 6): students see it only as raw `modbus.data` bytes (`06:33` = 1587), and `modbus.regval_uint16`
+and the answer-key filters that use it match nothing. pcapforge itself needs 4.4+ to verify a capture.
 
 And the matching entry in `answers.json`:
 
@@ -239,7 +245,7 @@ $ pip install -e .[test]
 $ pytest
 ```
 
-The end-to-end tests record real traffic, so they need tshark, dumpcap and loopback capture rights; they are skipped otherwise. They check that:
+The end-to-end tests record real traffic, so they need tshark 4.4+, dumpcap (or tcpdump) and loopback capture rights; they are skipped otherwise. They check that:
 - every capture passes the tshark integrity checks and all answer-key filters;
 - every write in the key points at a frame with the right source, target, function, register and value;
 - Scapy recomputes the same checksums;
@@ -249,7 +255,23 @@ The end-to-end tests record real traffic, so they need tshark, dumpcap and loopb
 
 Platform notes:
 - **Windows:** Npcap's `\Device\NPF_Loopback` adapter is used; administrator rights are not needed.
-- **Linux:** recording uses `lo`. Docker is not required.
+- **Linux:** recording uses `lo`. Docker is not required. Linux delays loopback ACKs and piggybacks them on
+  the next segment; before recording, pcapforge adds a `quickack 1` route for `127.77.0.0/16` so every
+  segment is acknowledged at once, as on Windows, and the composer models each device's delayed ACK.
+  Without it a Linux capture would lose most pure ACKs (easy: ~8k instead of ~14k packets). The rootless
+  way needs neither sudo nor setcap:
+
+  ```console
+  $ unshare -rn pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42
+  $ unshare -rn pytest
+  ```
+
+  `unshare -rn` runs the command as root of a new user and network namespace with its own `lo`:
+  dumpcap/tcpdump can capture it, and pcapforge brings it up and adds the route there. Both disappear when
+  the command exits. This needs unprivileged user namespaces (WSL 2 and most distributions allow them;
+  Ubuntu 23.10+ can restrict them with AppArmor, `kernel.apparmor_restrict_unprivileged_userns`). Without a
+  namespace, give dumpcap capture rights and add the route once per boot (see Requirements). tshark warns
+  about running as root inside the namespace; the warning is harmless.
 - **macOS:** add loopback aliases for `127.77.0.0/16` first.
 
 ## Roadmap
