@@ -133,7 +133,18 @@ with Windows background chatter on medium/hard (`vars.chatter`, `vars.chatter_ra
     packets/bytes); SPL/KQL not machine-verified. Suricata test verified on Linux (Suricata 7.0.3): seed 42
     gives one band alert per incident write (fc 6 and 16), none for operator writes, and the
     unapproved-writer rule once per incident write on easy/medium, never on hard.
-- Linux: full suite (49 tests incl. Suricata) passes rootless under `unshare -rn pytest`; see Linux results.
+- Grading and packaging (`pcapforge grade`, `pcapforge package`):
+  - `grade.py` — every run gets `submission_template.yaml` (question ids with null answers, text as
+    comments). Submissions are YAML/JSON maps (student = file stem) or a class CSV
+    (`student,question,answer`; repeated rows form a list). YAML is loaded with only the null resolver,
+    so unquoted MACs (YAML 1.1 sexagesimal ints), `no`/`yes` and times stay strings. Scoring by question
+    type: `ip`/`mac` normalised, `number` exact or `tolerance`, `timestamp` within `tolerance_s` (naive =
+    UTC), `set` Jaccard (|∩|/|∪|), `map` matched keys / |key union| with 0.5 % relative numeric tolerance,
+    `text` case/whitespace-folded against `answer` + `accept`. Unknown ids are reported, not scored.
+  - `package.py` — student zip is an allow-list (capture, briefing, template; the template is
+    rendered from answers.json for older runs without one), instructor zip is the whole run; members
+    sorted with a fixed timestamp, so zips are byte-identical. `release.yml` packages every run.
+- Linux: full suite (85 tests incl. Suricata) passes rootless under `unshare -rn pytest`; see Linux results.
 Next: IT-line scenarios (README roadmap).
 
 ### Composer spec
