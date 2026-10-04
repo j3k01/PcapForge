@@ -84,3 +84,18 @@ def test_per_seed_structure_varies_on_medium_but_easy_stays_fixed(scenario):
     assert again.vars == medium[7].vars and again.digest() == medium[7].digest()
     easy = {build_plan(scenario, "easy", str(seed), duration_override=300).vars["process"] for seed in range(5)}
     assert easy == {"water_treatment"}
+
+
+def test_threshold_direction_matches_the_alarm_it_defeats(scenario):
+    seen = set()
+    for seed in range(40):
+        plan = build_plan(scenario, "medium", str(seed), duration_override=300)
+        for write in plan.facts["change"]["writes"]:
+            lo, hi = write["normal"]
+            words = set(write["point"].split("_"))
+            if "low" in words:
+                assert write["direction"] == "below" and write["value"] < lo, write
+            if "high" in words:
+                assert write["direction"] == "above" and write["value"] > hi, write
+            seen.add(write["direction"])
+    assert seen == {"above", "below"}

@@ -252,6 +252,17 @@ class ModbusOperator(ModbusClientActor):
 DEVIATION = {"extreme": (2.5, 5.0), "moderate": (0.5, 1.2), "subtle": (0.08, 0.25)}
 
 
+def _push_down(name: str, rng) -> bool:
+    """Low-alarm thresholds are pushed further down (alarm never fires), high-alarm
+    thresholds up; other setpoints go either way."""
+    words = set(name.split("_"))
+    if "low" in words:
+        return True
+    if "high" in words:
+        return False
+    return rng.random() < 0.4
+
+
 @register
 class ModbusWriter(ModbusClientActor):
     """Host outside the approved change path writing setpoints outside their normal band."""
@@ -295,10 +306,17 @@ class ModbusWriter(ModbusClientActor):
             session.close()
 
         write_times = sorted(rng.uniform(0, spread) for _ in points)
+        direction_rng = rng.child("direction")  # separate stream: other draws stay unchanged
         writes = []
         for point, offset in zip(points, write_times):
             lo, hi = point.normal
-            value = hi + (hi - lo) * rng.uniform(factor_lo, factor_hi)
+            distance = (hi - lo) * rng.uniform(factor_lo, factor_hi)
+            down = _push_down(point.name, direction_rng)
+            if down and lo > 0:
+                value = max(lo - distance, 0.0)  # 0 disables a low-alarm threshold entirely
+            else:
+                down = False
+                value = hi + distance
             raw = point.encode(value)
             function = {"single": 6, "multiple": 16}.get(function_mode) or rng.choice((6, 16))
             if not one_session:
@@ -310,6 +328,7 @@ class ModbusWriter(ModbusClientActor):
             writes.append({"point": point.name, "table": "holding", "address": point.address,
                            "function": function, "raw": raw, "value": point.decode(raw), "unit": point.unit,
                            "normal": list(point.normal), "nominal": point.nominal,
+                           "direction": "below" if down else "above",
                            "request": {"$action": action}})
             plan.event(action, self.id, f"Write {point.name} = {point.decode(raw)} {point.unit}".rstrip(),
                        ["T0855", "T0836"], function=function, address=point.address, raw=raw,
