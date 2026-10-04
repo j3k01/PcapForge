@@ -69,10 +69,12 @@ class Topology:
         self.subnets: dict[str, Subnet] = {}
         self.hosts: list[Host] = []
         self.groups: dict[str, list[Host]] = {}
-        self.site_doc = scenario_doc.get("site", {})
-        self.site_name = ""
-        self.site_code = ""
-        self.domain = ""
+        site = scenario_doc.get("site", {})
+        # Names travel inside DNS payloads, so they belong to the recorded world.
+        self.site_name: str = world_rng.choice(site.get("names", ["Plant"]))
+        self.site_code: str = world_rng.choice(site.get("codes", ["site"]))
+        slug = re.sub(r"[^a-z0-9]+", "", self.site_name.lower())
+        self.domain: str = site.get("domain") or f"{slug}.local"
         loop_index = 10
         for spec in topo["hosts"]:
             if not evaluate_when(spec.get("when"), ctx):
@@ -96,6 +98,9 @@ class Topology:
                 members.append(host)
                 self.hosts.append(host)
             self.groups[spec["id"]] = members
+        for host in self.hosts:
+            host.name = host.name_template.format(
+                code=self.site_code, CODE=self.site_code.upper(), index=host.index)
         self.by_id = {h.id: h for h in self.hosts}
         self.by_loopback = {h.loopback: h for h in self.hosts}
         self.addressed = False
@@ -115,12 +120,6 @@ class Topology:
 
     # -- addressing -----------------------------------------------------------------
     def assign_addresses(self, rng: Rng) -> None:
-        site = self.site_doc
-        self.site_name = rng.choice(site.get("names", ["Plant"]))
-        self.site_code = rng.choice(site.get("codes", ["site"]))
-        slug = re.sub(r"[^a-z0-9]+", "", self.site_name.lower())
-        self.domain = site.get("domain") or f"{slug}.local"
-
         used_networks: set[ipaddress.IPv4Network] = set()
         for sid, spec in self.subnet_specs.items():
             if "cidr" in spec:
@@ -159,9 +158,6 @@ class Topology:
             for host, offset in zip(members, sorted(block)):
                 used_ips[sid].add(offset)
                 host.interfaces.append(Interface(sid, str(net[offset]), self._mac(rng, host, used_macs)))
-        for host in self.hosts:
-            host.name = host.name_template.format(
-                code=self.site_code, CODE=self.site_code.upper(), index=host.index, site=self.site_code)
         self.addressed = True
 
     @staticmethod

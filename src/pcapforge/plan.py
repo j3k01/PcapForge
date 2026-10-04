@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -54,7 +55,7 @@ class Plan:
     vars: dict
     duration: float
     impairments: dict
-    start_hour: float
+    start_epoch: float  # UTC epoch of the first packet
     topology: Topology
     rng: Rng
     actions: list[Action] = field(default_factory=list)
@@ -71,6 +72,11 @@ class Plan:
     def event(self, action: Action, actor: str, title: str, techniques: list[str], **details) -> None:
         self.events.append(Event(action, actor, title, techniques, details))
 
+    @property
+    def start_hour(self) -> float:
+        """UTC hour of day at capture start (drives daily process curves)."""
+        return (self.start_epoch % 86400) / 3600.0
+
     def context(self) -> dict:
         return {"vars": self.vars, "facts": self.facts}
 
@@ -86,13 +92,26 @@ class Plan:
             "pcapforge": __version__,
             "scenario": self.scenario.id,
             "scenario_version": self.scenario.doc.get("version", 1),
-            "start_hour": self.start_hour,
+            "start_epoch": self.start_epoch,
             "behaviour": self.rng.key,
             "hosts": [(h.id, h.device.name, h.loopback) for h in self.topology.hosts],
             "actions": [(a.t, a.host, a.op, a.args, a.phase) for a in self.actions],
         }
         blob = json.dumps(payload, sort_keys=True, default=str).encode()
         return hashlib.sha256(blob).hexdigest()[:24]
+
+
+def _start_epoch(site: dict, rng: Rng) -> float:
+    years = site.get("year_range", [2025, 2026])
+    weekdays = site.get("weekdays", [0, 1, 2, 3, 4])
+    lo, hi = site.get("start_hours", [7, 18])
+    while True:
+        day = dt.date(rng.randint(*years), 1, 1) + dt.timedelta(days=rng.randrange(365))
+        if day.weekday() in weekdays:
+            break
+    start = dt.datetime(day.year, day.month, day.day, tzinfo=dt.UTC) + dt.timedelta(
+        hours=rng.uniform(lo, hi))
+    return round(start.timestamp(), 6)
 
 
 def build_plan(scenario: Scenario, difficulty: str, seed: str, base_seed: str | None = None,
@@ -104,9 +123,6 @@ def build_plan(scenario: Scenario, difficulty: str, seed: str, base_seed: str | 
     rng = Rng("pcapforge", scenario.id, difficulty, base)
     vars_ = dict(level.get("vars", {}))
     topology = Topology(scenario.doc, vars_, rng.child("world"))
-    site = scenario.doc.get("site", {})
-    lo, hi = site.get("start_hours", [7, 18])
-    start_hour = rng.child("clock").uniform(lo, hi)
     plan = Plan(
         scenario=scenario,
         difficulty=difficulty,
@@ -115,7 +131,7 @@ def build_plan(scenario: Scenario, difficulty: str, seed: str, base_seed: str | 
         vars=vars_,
         duration=duration_override or parse_duration(level["duration"]),
         impairments=dict(level.get("impairments", {})),
-        start_hour=round(start_hour, 4),
+        start_epoch=_start_epoch(scenario.doc.get("site", {}), rng.child("clock")),
         topology=topology,
         rng=rng,
     )
