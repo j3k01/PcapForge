@@ -234,7 +234,11 @@ def write_handout(plan: Plan, answers: dict, out_dir: Path) -> Path:
     lines = [f"# {plan.scenario.title}", ""]
 
     briefing = plan.scenario.doc.get("briefing") or plan.scenario.doc.get("summary", "")
-    for key, value in (("site_name", topo.site_name), ("domain", topo.domain), ("sensor_subnet", subnet)):
+    process = plan.vars.get("process")
+    title = ProcessProfile(process).title if isinstance(process, str) else ""
+    process_title = title[:1].lower() + title[1:]
+    for key, value in (("site_name", topo.site_name), ("domain", topo.domain), ("sensor_subnet", subnet),
+                       ("process_title", process_title)):
         briefing = briefing.replace("{" + key + "}", value)
     lines += [briefing.strip(), ""]
 

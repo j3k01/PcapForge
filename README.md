@@ -240,7 +240,8 @@ Difficulty levels of `ot-modbus-write-manipulation`:
 | | easy | medium | hard |
 |---|---|---|---|
 | length | 15 min, ~14k packets | 45 min, ~199k packets | 2 h, ~694k packets |
-| PLCs | 2 | 3 Modbus + 1 Siemens S7-1500 | 4 Modbus + 1 Siemens S7-1500 |
+| process | drinking water | drawn per seed: drinking water, wastewater, building HVAC or power substation | drawn per seed (same four) |
+| PLCs | 2 | 2–4 Modbus (per seed) + 1 Siemens S7-1500 | 3–5 Modbus (per seed) + 1 Siemens S7-1500 |
 | writer | unknown Raspberry Pi on the control LAN | laptop on the IT subnet, routed through the firewall (gateway MAC) | the legitimate engineering workstation |
 | discovery | identity read + register enumeration | yes | none |
 | changes | burst of extreme values | spread over 20 min, moderate values | spread over 1 h, values just outside the band, mixed with 6 legitimate operator changes |
@@ -281,6 +282,7 @@ flowchart LR
 
 - Same `--seed` gives the same plan and the same `answers.json`. With a cached recording, the capture is byte-identical too.
 - A live re-recording on another machine gives the same answers. The capture can differ only in low-level stack details.
+- On medium and hard the seed also draws the story structure: the physical process (four profiles, each with its own register map, units and physical effects) and the number of PLCs. Scenario authors get this through `vars` values `{choose: [...]}` and `{range: [lo, hi]}`.
 - `--base-seed` shares one recording between many `--seed`s. Students then get different IPs, MACs, ports and timing jitter on the same story. Without it, every seed is a fully independent variant.
 
 ## Writing a scenario

@@ -65,10 +65,22 @@ def test_base_seed_shares_recording_between_students(scenario):
 @pytest.mark.parametrize("difficulty", ["easy", "medium", "hard"])
 def test_incident_writes_leave_normal_band_and_operator_writes_stay_inside(scenario, difficulty):
     plan = build_plan(scenario, difficulty, "band-check", duration_override=1800)
-    profile = ProcessProfile("water_treatment")
+    profile = ProcessProfile(plan.vars["process"])
     for write in plan.facts["change"]["writes"]:
         lo, hi = write["normal"]
         assert not lo <= write["value"] <= hi, write
     for write in plan.facts.get("operator_changes", {}).get("writes", []):
         lo, hi = profile.by_name[write["point"]].normal
         assert lo <= write["value"] <= hi, write
+
+
+def test_per_seed_structure_varies_on_medium_but_easy_stays_fixed(scenario):
+    medium = [build_plan(scenario, "medium", str(seed), duration_override=300) for seed in range(30)]
+    processes = {plan.vars["process"] for plan in medium}
+    assert processes == {"water_treatment", "wastewater_treatment", "hvac_building", "power_substation"}
+    assert {plan.vars["plc_count"] for plan in medium} <= {2, 3, 4}
+    assert all(len(plan.topology.groups["plc"]) == plan.vars["plc_count"] for plan in medium)
+    again = build_plan(scenario, "medium", "7", duration_override=300)
+    assert again.vars == medium[7].vars and again.digest() == medium[7].digest()
+    easy = {build_plan(scenario, "easy", str(seed), duration_override=300).vars["process"] for seed in range(5)}
+    assert easy == {"water_treatment"}

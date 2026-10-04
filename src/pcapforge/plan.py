@@ -114,6 +114,20 @@ def _start_epoch(site: dict, rng: Rng) -> float:
     return round(start.timestamp(), 6)
 
 
+def _draw_vars(raw: dict, rng: Rng) -> dict:
+    """Resolve per-seed variation: `{choose: [...]}` picks one item, `{range: [lo, hi]}`
+    an integer in the inclusive range. Plain values pass through unchanged."""
+    drawn = {}
+    for name, value in raw.items():
+        if isinstance(value, dict) and set(value) == {"choose"}:
+            drawn[name] = rng.child(name).choice(value["choose"])
+        elif isinstance(value, dict) and set(value) == {"range"}:
+            drawn[name] = rng.child(name).randint(*value["range"])
+        else:
+            drawn[name] = value
+    return drawn
+
+
 def build_plan(scenario: Scenario, difficulty: str, seed: str, base_seed: str | None = None,
                duration_override: float | None = None) -> Plan:
     from pcapforge.actors import create_actor
@@ -121,7 +135,7 @@ def build_plan(scenario: Scenario, difficulty: str, seed: str, base_seed: str | 
     level = scenario.level(difficulty)
     base = base_seed if base_seed is not None else seed
     rng = Rng("pcapforge", scenario.id, difficulty, base)
-    vars_ = dict(level.get("vars", {}))
+    vars_ = _draw_vars(level.get("vars", {}), rng.child("vars"))
     topology = Topology(scenario.doc, vars_, rng.child("world"))
     plan = Plan(
         scenario=scenario,

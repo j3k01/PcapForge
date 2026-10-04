@@ -1,19 +1,21 @@
 # yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
 schema: pcapforge/scenario@1
 id: ot-modbus-write-manipulation
-title: Unauthorized Modbus/TCP setpoint changes on a water-treatment PLC
+title: Unauthorized Modbus/TCP setpoint changes on a process PLC
 line: ot
 version: 1
 license: CC-BY-4.0
 authors: [pcapforge contributors]
-tags: [modbus, ics, water, setpoint, ot]
+tags: [modbus, ics, setpoint, ot, water, wastewater, hvac, power]
 summary: >
-  A SCADA HMI and a historian poll the PLCs of a drinking-water treatment plant over
-  Modbus/TCP. During the capture a host that is not supposed to change PLC parameters
-  issues Modbus write requests that move process setpoints outside their normal band.
+  A SCADA HMI and a historian poll the PLCs of an industrial site over Modbus/TCP. The
+  physical process (drinking water, wastewater, building HVAC or a power substation on
+  medium/hard) is drawn per seed. During the capture a host that is not supposed to change
+  PLC parameters issues Modbus write requests that move process setpoints outside their
+  normal band.
 
 briefing: |
-  You are the OT SOC analyst for the {site_name} water-treatment plant ({domain}).
+  You are the OT SOC analyst for the {site_name} site ({domain}), {process_title}.
   Operations reported unusual process behaviour during the shift. The attached capture
   comes from the SPAN port of the control-network switch ({sensor_subnet}).
   Normally only the SCADA HMI, the SCADA server (where the site has one) and the historian
@@ -52,7 +54,7 @@ topology:
     - {id: scada, device: scada-server-vm, subnet: control, name: "SCADA-{CODE}-01", when: vars.opcua}
 
 actors:
-  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: water_treatment}}
+  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
   - {id: dns_service, type: dns.server, hosts: dc}
   - {id: ntp_service, type: ntp.server, hosts: dc}
   - id: scada_poll
@@ -88,7 +90,7 @@ actors:
     type: s7.server
     hosts: s7plc
     when: vars.s7
-    params: {process: water_treatment}
+    params: {process: "${vars.process}"}
   - id: scada_s7_poll
     type: s7.client
     hosts: hmi
@@ -144,6 +146,7 @@ difficulty:
     duration: 15m
     impairments: {retransmit_rate: 0.0, mid_session: false}
     vars:
+      process: water_treatment
       plc_count: 2
       hmi_interval: 2.0
       writer_host: rogue
@@ -163,7 +166,8 @@ difficulty:
     duration: 45m
     impairments: {retransmit_rate: 0.0005, mid_session: true}
     vars:
-      plc_count: 3
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [2, 4]}
       hmi_interval: 1.0
       writer_host: itpc
       discovery: true
@@ -183,7 +187,8 @@ difficulty:
     duration: 2h
     impairments: {retransmit_rate: 0.001, mid_session: true}
     vars:
-      plc_count: 4
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [3, 5]}
       hmi_interval: 1.0
       writer_host: ews
       discovery: false
