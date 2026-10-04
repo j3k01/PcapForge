@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcapforge"
+version = "0.1.0"
+description = "Generate realistic, labeled PCAPs with answer keys for blue-team and detection-engineering training"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.13"
+dependencies = [
+    "scapy>=2.6,<3",
+    "pymodbus~=3.15",
+    "PyYAML>=6",
+    "jsonschema>=4.20",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+pcapforge = "pcapforge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pcapforge = ["**/*.json", "**/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
