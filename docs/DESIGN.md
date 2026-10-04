@@ -146,7 +146,8 @@ subscription (`vars.opcua`), see below.
   - `package.py` — student zip is an allow-list (capture, briefing, template; the template is
     rendered from answers.json for older runs without one), instructor zip is the whole run; members
     sorted with a fixed timestamp, so zips are byte-identical. `release.yml` packages every run.
-- Linux: full suite (85 tests incl. Suricata) passes rootless under `unshare -rn pytest`; see Linux results.
+- Linux: full suite (120 tests incl. Suricata, OPC UA and S7comm; `pip install -e .[test,opcua,s7]`) passes
+  rootless under `unshare -rn pytest`; see Linux results.
 - Industrial background protocols (medium/hard only, `vars.s7` / `vars.opcua`; easy's plan digest is
   unchanged). Their libraries are optional extras (`pyproject.toml`: `opcua` = asyncua 2.x, `s7` =
   python-snap7 3.x); actors declare `requires = (module, distribution, extra)` and import lazily, and
