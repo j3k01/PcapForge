@@ -136,11 +136,13 @@ def _bool(value: str) -> bool:
 
 
 def _ns_epoch(text: str) -> float | None:
-    """tshark absolute time (``2025-02-04T11:03:12.306270837Z``) -> epoch seconds."""
+    """tshark absolute time -> epoch seconds. Wireshark 4.4+ prints UTC fields as
+    ``2025-02-04T11:03:12.306270837Z``, older versions as ``Feb  4, 2025 11:03:12.306270837 UTC``."""
     if not text or text == "NULL":
         return None
-    whole, _, frac = text.rstrip("Z").partition(".")
-    base = dt.datetime.strptime(whole, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.UTC).timestamp()
+    whole, _, frac = text.removesuffix(" UTC").rstrip("Z").partition(".")
+    fmt = "%Y-%m-%dT%H:%M:%S" if "T" in whole else "%b %d, %Y %H:%M:%S"
+    base = dt.datetime.strptime(whole, fmt).replace(tzinfo=dt.UTC).timestamp()
     return base + (float(f"0.{frac}") if frac else 0.0)
 
 
@@ -381,6 +383,8 @@ class _Exporter:
                 values = [1 if _bool(v) else 0 for v in _all(row, "modbus.bitval")]
             elif function in (6, 16, 23):
                 values = [int(v) for v in _all(row, "modbus.regval_uint16")]
+                if not values and function == 6 and (data := _first(row, "modbus.data")):
+                    values = [int(data, 16)]  # Wireshark < 4.4 leaves the written value as raw bytes
             if function in (5, 6, 22):
                 record["quantity"] = 1
             elif function == 23:

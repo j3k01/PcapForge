@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pcapforge import __version__
 from pcapforge.scenario import DIFFICULTIES, ScenarioError, discover, find, load, parse_duration
+from pcapforge.tools import ToolNotFound
 
 
 def _scenarios_dir(args) -> Path | None:
@@ -175,6 +176,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except ScenarioError as exc:
+    except (ScenarioError, ToolNotFound) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

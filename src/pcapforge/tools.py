@@ -1,12 +1,18 @@
-"""Locate external Wireshark / tcpdump binaries."""
+"""Locate external Wireshark / tcpdump binaries and check the tshark version."""
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 import sys
 from functools import cache
 from pathlib import Path
+
+# Answer-key filters read Write Single Register values (modbus.regval_uint16), which tshark
+# decodes only from Wireshark 4.4 on; older versions show them as raw modbus.data bytes.
+MIN_TSHARK = (4, 4)
 
 
 class ToolNotFound(RuntimeError):
@@ -46,3 +52,22 @@ def require_tool(name: str) -> str:
             "PCAPFORGE_WIRESHARK_DIR to its install directory."
         )
     return path
+
+
+@cache
+def tshark_version() -> tuple[int, int, int]:
+    out = subprocess.run([require_tool("tshark"), "--version"], capture_output=True, text=True,
+                         check=False).stdout
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+    if match is None:
+        raise ToolNotFound(f"cannot read the tshark version from {out[:80]!r}")
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+def require_answer_key_tshark() -> None:
+    """Fail fast when tshark is too old to evaluate the answer-key filters."""
+    version = tshark_version()
+    if version < MIN_TSHARK:
+        raise ToolNotFound(f"Wireshark >= {'.'.join(map(str, MIN_TSHARK))} required for answer-key "
+                           f"verification; found {'.'.join(map(str, version))}")

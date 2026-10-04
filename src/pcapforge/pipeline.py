@@ -15,6 +15,7 @@ from pcapforge.export import export_siem
 from pcapforge.plan import build_plan
 from pcapforge.record import recording_for
 from pcapforge.scenario import Scenario
+from pcapforge.tools import require_answer_key_tshark
 from pcapforge.verify import VerifyReport, verify_capture
 
 
@@ -52,6 +53,8 @@ def generate(scenario: Scenario, difficulty: str, seed: str, out_root: Path, *,
              base_seed: str | None = None, fmt: str = "pcap", use_cache: bool = True,
              duration: float | None = None, verify: bool = True, siem: bool = False,
              progress: Callable[[str], None] = lambda _msg: None) -> Generated:
+    if verify:
+        require_answer_key_tshark()  # before spending time on recording and composing
     plan = build_plan(scenario, difficulty, seed, base_seed=base_seed, duration_override=duration)
     progress(f"plan: {len(plan.actions)} actions, recording key {plan.digest()}")
 

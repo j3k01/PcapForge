@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pcapforge.answers import sha256_file
-from pcapforge.tools import require_tool
+from pcapforge.tools import require_answer_key_tshark, require_tool
 
 # Validate checksums so bad ones surface as expert errors / checksum.status == 0.
 PREFS = ["-o", "ip.check_checksum:TRUE", "-o", "tcp.check_checksum:TRUE", "-o", "udp.check_checksum:TRUE"]
@@ -190,6 +190,8 @@ def _questions(pcap: Path, report: VerifyReport, answers: dict) -> None:
 
 def verify_capture(pcap: Path, answers: dict | None = None) -> VerifyReport:
     pcap = Path(pcap)
+    if answers is not None:
+        require_answer_key_tshark()
     report = VerifyReport()
     if not pcap.is_file():
         report.add("file", False, f"{pcap} does not exist")

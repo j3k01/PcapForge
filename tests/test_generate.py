@@ -22,14 +22,15 @@ from pcapforge.pipeline import generate
 from pcapforge.plan import build_plan
 from pcapforge.record import recording_for
 from pcapforge.scenario import find
-from pcapforge.tools import find_tool
+from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
 
 SCENARIO = "ot-modbus-write-manipulation"
 DURATION = 600.0
 
 pytestmark = pytest.mark.skipif(
-    not find_tool("tshark") or not (find_tool("dumpcap") or find_tool("tcpdump")),
-    reason="requires tshark and dumpcap/tcpdump with loopback capture rights",
+    not find_tool("tshark") or not (find_tool("dumpcap") or find_tool("tcpdump"))
+    or tshark_version() < MIN_TSHARK,
+    reason="requires tshark >= 4.4 and dumpcap/tcpdump with loopback capture rights",
 )
 
 
@@ -192,9 +193,10 @@ def test_suricata_rules_alert_on_out_of_band_writes_and_unapproved_writers(gener
     result, answers = generated
     rules = result.exports["detections/suricata.rules"]
     # --init-errors-fatal: a rule Suricata cannot load fails the run instead of being skipped.
+    # Offline reading needs no command socket; Debian/Ubuntu's config enables one under /var/run.
     run = subprocess.run([shutil.which("suricata"), "-r", str(result.pcap), "-S", str(rules),
-                          "--set", "app-layer.protocols.modbus.enabled=true", "-l", str(tmp_path), "-k", "none",
-                          "--init-errors-fatal"], capture_output=True, text=True)
+                          "--set", "app-layer.protocols.modbus.enabled=true", "--set", "unix-command.enabled=no",
+                          "-l", str(tmp_path), "-k", "none", "--init-errors-fatal"], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr + run.stdout
     alerts = [e for e in jsonl(tmp_path / "eve.json") if e.get("event_type") == "alert"]
 
