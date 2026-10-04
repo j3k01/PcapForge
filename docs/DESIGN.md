@@ -66,3 +66,24 @@ live in `src/pcapforge/profiles/` so scenarios stay engine-agnostic.
   mixed with reads.
 - hard: writes from the legitimate engineering workstation, interleaved with legitimate
   operator writes, values only slightly outside the normal band, multi-hour capture.
+
+## Status (resume point)
+
+Done and committed:
+- `pyproject.toml`, licenses, `rng.py` (named seeded streams), `tools.py` (tshark/dumpcap lookup)
+- `profiles/devices.yaml` (stacks: windows/linux/vxworks; devices with verified OUIs),
+  `profiles/processes/water_treatment.yaml`, `process.py` (virtual-time process model)
+- `scenario/` loader + JSON schema; YAML key is `hosts` (not `on`: YAML 1.1 parses it as bool)
+- `scenarios/ot/modbus-write-manipulation/scenario.yaml` (easy/medium/hard, questions with tshark checks)
+- `topology.py` (world from behaviour seed, addressing from presentation seed, sensor L2 view),
+  `plan.py` (Action/Event/Plan, `build_plan`, recording digest)
+
+Next, in order:
+1. `actors/` — registry (`create_actor`), base class (`plan()`, `serve(rt)`, `execute(action, rt)`,
+   `close(rt)`, `is_server`, `incident`), `modbus.py` (server, poller, operator, writer),
+   `dns.py`, `ntp.py`; record ports in `ports.py` (15020→502, 15353→53, 15123→123).
+   pymodbus bit tables: packed LSB-first, bit `i` is `regs[i // 16] >> (i % 16) & 1`.
+2. `record.py` — dumpcap/tcpdump backend, asyncio server thread, marker per action, cache.
+3. `compose/` — flow assignment, causal retime, header rebuild (struct, own checksums), ARP, write.
+4. `answers.py` (expand `$host` / `$action` refs, questions, register-map handout), `verify.py`.
+5. `cli.py`, tests, README, CI.
