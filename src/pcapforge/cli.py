@@ -112,6 +112,20 @@ def cmd_verify(args) -> int:
     return 0 if report.ok else 2
 
 
+def cmd_export_ctfd(args) -> int:
+    from pcapforge.ctfd import export_ctfd
+
+    directory = Path(args.run_dir)
+    if not (directory / "answers.json").is_file():
+        print(f"error: {directory} has no answers.json", file=sys.stderr)
+        return 1
+    paths = export_ctfd(directory, Path(args.out) if args.out else None)
+    for path in paths:
+        print(path)
+    print(f"{len(paths)} challenges; install each with: ctf challenge install <dir>", file=sys.stderr)
+    return 0
+
+
 def cmd_export(args) -> int:
     from pcapforge.pipeline import export_run
 
@@ -201,6 +215,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("export", help="(re)create siem/ and detections/ for an existing run directory")
     p.add_argument("run_dir", help="directory containing the capture and answers.json")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("export-ctfd", help="write CTFd challenges (ctfcli challenge.yml) for an existing run")
+    p.add_argument("run_dir", help="directory containing the capture and answers.json")
+    p.add_argument("--out", help="output directory (default: <run_dir>/ctfd)")
+    p.set_defaults(func=cmd_export_ctfd)
 
     p = sub.add_parser("grade", help="score student submissions against answers.json")
     p.add_argument("answers", help="the run's answers.json")
