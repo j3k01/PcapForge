@@ -101,21 +101,21 @@ class ProcessSim:
         # Lagging measurements start settled on their target.
         for p in profile.points:
             if p.model and p.model["type"] == "follow":
-                m = p.model
-                self.state[p.name] = self.state[m["source"]] * m.get("gain", 1.0) + m.get("offset", 0.0)
+                self.state[p.name] = self._target(p.model)
         self._update_bits()
 
     def advance(self, t: float) -> None:
         dt = t - self.t
         if dt <= 0:
             return
+        self.t = t
         for p in self.profile.points:
             m = p.model
             if not m:
                 continue
             kind = m["type"]
             if kind == "follow":
-                target = self.state[m["source"]] * m.get("gain", 1.0) + m.get("offset", 0.0)
+                target = self._target(m)
                 self.state[p.name] = target + (self.state[p.name] - target) * math.exp(-dt / m["tau"])
             elif kind == "walk":
                 lo, hi = p.normal
@@ -127,8 +127,18 @@ class ProcessSim:
                 self.state[p.name] = min(max(value, lo), hi)
             elif kind == "counter":
                 self.state[p.name] += m["rate"] * dt
-        self.t = t
         self._update_bits()
+
+    def _target(self, m: dict) -> float:
+        """Settling value of a ``follow`` model: weighted sum of its sources, optionally clamped."""
+        by_name = self.profile.by_name
+        target = self._sample(by_name[m["source"]], noise=False) * m.get("gain", 1.0) + m.get("offset", 0.0)
+        for extra in m.get("inputs", ()):
+            target += self._sample(by_name[extra["source"]], noise=False) * extra.get("gain", 1.0)
+        if "limits" in m:
+            lo, hi = m["limits"]
+            target = min(max(target, lo), hi)
+        return target
 
     def _update_bits(self) -> None:
         for p in self.profile.points:
