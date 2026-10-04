@@ -12,7 +12,7 @@ requires-python = ">=3.13"
 dependencies = [
     "scapy>=2.6,<3",
     "pymodbus~=3.15",
-    "PyYAML>=6",
+    "PyYAML>=6.0.3",
     "jsonschema>=4.20",
 ]
 
