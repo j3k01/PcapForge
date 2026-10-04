@@ -84,7 +84,7 @@ Done and committed (verify with `git log --oneline`):
 - `compose/` — `compose(plan, recording, out, seed, fmt)` → `ComposeResult` (spec below).
   Verified with tshark: 0 malformed/checksum/expert errors on easy and medium; ~120k pkt/s.
 
-Next: `answers.py`, `verify.py`, `cli.py`, tests, README, CI.
+Status: first scenario complete end-to-end (compose/, answers.py, verify.py, cli.py, tests, README, CI). Next: IT-line scenarios (README roadmap).
 
 ### Composer spec
 Input: recording pcap, plan, presentation rng (`Rng("pcapforge", scenario, difficulty, seed).child("present")`).
