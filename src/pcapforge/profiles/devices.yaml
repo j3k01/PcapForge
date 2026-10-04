@@ -19,6 +19,7 @@ stacks:
     ephemeral_ports: [49152, 65535]
     port_allocation: sequential
     delayed_ack: {probability: 0.55, min_ms: 1, max_ms: 200}
+    rto: {min_ms: 300, plus_rtt: false}   # retransmission timeout on a LAN
   linux:
     ttl: 64
     df: true
@@ -32,6 +33,7 @@ stacks:
     ephemeral_ports: [32768, 60999]
     port_allocation: random
     delayed_ack: {probability: 0.35, min_ms: 40, max_ms: 45}
+    rto: {min_ms: 200, plus_rtt: true}    # srtt + max(rto_min, 4 * rttvar)
   vxworks:
     ttl: 64
     df: false
@@ -45,6 +47,7 @@ stacks:
     ephemeral_ports: [1024, 5000]
     port_allocation: sequential
     delayed_ack: {probability: 0.2, min_ms: 5, max_ms: 50}
+    rto: {min_ms: 500, plus_rtt: false}
 
 devices:
   schneider-m340:

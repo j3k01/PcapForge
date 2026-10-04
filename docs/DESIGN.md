@@ -81,8 +81,10 @@ Done and committed (verify with `git log --oneline`):
 - `actors/` — `modbus.server|poller|operator|writer`, `dns.server|client`, `ntp.server|client`
 - `record.py` — `recording_for(plan)` → cached pcap (DLT_NULL on Windows) + `.json` meta.
   Verified: easy plan = 4018 actions, 20 020 packets, 0 drops, 2.9 s wall.
+- `compose/` — `compose(plan, recording, out, seed, fmt)` → `ComposeResult` (spec below).
+  Verified with tshark: 0 malformed/checksum/expert errors on easy and medium; ~120k pkt/s.
 
-Next: `compose/` (spec below), then `answers.py`, `verify.py`, `cli.py`, tests, README, CI.
+Next: `answers.py`, `verify.py`, `cli.py`, tests, README, CI.
 
 ### Composer spec
 Input: recording pcap, plan, presentation rng (`Rng("pcapforge", scenario, difficulty, seed).child("present")`).
@@ -109,3 +111,12 @@ Input: recording pcap, plan, presentation rng (`Rng("pcapforge", scenario, diffi
    before first contact and again after 30–120 s idle (Windows/Linux cache aging).
 9. Merge sort by time (stable), write classic pcap (Ethernet, µs) or pcapng; return
    action id → first request frame number for the answer key.
+
+Implementation notes (where `compose/` refines the spec):
+- a delayed pure ACK whose timer would fire after the sender's next segment is not emitted
+  (piggybacked); loopback window updates (same seq/ack pure ACK) are dropped since the
+  composed windows are constant;
+- UDP: each new action on a 5-tuple is a new exchange (new client socket → new ephemeral port);
+- RTO comes from the stack profile (`rto: {min_ms, plus_rtt}`);
+- mid-session captures start with warm ARP caches; actions without client payload
+  (connect/close) report their SYN/FIN frame.

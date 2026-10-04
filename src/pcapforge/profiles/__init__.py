@@ -19,6 +19,12 @@ class DelayedAck:
 
 
 @dataclass(frozen=True)
+class Rto:
+    min_ms: float
+    plus_rtt: bool  # Linux style: smoothed RTT + rto_min; otherwise max(rto_min, ...) ~ rto_min
+
+
+@dataclass(frozen=True)
 class Stack:
     name: str
     ttl: int
@@ -33,6 +39,7 @@ class Stack:
     ephemeral_ports: tuple[int, int]
     port_allocation: str  # "sequential" | "random"
     delayed_ack: DelayedAck
+    rto: Rto
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,7 @@ def stack(name: str) -> Stack:
         ephemeral_ports=tuple(raw["ephemeral_ports"]),
         port_allocation=raw["port_allocation"],
         delayed_ack=DelayedAck(**raw["delayed_ack"]),
+        rto=Rto(**raw["rto"]),
     )
 
 
