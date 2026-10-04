@@ -1,0 +1,104 @@
+# Device and network-stack profiles (CC-BY-4.0).
+#
+# A *stack* describes how an operating system's TCP/IP implementation looks on the wire.
+# A *device* binds a vendor (MAC OUIs) to a stack, application processing latency and,
+# for field devices, the identity they report over their industrial protocol.
+# OUIs are verified against Wireshark's manufacturer database (`tshark -G manuf`).
+
+stacks:
+  windows:
+    ttl: 128
+    df: true
+    ip_id: global          # one incrementing counter per host
+    mss: 1460
+    syn_window: 64240
+    window_scale: 8
+    window: 1026           # raw window field after the handshake (x 2^scale)
+    syn_options: [mss, nop, ws, nop, nop, sack_perm]
+    timestamps: false
+    ephemeral_ports: [49152, 65535]
+    port_allocation: sequential
+    delayed_ack: {probability: 0.55, min_ms: 1, max_ms: 200}
+  linux:
+    ttl: 64
+    df: true
+    ip_id: per_flow        # random start, increments per socket
+    mss: 1460
+    syn_window: 64240
+    window_scale: 7
+    window: 502
+    syn_options: [mss, sack_perm, ts, nop, ws]
+    timestamps: true
+    ephemeral_ports: [32768, 60999]
+    port_allocation: random
+    delayed_ack: {probability: 0.35, min_ms: 40, max_ms: 45}
+  vxworks:
+    ttl: 64
+    df: false
+    ip_id: global
+    mss: 1460
+    syn_window: 8192
+    window_scale: null
+    window: 8192
+    syn_options: [mss]
+    timestamps: false
+    ephemeral_ports: [1024, 5000]
+    port_allocation: sequential
+    delayed_ack: {probability: 0.2, min_ms: 5, max_ms: 50}
+
+devices:
+  schneider-m340:
+    vendor: Schneider Electric
+    ouis: ["00:80:F4", "00:00:54"]
+    stack: vxworks
+    processing_ms: {median: 4.0, sigma: 0.45}
+    identity: {VendorName: Schneider Electric, ProductCode: BMX P34 2020, MajorMinorRevision: v3.20}
+  siemens-s7-1200:
+    vendor: Siemens
+    ouis: ["00:1B:1B", "00:0E:8C", "28:63:36"]
+    stack: vxworks
+    processing_ms: {median: 6.0, sigma: 0.5}
+    identity: {VendorName: Siemens, ProductCode: 6ES7 214-1AG40-0XB0, MajorMinorRevision: V4.5}
+  rockwell-micro850:
+    vendor: Rockwell Automation
+    ouis: ["00:00:BC", "00:1D:9C"]
+    stack: vxworks
+    processing_ms: {median: 5.0, sigma: 0.5}
+    identity: {VendorName: Rockwell Automation, ProductCode: 2080-LC50-24QWB, MajorMinorRevision: "21.011"}
+  moxa-gateway:
+    vendor: Moxa
+    ouis: ["00:90:E8"]
+    stack: vxworks
+    processing_ms: {median: 8.0, sigma: 0.6}
+    identity: {VendorName: Moxa, ProductCode: MGate MB3170, MajorMinorRevision: "4.3"}
+  windows-workstation:
+    vendor: Dell
+    ouis: ["00:14:22", "70:B5:E8", "98:90:96", "D8:9E:F3", "E4:54:E8", "F0:1F:AF"]
+    stack: windows
+    processing_ms: {median: 0.4, sigma: 0.6}
+  windows-server-vm:
+    vendor: VMware
+    ouis: ["00:50:56", "00:0C:29"]
+    stack: windows
+    processing_ms: {median: 0.3, sigma: 0.5}
+  hp-workstation:
+    vendor: HP
+    ouis: ["3C:D9:2B", "00:1A:4B"]
+    stack: windows
+    processing_ms: {median: 0.4, sigma: 0.6}
+  raspberry-pi:
+    vendor: Raspberry Pi
+    ouis: ["B8:27:EB", "DC:A6:32", "D8:3A:DD", "2C:CF:67"]
+    stack: linux
+    processing_ms: {median: 0.6, sigma: 0.5}
+  linux-laptop:
+    vendor: Dell
+    ouis: ["70:B5:E8", "F0:1F:AF"]
+    stack: linux
+    processing_ms: {median: 0.3, sigma: 0.5}
+  fortigate:
+    vendor: Fortinet
+    ouis: ["00:09:0F"]
+    stack: linux
+    processing_ms: {median: 0.2, sigma: 0.4}
+    forwarding_ms: {median: 0.25, sigma: 0.4}

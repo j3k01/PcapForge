@@ -1,0 +1,220 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-modbus-write-manipulation
+title: Unauthorized Modbus/TCP setpoint changes on a water-treatment PLC
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [modbus, ics, water, setpoint, ot]
+summary: >
+  A SCADA HMI and a historian poll the PLCs of a drinking-water treatment plant over
+  Modbus/TCP. During the capture a host that is not supposed to change PLC parameters
+  issues Modbus write requests that move process setpoints outside their normal band.
+
+briefing: |
+  You are the OT SOC analyst for the {site_name} water-treatment plant ({domain}).
+  Operations reported unusual process behaviour during the shift. The attached capture
+  comes from the SPAN port of the control-network switch ({sensor_subnet}).
+  Normally only the SCADA HMI and the historian talk Modbus/TCP to the PLCs, and only
+  the engineering workstation is allowed to change setpoints.
+  The PLC register map is included below.
+
+mitre:
+  - {framework: ics, id: T0855, name: Unauthorized Command Message}
+  - {framework: ics, id: T0836, name: Modify Parameter}
+  - {framework: ics, id: T0888, name: Remote System Information Discovery, when: vars.discovery}
+  - {framework: ics, id: T0861, name: Point & Tag Identification, when: vars.discovery}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Riverbend, Oak Hollow, Millbrook]
+  codes: [wtp, sut, zuw, stw]
+  start_hours: [6, 21]
+  weekdays: [0, 1, 2, 3, 4, 5]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: plc, count: "${vars.plc_count}", device: [schneider-m340, schneider-m340, siemens-s7-1200, rockwell-micro850], subnet: control, name: "plc-{code}-{index:02d}"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.writer_host == 'rogue'"}
+    - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.writer_host == 'itpc'"}
+
+actors:
+  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: water_treatment}}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: scada_poll
+    type: modbus.poller
+    hosts: hmi
+    params: {targets: plc, interval: "${vars.hmi_interval}", jitter: 0.03}
+  - id: historian_poll
+    type: modbus.poller
+    hosts: historian
+    params: {targets: plc, interval: 10, jitter: 0.01, groups: [0, 1]}
+  - id: operator_changes
+    type: modbus.operator
+    hosts: ews
+    when: vars.operator_writes
+    params: {targets: plc, count: "${vars.operator_writes}"}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian, ews]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian, ews, plc]
+    when: vars.ntp
+    params: {server: dc}
+  - id: change
+    type: modbus.writer
+    hosts: "${vars.writer_host}"
+    incident: true
+    params:
+      targets: plc
+      discovery: "${vars.discovery}"
+      writes: "${vars.writes}"
+      deviation: "${vars.deviation}"
+      start: "${vars.start}"
+      spread: "${vars.spread}"
+      function: "${vars.write_function}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      plc_count: 2
+      hmi_interval: 2.0
+      writer_host: rogue
+      discovery: true
+      writes: [3, 4]
+      deviation: extreme
+      start: [0.35, 0.55]
+      spread: 90
+      write_function: single
+      operator_writes: 0
+      dns: false
+      ntp: true
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true}
+    vars:
+      plc_count: 3
+      hmi_interval: 1.0
+      writer_host: itpc
+      discovery: true
+      writes: [3, 5]
+      deviation: moderate
+      start: [0.25, 0.65]
+      spread: 1200
+      write_function: mixed
+      operator_writes: 2
+      dns: true
+      ntp: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true}
+    vars:
+      plc_count: 4
+      hmi_interval: 1.0
+      writer_host: ews
+      discovery: false
+      writes: [2, 3]
+      deviation: subtle
+      start: [0.2, 0.75]
+      spread: 3600
+      write_function: multiple
+      operator_writes: 6
+      dns: true
+      ntp: true
+
+questions:
+  - id: source_ip
+    text: Which IP address issued the unauthorized Modbus write requests?
+    answer: "${facts.change.source.ip}"
+    points: 10
+    hint: Start from Modbus function codes 5, 6, 15 and 16 and compare the writers with the expected roles.
+    check:
+      filter: "mbtcp && modbus.func_code in {5 6 15 16} && ip.src == ${facts.change.source.ip} && !modbus.request_frame"
+      expect: {min: "${facts.change.write_count}"}
+  - id: source_mac
+    text: Which MAC address did the sensor see on the frames carrying those write requests?
+    answer: "${facts.change.source.observed_mac}"
+    points: 5
+    hint: Routed traffic arrives with the MAC of the last hop, not of the originating host.
+    check:
+      filter: "mbtcp && modbus.func_code in {5 6 15 16} && ip.src == ${facts.change.source.ip} && eth.src == ${facts.change.source.observed_mac}"
+      expect: {min: 1}
+  - id: target_ip
+    text: Which PLC (IP address) received the unauthorized writes?
+    answer: "${facts.change.target.ip}"
+    points: 10
+    check:
+      filter: "mbtcp && modbus.func_code in {5 6 15 16} && ip.src == ${facts.change.source.ip} && ip.dst == ${facts.change.target.ip}"
+      expect: {min: "${facts.change.write_count}"}
+  - id: first_write
+    text: At what time (UTC) was the first unauthorized write request sent?
+    answer: "${facts.change.first_write.time}"
+    type: timestamp
+    tolerance_s: 1
+    points: 10
+    check:
+      filter: "frame.number == ${facts.change.first_write.frame} && modbus.func_code in {5 6 15 16} && ip.src == ${facts.change.source.ip}"
+      expect: {count: 1}
+  - id: points_changed
+    text: Which PLC points (register map names) were changed? List them.
+    answer: "${facts.change.point_names}"
+    type: set
+    points: 15
+    foreach: facts.change.writes
+    check:
+      filter: "mbtcp && ip.src == ${facts.change.source.ip} && ip.dst == ${facts.change.target.ip} && modbus.func_code == ${item.function} && (modbus.reference_num == ${item.address} || modbus.regnum16 == ${item.address} || modbus.bitnum == ${item.address}) && !modbus.request_frame"
+      expect: {min: 1}
+  - id: values_written
+    text: For every changed point, give the engineering value that was written.
+    answer: "${facts.change.values}"
+    type: map
+    points: 15
+    foreach: facts.change.register_writes
+    check:
+      filter: "mbtcp && ip.src == ${facts.change.source.ip} && modbus.regnum16 == ${item.address} && modbus.regval_uint16 == ${item.raw} && !modbus.request_frame"
+      expect: {min: 1}
+  - id: functions_used
+    text: Which Modbus function codes did the writer use?
+    answer: "${facts.change.function_codes}"
+    type: set
+    points: 5
+  - id: discovery
+    text: Before writing, did the source query the PLC identity? If so, which vendor/product did the PLC report?
+    when: vars.discovery
+    answer: "${facts.change.reported_identity}"
+    points: 10
+    check:
+      filter: "mbtcp && modbus.func_code == 43 && ip.dst == ${facts.change.source.ip} && modbus.object_str_value"
+      expect: {min: 1}
+  - id: impact
+    text: Which measured process values are driven by the changed setpoints?
+    answer: "${facts.change.affected_measurements}"
+    type: set
+    points: 10
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique best describes the setpoint changes?
+    answer: T0836
+    accept: [T0836, "Modify Parameter", T0855, "Unauthorized Command Message"]
+    points: 5
+  - id: legit_vs_unauthorized
+    when: vars.operator_writes
+    text: The engineering workstation also changed setpoints legitimately. How many write requests in the capture were legitimate operator changes?
+    answer: "${facts.operator_changes.write_count}"
+    type: number
+    points: 15
