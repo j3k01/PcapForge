@@ -1,13 +1,29 @@
 # Roadmap
 
-State at v0.1.0:
-- one OT scenario (`ot-modbus-write-manipulation`, easy/medium/hard; the process and PLC count are drawn per seed);
-- Modbus/TCP, OPC UA and S7comm, plus DNS/NTP/ARP and Windows name-resolution chatter;
-- SIEM export, Suricata rules, grading, student/instructor packages, Polish handouts;
-- CI and releases on GitHub.
+Current state:
+- OT scenarios: a baseline (no incident) plus five incident scenarios — setpoint manipulation
+  (`ot-modbus-write-manipulation`), device discovery (`ot-modbus-discovery`), command replay
+  (`ot-modbus-command-replay`), coil manipulation (`ot-modbus-coil-manipulation`) and alarm masking
+  (`ot-modbus-alarm-masking`); the process, PLC count and device pool are drawn per seed;
+- protocols: Modbus/TCP, OPC UA, S7comm, DHCPv4, DNS/NTP/ARP and Windows name-resolution chatter,
+  plus an IPv6 link-local baseline;
+- composer realism: causal retiming with TCP segmentation, SPAN artefacts (duplicates, drops, VLAN,
+  sensor clock), a host-firewall model (filtered vs closed ports), and RFC-correct DHCP delivery;
+- process models: per-point descriptions and a vendor (Modicon) register-numbering convention;
+- SIEM export, Suricata and Sigma rules, grading, student/instructor packages, CTFd export,
+  debrief report, Polish handouts; CI and releases on GitHub.
 
 Effort: **S** = hours, **M** = 1–3 days, **L** = a week or more.
-Status: `[ ]` open, `[~]` partly done.
+Status: `[ ]` open, `[~]` partly done, `[x]` done.
+
+### Next up (open items, highest value first)
+- 32-bit float registers across two words (section 1 / process-model polish) — the biggest remaining
+  realism gain; cross-cutting (wire, answer-key filters, SIEM decode), so a dedicated change.
+- More background protocols: IEC 60870-5-104, BACnet/IP, EtherNet/IP/CIP, DNP3 (section 2).
+- Long captures (24 h, multi-million packets): streaming compose and memory profiling (section 1).
+- Detection: Sigma rules per new scenario, Zeek output, validated SPL/KQL (section 5).
+- IT line: benign HTTPS, DHCP and AD baselines, then IT scenarios (section 3).
+- Platform: PyPI distribution name, Docker image, docs site, macOS check (section 6).
 
 ## 1. Realism of the traffic (highest value, fully defensive)
 
@@ -42,7 +58,7 @@ Status: `[ ]` open, `[~]` partly done.
     setpoint it guarded out of band, in that order).
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
 - [ ] **More protocols as background actors** (M each): IEC 60870-5-104 (`c104`), BACnet/IP (`bacpypes3`), EtherNet/IP/CIP, DNP3.
-- [~] **Process-model polish** (S): translated process titles (pl: done); still open: point descriptions, more device profiles (ABB, Honeywell, Phoenix Contact), and per-vendor register-map styles (1-based addressing, 32-bit floats across two registers).
+- [~] **Process-model polish** (S): translated process titles (pl), point descriptions on every register, and a vendor register-numbering convention in the handout (`register_style`, Modicon 4xxxx/3xxxx/1xxxx; the wire stays 0-based) — all done. Device profiles for ABB, Honeywell and Phoenix Contact already ship. Still open: 32-bit floats across two registers (cross-cutting — touches the wire, answer-key filters and the SIEM decode, so a dedicated change).
 
 ## 3. IT line (benign equivalents only, see CONTRIBUTING.md)
 

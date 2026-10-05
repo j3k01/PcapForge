@@ -25,56 +25,57 @@
 id: hvac_building
 title: Building HVAC — air-handling unit, fan-coil zones and chiller
 unit_id: 1
+register_style: {coils: 1, discrete: 10001, input: 30001, holding: 40001}
 
 holding:
-  - {address: 0, name: zone1_temp_sp, unit: degC, scale: 10, nominal: 22.0, normal: [20.0, 24.0], writable: true}
-  - {address: 1, name: zone2_temp_sp, unit: degC, scale: 10, nominal: 22.5, normal: [20.0, 24.0], writable: true}
-  - {address: 2, name: zone3_temp_sp, unit: degC, scale: 10, nominal: 21.5, normal: [20.0, 24.0], writable: true}
-  - {address: 3, name: supply_air_temp_sp, unit: degC, scale: 10, nominal: 14.0, normal: [12.0, 16.0], writable: true}
-  - {address: 4, name: chw_supply_temp_sp, unit: degC, scale: 10, nominal: 7.0, normal: [6.0, 9.0], writable: true}
-  - {address: 5, name: min_oa_damper_sp, unit: "%", scale: 10, nominal: 20, normal: [15, 30], writable: true}
-  - {address: 6, name: duct_static_pressure_sp, unit: Pa, scale: 1, nominal: 250, normal: [200, 320], writable: true}
-  - {address: 7, name: zone_high_temp_alarm, unit: degC, scale: 10, nominal: 27.0, normal: [26.0, 28.0], writable: true}
-  - {address: 8, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true}
+  - {address: 0, name: zone1_temp_sp, unit: degC, scale: 10, nominal: 22.0, normal: [20.0, 24.0], writable: true, desc: Zone 1 temperature setpoint}
+  - {address: 1, name: zone2_temp_sp, unit: degC, scale: 10, nominal: 22.5, normal: [20.0, 24.0], writable: true, desc: Zone 2 temperature setpoint}
+  - {address: 2, name: zone3_temp_sp, unit: degC, scale: 10, nominal: 21.5, normal: [20.0, 24.0], writable: true, desc: Zone 3 temperature setpoint}
+  - {address: 3, name: supply_air_temp_sp, unit: degC, scale: 10, nominal: 14.0, normal: [12.0, 16.0], writable: true, desc: Supply-air temperature setpoint}
+  - {address: 4, name: chw_supply_temp_sp, unit: degC, scale: 10, nominal: 7.0, normal: [6.0, 9.0], writable: true, desc: Chilled-water supply setpoint}
+  - {address: 5, name: min_oa_damper_sp, unit: "%", scale: 10, nominal: 20, normal: [15, 30], writable: true, desc: Minimum outdoor-air damper setpoint}
+  - {address: 6, name: duct_static_pressure_sp, unit: Pa, scale: 1, nominal: 250, normal: [200, 320], writable: true, desc: Duct static-pressure setpoint}
+  - {address: 7, name: zone_high_temp_alarm, unit: degC, scale: 10, nominal: 27.0, normal: [26.0, 28.0], writable: true, desc: Zone high-temperature alarm threshold}
+  - {address: 8, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: Control mode (1 manual, 2 auto)}
 
 input:
-  - {address: 0, name: outdoor_air_temp, unit: degC, scale: 10, nominal: 22, normal: [14, 30], model: {type: daily, amplitude: 6, phase_h: 9, noise: 0.1}}
-  - {address: 1, name: occupancy, unit: "%", scale: 10, nominal: 50, normal: [0, 100], model: {type: daily, amplitude: 42, phase_h: 7, noise: 1.0}}
-  - {address: 2, name: zone_co2, unit: ppm, scale: 1, nominal: 820, normal: [400, 1300], model: {type: follow, source: occupancy, gain: 8, offset: 420, tau: 900, noise: 8}}
-  - {address: 3, name: zone1_temp, unit: degC, scale: 10, nominal: 22.0, normal: [19.0, 25.5], model: {type: follow, source: zone1_temp_sp, offset: -1.16, inputs: [{source: occupancy, gain: 0.01}, {source: outdoor_air_temp, gain: 0.03}], limits: [10, 35], tau: 900, noise: 0.05}}
-  - {address: 4, name: zone2_temp, unit: degC, scale: 10, nominal: 22.5, normal: [19.0, 25.5], model: {type: follow, source: zone2_temp_sp, offset: -1.6, inputs: [{source: occupancy, gain: 0.01}, {source: outdoor_air_temp, gain: 0.05}], limits: [10, 35], tau: 900, noise: 0.05}}
-  - {address: 5, name: zone3_temp, unit: degC, scale: 10, nominal: 21.5, normal: [19.0, 25.5], model: {type: follow, source: zone3_temp_sp, offset: -0.72, inputs: [{source: occupancy, gain: 0.01}, {source: outdoor_air_temp, gain: 0.01}], limits: [10, 35], tau: 900, noise: 0.05}}
-  - {address: 6, name: zone1_fcu_valve, unit: "%", scale: 10, nominal: 45, normal: [0, 100], model: {type: follow, source: zone1_temp_sp, gain: -15, offset: 306, inputs: [{source: occupancy, gain: 0.5}, {source: outdoor_air_temp, gain: 2.0}], limits: [0, 100], tau: 180, noise: 0.5}}
-  - {address: 7, name: zone2_fcu_valve, unit: "%", scale: 10, nominal: 50, normal: [0, 100], model: {type: follow, source: zone2_temp_sp, gain: -15, offset: 318.5, inputs: [{source: occupancy, gain: 0.5}, {source: outdoor_air_temp, gain: 2.0}], limits: [0, 100], tau: 180, noise: 0.5}}
-  - {address: 8, name: zone3_fcu_valve, unit: "%", scale: 10, nominal: 40, normal: [0, 100], model: {type: follow, source: zone3_temp_sp, gain: -15, offset: 293.5, inputs: [{source: occupancy, gain: 0.5}, {source: outdoor_air_temp, gain: 2.0}], limits: [0, 100], tau: 180, noise: 0.5}}
-  - {address: 9, name: supply_air_temp, unit: degC, scale: 10, nominal: 14.0, normal: [11.0, 17.0], model: {type: follow, source: supply_air_temp_sp, offset: -1.1, inputs: [{source: outdoor_air_temp, gain: 0.05}], tau: 300, noise: 0.1}}
-  - {address: 10, name: duct_static_pressure, unit: Pa, scale: 1, nominal: 250, normal: [180, 340], model: {type: follow, source: duct_static_pressure_sp, tau: 30, noise: 3}}
-  - {address: 11, name: supply_fan_speed, unit: "%", scale: 10, nominal: 70, normal: [40, 95], model: {type: follow, source: duct_static_pressure_sp, gain: 0.2, offset: 5, inputs: [{source: occupancy, gain: 0.3}], limits: [0, 100], tau: 60, noise: 0.3}}
-  - {address: 12, name: outdoor_air_damper, unit: "%", scale: 10, nominal: 36, normal: [10, 70], model: {type: follow, source: min_oa_damper_sp, offset: -16.8, inputs: [{source: zone_co2, gain: 0.04}], limits: [0, 100], tau: 120, noise: 0.3}}
-  - {address: 13, name: chw_supply_temp, unit: degC, scale: 10, nominal: 7.0, normal: [5.5, 9.5], model: {type: follow, source: chw_supply_temp_sp, tau: 600, noise: 0.05}}
-  - {address: 14, name: chw_return_temp, unit: degC, scale: 10, nominal: 12.0, normal: [9.0, 16.0], model: {type: follow, source: chw_supply_temp, offset: 0.8, inputs: [{source: occupancy, gain: 0.04}, {source: outdoor_air_temp, gain: 0.1}], tau: 600, noise: 0.05}}
-  - {address: 15, name: chiller_load, unit: "%", scale: 10, nominal: 55, normal: [5, 100], model: {type: follow, source: chw_supply_temp_sp, gain: -4, offset: 9, inputs: [{source: occupancy, gain: 0.6}, {source: outdoor_air_temp, gain: 2.0}], limits: [0, 100], tau: 600, noise: 0.5}}
-  - {address: 16, name: supply_fan_runtime_h, unit: h, scale: 1, nominal: 41377, model: {type: counter, rate: 0.000277778}}
+  - {address: 0, name: outdoor_air_temp, unit: degC, scale: 10, nominal: 22, normal: [14, 30], model: {type: daily, amplitude: 6, phase_h: 9, noise: 0.1}, desc: Outdoor-air temperature}
+  - {address: 1, name: occupancy, unit: "%", scale: 10, nominal: 50, normal: [0, 100], model: {type: daily, amplitude: 42, phase_h: 7, noise: 1.0}, desc: Building occupancy}
+  - {address: 2, name: zone_co2, unit: ppm, scale: 1, nominal: 820, normal: [400, 1300], model: {type: follow, source: occupancy, gain: 8, offset: 420, tau: 900, noise: 8}, desc: Zone CO2}
+  - {address: 3, name: zone1_temp, unit: degC, scale: 10, nominal: 22.0, normal: [19.0, 25.5], model: {type: follow, source: zone1_temp_sp, offset: -1.16, inputs: [{source: occupancy, gain: 0.01}, {source: outdoor_air_temp, gain: 0.03}], limits: [10, 35], tau: 900, noise: 0.05}, desc: Zone 1 temperature}
+  - {address: 4, name: zone2_temp, unit: degC, scale: 10, nominal: 22.5, normal: [19.0, 25.5], model: {type: follow, source: zone2_temp_sp, offset: -1.6, inputs: [{source: occupancy, gain: 0.01}, {source: outdoor_air_temp, gain: 0.05}], limits: [10, 35], tau: 900, noise: 0.05}, desc: Zone 2 temperature}
+  - {address: 5, name: zone3_temp, unit: degC, scale: 10, nominal: 21.5, normal: [19.0, 25.5], model: {type: follow, source: zone3_temp_sp, offset: -0.72, inputs: [{source: occupancy, gain: 0.01}, {source: outdoor_air_temp, gain: 0.01}], limits: [10, 35], tau: 900, noise: 0.05}, desc: Zone 3 temperature}
+  - {address: 6, name: zone1_fcu_valve, unit: "%", scale: 10, nominal: 45, normal: [0, 100], model: {type: follow, source: zone1_temp_sp, gain: -15, offset: 306, inputs: [{source: occupancy, gain: 0.5}, {source: outdoor_air_temp, gain: 2.0}], limits: [0, 100], tau: 180, noise: 0.5}, desc: Zone 1 fan-coil valve}
+  - {address: 7, name: zone2_fcu_valve, unit: "%", scale: 10, nominal: 50, normal: [0, 100], model: {type: follow, source: zone2_temp_sp, gain: -15, offset: 318.5, inputs: [{source: occupancy, gain: 0.5}, {source: outdoor_air_temp, gain: 2.0}], limits: [0, 100], tau: 180, noise: 0.5}, desc: Zone 2 fan-coil valve}
+  - {address: 8, name: zone3_fcu_valve, unit: "%", scale: 10, nominal: 40, normal: [0, 100], model: {type: follow, source: zone3_temp_sp, gain: -15, offset: 293.5, inputs: [{source: occupancy, gain: 0.5}, {source: outdoor_air_temp, gain: 2.0}], limits: [0, 100], tau: 180, noise: 0.5}, desc: Zone 3 fan-coil valve}
+  - {address: 9, name: supply_air_temp, unit: degC, scale: 10, nominal: 14.0, normal: [11.0, 17.0], model: {type: follow, source: supply_air_temp_sp, offset: -1.1, inputs: [{source: outdoor_air_temp, gain: 0.05}], tau: 300, noise: 0.1}, desc: Supply-air temperature}
+  - {address: 10, name: duct_static_pressure, unit: Pa, scale: 1, nominal: 250, normal: [180, 340], model: {type: follow, source: duct_static_pressure_sp, tau: 30, noise: 3}, desc: Duct static pressure}
+  - {address: 11, name: supply_fan_speed, unit: "%", scale: 10, nominal: 70, normal: [40, 95], model: {type: follow, source: duct_static_pressure_sp, gain: 0.2, offset: 5, inputs: [{source: occupancy, gain: 0.3}], limits: [0, 100], tau: 60, noise: 0.3}, desc: Supply-fan speed}
+  - {address: 12, name: outdoor_air_damper, unit: "%", scale: 10, nominal: 36, normal: [10, 70], model: {type: follow, source: min_oa_damper_sp, offset: -16.8, inputs: [{source: zone_co2, gain: 0.04}], limits: [0, 100], tau: 120, noise: 0.3}, desc: Outdoor-air damper position}
+  - {address: 13, name: chw_supply_temp, unit: degC, scale: 10, nominal: 7.0, normal: [5.5, 9.5], model: {type: follow, source: chw_supply_temp_sp, tau: 600, noise: 0.05}, desc: Chilled-water supply temperature}
+  - {address: 14, name: chw_return_temp, unit: degC, scale: 10, nominal: 12.0, normal: [9.0, 16.0], model: {type: follow, source: chw_supply_temp, offset: 0.8, inputs: [{source: occupancy, gain: 0.04}, {source: outdoor_air_temp, gain: 0.1}], tau: 600, noise: 0.05}, desc: Chilled-water return temperature}
+  - {address: 15, name: chiller_load, unit: "%", scale: 10, nominal: 55, normal: [5, 100], model: {type: follow, source: chw_supply_temp_sp, gain: -4, offset: 9, inputs: [{source: occupancy, gain: 0.6}, {source: outdoor_air_temp, gain: 2.0}], limits: [0, 100], tau: 600, noise: 0.5}, desc: Chiller load}
+  - {address: 16, name: supply_fan_runtime_h, unit: h, scale: 1, nominal: 41377, model: {type: counter, rate: 0.000277778}, desc: Supply-fan run-hours counter}
 
 coils:
-  - {address: 0, name: supply_fan_run, nominal: 1, writable: true}
-  - {address: 1, name: chiller_enable, nominal: 1, writable: true}
-  - {address: 2, name: chw_pump_run, nominal: 1, writable: true}
-  - {address: 3, name: zone1_fcu_enable, nominal: 1, writable: true}
-  - {address: 4, name: zone2_fcu_enable, nominal: 1, writable: true}
-  - {address: 5, name: zone3_fcu_enable, nominal: 1, writable: true}
-  - {address: 6, name: alarm_ack, nominal: 0, writable: true}
-  - {address: 7, name: remote_mode, nominal: 1, writable: true}
+  - {address: 0, name: supply_fan_run, nominal: 1, writable: true, desc: Supply-fan run command}
+  - {address: 1, name: chiller_enable, nominal: 1, writable: true, desc: Chiller enable command}
+  - {address: 2, name: chw_pump_run, nominal: 1, writable: true, desc: Chilled-water pump run command}
+  - {address: 3, name: zone1_fcu_enable, nominal: 1, writable: true, desc: Zone 1 fan-coil enable}
+  - {address: 4, name: zone2_fcu_enable, nominal: 1, writable: true, desc: Zone 2 fan-coil enable}
+  - {address: 5, name: zone3_fcu_enable, nominal: 1, writable: true, desc: Zone 3 fan-coil enable}
+  - {address: 6, name: alarm_ack, nominal: 0, writable: true, desc: Alarm acknowledge}
+  - {address: 7, name: remote_mode, nominal: 1, writable: true, desc: Remote/SCADA control enabled}
 
 discrete:
-  - {address: 0, name: zone1_high_temp, nominal: 0, model: {type: above, a: zone1_temp, b: zone_high_temp_alarm}}
-  - {address: 1, name: zone2_high_temp, nominal: 0, model: {type: above, a: zone2_temp, b: zone_high_temp_alarm}}
-  - {address: 2, name: zone3_high_temp, nominal: 0, model: {type: above, a: zone3_temp, b: zone_high_temp_alarm}}
-  - {address: 3, name: supply_fan_running, nominal: 1, model: {type: above, a: supply_fan_run, b: 0.5}}
-  - {address: 4, name: chiller_running, nominal: 1, model: {type: above, a: chiller_enable, b: 0.5}}
-  - {address: 5, name: chiller_fault, nominal: 0}
-  - {address: 6, name: filter_dirty, nominal: 0}
-  - {address: 7, name: fire_alarm, nominal: 0}
+  - {address: 0, name: zone1_high_temp, nominal: 0, model: {type: above, a: zone1_temp, b: zone_high_temp_alarm}, desc: Zone 1 high-temperature alarm}
+  - {address: 1, name: zone2_high_temp, nominal: 0, model: {type: above, a: zone2_temp, b: zone_high_temp_alarm}, desc: Zone 2 high-temperature alarm}
+  - {address: 2, name: zone3_high_temp, nominal: 0, model: {type: above, a: zone3_temp, b: zone_high_temp_alarm}, desc: Zone 3 high-temperature alarm}
+  - {address: 3, name: supply_fan_running, nominal: 1, model: {type: above, a: supply_fan_run, b: 0.5}, desc: Supply fan running}
+  - {address: 4, name: chiller_running, nominal: 1, model: {type: above, a: chiller_enable, b: 0.5}, desc: Chiller running}
+  - {address: 5, name: chiller_fault, nominal: 0, desc: Chiller fault}
+  - {address: 6, name: filter_dirty, nominal: 0, desc: Dirty-filter alarm}
+  - {address: 7, name: fire_alarm, nominal: 0, desc: Fire alarm}
 
 # What a SCADA/HMI reads every cycle (function code, table, start, count).
 poll_groups:

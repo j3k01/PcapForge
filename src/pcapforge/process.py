@@ -30,6 +30,7 @@ class Point:
     normal: tuple[float, float] | None
     writable: bool
     model: dict | None
+    desc: str = ""
 
     def encode(self, value: float) -> int:
         if self.table in BIT_TABLES:
@@ -68,11 +69,22 @@ class ProcessProfile:
                     normal=tuple(raw["normal"]) if "normal" in raw else None,
                     writable=raw.get("writable", False),
                     model=raw.get("model"),
+                    desc=raw.get("desc", ""),
                 ))
         self.by_name = {p.name: p for p in self.points}
         self.by_address = {(p.table, p.address): p for p in self.points}
         self.poll_groups: list[dict] = doc.get("poll_groups", [])
         self.operator_adjustable: list[dict] = doc.get("operator_adjustable", [])
+        # Optional vendor register-numbering convention for the handout, e.g. the Modicon
+        # data model {coils: 1, discrete: 10001, input: 30001, holding: 40001}. The wire stays
+        # 0-based; this only changes how the register map is labelled for the student.
+        self.register_style: dict[str, int] = doc.get("register_style", {})
+
+    def register_label(self, point: Point) -> str:
+        """The register's address as the student sees it: the vendor number when the profile
+        defines a ``register_style``, otherwise the 0-based wire address."""
+        base = self.register_style.get(point.table)
+        return str(base + point.address) if base is not None else str(point.address)
 
     def table(self, table: str) -> list[Point]:
         return sorted((p for p in self.points if p.table == table), key=lambda p: p.address)

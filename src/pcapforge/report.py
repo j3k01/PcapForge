@@ -442,7 +442,8 @@ def _changes_section(answers: dict, run_dir: Path) -> str:
         profile = maps.get(change.target_ip or "")
         point = profile.by_name.get(change.point) if profile else None
         kind = "unauthorized" if change.incident else "approved"
-        heading = (f'<h3 class="{"incident" if change.incident else "legit"}">{_e(change.point)} on '
+        named = f"{_e(change.point)} ({_e(point.desc)})" if point and point.desc else _e(change.point)
+        heading = (f'<h3 class="{"incident" if change.incident else "legit"}">{named} on '
                    f'{_e(change.target_label)} ({_e(change.target_ip or "?")}) — {kind} change by '
                    f'{_e(change.actor)}</h3>')
         if point is None:

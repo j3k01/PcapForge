@@ -294,10 +294,15 @@ come from a real capture of that OS; note the source in a comment.
 
 Add `src/pcapforge/profiles/processes/<id>.yaml` with `id`, `title`, `unit_id` and the Modbus tables
 (`coils`, `discrete`, `holding`, `input`). Points have `address`, `name`, `unit`, `scale`, `nominal`,
-`normal` (the operating band; writes outside it are the anomaly), `writable` and an optional `model`
-(`const`, `follow`, `daily`, `walk`, `counter`, `above`/`below`; see the header of
-`water_treatment.yaml`). Reference it from a `modbus.server` actor with `params: {process: <id>}`. The
-register map is printed in the student briefing.
+`normal` (the operating band; writes outside it are the anomaly), `writable`, an optional `desc`
+(a short human description shown in the handout register map, the `siem/modbus.jsonl` write records
+and the debrief report) and an optional `model` (`const`, `follow`, `daily`, `walk`, `counter`,
+`above`/`below`; see the header of `water_treatment.yaml`). Reference it from a `modbus.server` actor
+with `params: {process: <id>}`. The register map is printed in the student briefing.
+Optional `register_style` (a per-table base, e.g. the Modicon convention
+`{coils: 1, discrete: 10001, input: 30001, holding: 40001}`) labels the register map in a vendor
+numbering scheme; the Modbus wire addressing stays 0-based, and filters and the answer key keep using
+the 0-based address.
 Optional `translations: {pl: {title: ...}}` gives the localized process title used in handouts.
 
 ## Testing checklist

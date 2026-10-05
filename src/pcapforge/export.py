@@ -421,7 +421,8 @@ class _Exporter:
                 points.append(None)
                 continue
             value = point.decode(raw)
-            points.append({"point": point.name, "unit": point.unit,
+            points.append({"point": point.name, "register": profile.register_label(point),
+                           "desc": point.desc or None, "unit": point.unit,
                            "value": round(value, 6),
                            "in_normal_band": point.in_normal(value) if point.normal else None})
         known = [p for p in points if p is not None]
@@ -430,9 +431,8 @@ class _Exporter:
         if len(points) == 1:
             record.update(known[0])
             return
-        record["point"] = [p["point"] if p else None for p in points]
-        record["unit"] = [p["unit"] if p else None for p in points]
-        record["value"] = [p["value"] if p else None for p in points]
+        for field_ in ("point", "register", "desc", "unit", "value"):
+            record[field_] = [p[field_] if p else None for p in points]
         bands = [p["in_normal_band"] for p in known if p["in_normal_band"] is not None]
         record["in_normal_band"] = all(bands) if bands else None
 

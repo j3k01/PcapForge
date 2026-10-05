@@ -23,51 +23,52 @@
 id: wastewater_treatment
 title: Wastewater treatment — aeration basin and secondary clarifier
 unit_id: 1
+register_style: {coils: 1, discrete: 10001, input: 30001, holding: 40001}
 
 holding:
-  - {address: 0, name: do_sp, unit: mg/L, scale: 100, nominal: 2.0, normal: [1.5, 2.5], writable: true}
-  - {address: 1, name: ras_flow_sp, unit: m3/h, scale: 10, nominal: 180, normal: [140, 220], writable: true}
-  - {address: 2, name: was_flow_sp, unit: m3/h, scale: 10, nominal: 12, normal: [8, 16], writable: true}
-  - {address: 3, name: do_low_alarm, unit: mg/L, scale: 100, nominal: 0.8, normal: [0.5, 1.0], writable: true}
-  - {address: 4, name: blanket_high_alarm, unit: m, scale: 100, nominal: 2.5, normal: [2.3, 2.8], writable: true}
-  - {address: 5, name: ph_low_alarm, unit: pH, scale: 100, nominal: 6.5, normal: [6.3, 6.7], writable: true}
-  - {address: 6, name: ph_high_alarm, unit: pH, scale: 100, nominal: 8.5, normal: [8.3, 8.7], writable: true}
-  - {address: 7, name: ammonia_high_alarm, unit: mg/L, scale: 100, nominal: 5.0, normal: [4.0, 6.0], writable: true}
-  - {address: 8, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true}
+  - {address: 0, name: do_sp, unit: mg/L, scale: 100, nominal: 2.0, normal: [1.5, 2.5], writable: true, desc: Dissolved-oxygen setpoint}
+  - {address: 1, name: ras_flow_sp, unit: m3/h, scale: 10, nominal: 180, normal: [140, 220], writable: true, desc: Return-sludge flow setpoint}
+  - {address: 2, name: was_flow_sp, unit: m3/h, scale: 10, nominal: 12, normal: [8, 16], writable: true, desc: Waste-sludge flow setpoint}
+  - {address: 3, name: do_low_alarm, unit: mg/L, scale: 100, nominal: 0.8, normal: [0.5, 1.0], writable: true, desc: Low dissolved-oxygen alarm threshold}
+  - {address: 4, name: blanket_high_alarm, unit: m, scale: 100, nominal: 2.5, normal: [2.3, 2.8], writable: true, desc: High sludge-blanket alarm threshold}
+  - {address: 5, name: ph_low_alarm, unit: pH, scale: 100, nominal: 6.5, normal: [6.3, 6.7], writable: true, desc: Low pH alarm threshold}
+  - {address: 6, name: ph_high_alarm, unit: pH, scale: 100, nominal: 8.5, normal: [8.3, 8.7], writable: true, desc: High pH alarm threshold}
+  - {address: 7, name: ammonia_high_alarm, unit: mg/L, scale: 100, nominal: 5.0, normal: [4.0, 6.0], writable: true, desc: High effluent-ammonia alarm threshold}
+  - {address: 8, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: Control mode (1 manual, 2 auto)}
 
 input:
-  - {address: 0, name: influent_flow, unit: m3/h, scale: 10, nominal: 850, normal: [550, 1150], model: {type: daily, amplitude: 220, phase_h: 7, noise: 12}}
-  - {address: 1, name: blower_speed, unit: "%", scale: 10, nominal: 70, normal: [45, 95], model: {type: follow, source: do_sp, gain: 25, offset: -14, inputs: [{source: influent_flow, gain: 0.04}], limits: [20, 100], tau: 120, noise: 0.4}}
-  - {address: 2, name: dissolved_oxygen, unit: mg/L, scale: 100, nominal: 2.0, normal: [1.2, 2.8], model: {type: follow, source: blower_speed, gain: 0.04, offset: 0.56, inputs: [{source: influent_flow, gain: -0.0016}], limits: [0.05, 8.5], tau: 300, noise: 0.03}}
-  - {address: 3, name: ammonia, unit: mg/L, scale: 100, nominal: 1.0, normal: [0.2, 2.5], model: {type: follow, source: dissolved_oxygen, gain: -0.8, offset: 0.9, inputs: [{source: influent_flow, gain: 0.002}], limits: [0.05, 25], tau: 2400, noise: 0.03}}
-  - {address: 4, name: ras_flow, unit: m3/h, scale: 10, nominal: 180, normal: [130, 230], model: {type: follow, source: ras_flow_sp, tau: 30, noise: 1.0}}
-  - {address: 5, name: sludge_blanket_level, unit: m, scale: 100, nominal: 1.6, normal: [1.0, 2.2], model: {type: follow, source: ras_flow, gain: -0.01, offset: 3.4, limits: [0.2, 4.5], tau: 1800, noise: 0.02}}
-  - {address: 6, name: was_flow, unit: m3/h, scale: 10, nominal: 12, normal: [7, 17], model: {type: follow, source: was_flow_sp, tau: 30, noise: 0.2}}
-  - {address: 7, name: ph, unit: pH, scale: 100, nominal: 7.2, normal: [6.9, 7.6], model: {type: walk, step: 0.0008}}
-  - {address: 8, name: mlss, unit: mg/L, scale: 1, nominal: 3200, normal: [2800, 3600], model: {type: walk, step: 0.8}}
-  - {address: 9, name: basin_temp, unit: degC, scale: 10, nominal: 16.5, normal: [15.5, 17.5], model: {type: walk, step: 0.003}}
-  - {address: 10, name: blower1_runtime_h, unit: h, scale: 1, nominal: 26118, model: {type: counter, rate: 0.000277778}}
-  - {address: 11, name: influent_total_m3, unit: m3, scale: 1, nominal: 31457, model: {type: counter, rate: 0.236}}
+  - {address: 0, name: influent_flow, unit: m3/h, scale: 10, nominal: 850, normal: [550, 1150], model: {type: daily, amplitude: 220, phase_h: 7, noise: 12}, desc: Influent flow}
+  - {address: 1, name: blower_speed, unit: "%", scale: 10, nominal: 70, normal: [45, 95], model: {type: follow, source: do_sp, gain: 25, offset: -14, inputs: [{source: influent_flow, gain: 0.04}], limits: [20, 100], tau: 120, noise: 0.4}, desc: Aeration blower speed}
+  - {address: 2, name: dissolved_oxygen, unit: mg/L, scale: 100, nominal: 2.0, normal: [1.2, 2.8], model: {type: follow, source: blower_speed, gain: 0.04, offset: 0.56, inputs: [{source: influent_flow, gain: -0.0016}], limits: [0.05, 8.5], tau: 300, noise: 0.03}, desc: Measured dissolved oxygen}
+  - {address: 3, name: ammonia, unit: mg/L, scale: 100, nominal: 1.0, normal: [0.2, 2.5], model: {type: follow, source: dissolved_oxygen, gain: -0.8, offset: 0.9, inputs: [{source: influent_flow, gain: 0.002}], limits: [0.05, 25], tau: 2400, noise: 0.03}, desc: Effluent ammonia}
+  - {address: 4, name: ras_flow, unit: m3/h, scale: 10, nominal: 180, normal: [130, 230], model: {type: follow, source: ras_flow_sp, tau: 30, noise: 1.0}, desc: Return-sludge flow}
+  - {address: 5, name: sludge_blanket_level, unit: m, scale: 100, nominal: 1.6, normal: [1.0, 2.2], model: {type: follow, source: ras_flow, gain: -0.01, offset: 3.4, limits: [0.2, 4.5], tau: 1800, noise: 0.02}, desc: Clarifier sludge-blanket level}
+  - {address: 6, name: was_flow, unit: m3/h, scale: 10, nominal: 12, normal: [7, 17], model: {type: follow, source: was_flow_sp, tau: 30, noise: 0.2}, desc: Waste-sludge flow}
+  - {address: 7, name: ph, unit: pH, scale: 100, nominal: 7.2, normal: [6.9, 7.6], model: {type: walk, step: 0.0008}, desc: Measured pH}
+  - {address: 8, name: mlss, unit: mg/L, scale: 1, nominal: 3200, normal: [2800, 3600], model: {type: walk, step: 0.8}, desc: Mixed-liquor suspended solids}
+  - {address: 9, name: basin_temp, unit: degC, scale: 10, nominal: 16.5, normal: [15.5, 17.5], model: {type: walk, step: 0.003}, desc: Aeration-basin temperature}
+  - {address: 10, name: blower1_runtime_h, unit: h, scale: 1, nominal: 26118, model: {type: counter, rate: 0.000277778}, desc: Blower 1 run-hours counter}
+  - {address: 11, name: influent_total_m3, unit: m3, scale: 1, nominal: 31457, model: {type: counter, rate: 0.236}, desc: Influent-volume totaliser}
 
 coils:
-  - {address: 0, name: blower1_run, nominal: 1, writable: true}
-  - {address: 1, name: blower2_run, nominal: 0, writable: true}
-  - {address: 2, name: ras_pump_run, nominal: 1, writable: true}
-  - {address: 3, name: was_pump_run, nominal: 1, writable: true}
-  - {address: 4, name: mixer_run, nominal: 1, writable: true}
-  - {address: 5, name: alarm_ack, nominal: 0, writable: true}
-  - {address: 6, name: remote_mode, nominal: 1, writable: true}
-  - {address: 7, name: spare, nominal: 0, writable: true}
+  - {address: 0, name: blower1_run, nominal: 1, writable: true, desc: Blower 1 run command}
+  - {address: 1, name: blower2_run, nominal: 0, writable: true, desc: Blower 2 run command}
+  - {address: 2, name: ras_pump_run, nominal: 1, writable: true, desc: Return-sludge pump run command}
+  - {address: 3, name: was_pump_run, nominal: 1, writable: true, desc: Waste-sludge pump run command}
+  - {address: 4, name: mixer_run, nominal: 1, writable: true, desc: Basin mixer run command}
+  - {address: 5, name: alarm_ack, nominal: 0, writable: true, desc: Alarm acknowledge}
+  - {address: 6, name: remote_mode, nominal: 1, writable: true, desc: Remote/SCADA control enabled}
+  - {address: 7, name: spare, nominal: 0, writable: true, desc: Spare}
 
 discrete:
-  - {address: 0, name: do_low, nominal: 0, model: {type: below, a: dissolved_oxygen, b: do_low_alarm}}
-  - {address: 1, name: blanket_high, nominal: 0, model: {type: above, a: sludge_blanket_level, b: blanket_high_alarm}}
-  - {address: 2, name: ph_low, nominal: 0, model: {type: below, a: ph, b: ph_low_alarm}}
-  - {address: 3, name: ph_high, nominal: 0, model: {type: above, a: ph, b: ph_high_alarm}}
-  - {address: 4, name: ammonia_high, nominal: 0, model: {type: above, a: ammonia, b: ammonia_high_alarm}}
-  - {address: 5, name: blower1_running, nominal: 1, model: {type: above, a: blower1_run, b: 0.5}}
-  - {address: 6, name: blower1_fault, nominal: 0}
-  - {address: 7, name: power_ok, nominal: 1}
+  - {address: 0, name: do_low, nominal: 0, model: {type: below, a: dissolved_oxygen, b: do_low_alarm}, desc: Low dissolved-oxygen alarm}
+  - {address: 1, name: blanket_high, nominal: 0, model: {type: above, a: sludge_blanket_level, b: blanket_high_alarm}, desc: High sludge-blanket alarm}
+  - {address: 2, name: ph_low, nominal: 0, model: {type: below, a: ph, b: ph_low_alarm}, desc: Low pH alarm}
+  - {address: 3, name: ph_high, nominal: 0, model: {type: above, a: ph, b: ph_high_alarm}, desc: High pH alarm}
+  - {address: 4, name: ammonia_high, nominal: 0, model: {type: above, a: ammonia, b: ammonia_high_alarm}, desc: High effluent-ammonia alarm}
+  - {address: 5, name: blower1_running, nominal: 1, model: {type: above, a: blower1_run, b: 0.5}, desc: Blower 1 running}
+  - {address: 6, name: blower1_fault, nominal: 0, desc: Blower 1 fault}
+  - {address: 7, name: power_ok, nominal: 1, desc: Supply power healthy}
 
 # What a SCADA/HMI reads every cycle (function code, table, start, count).
 poll_groups:
