@@ -210,7 +210,7 @@ out/ot-modbus-write-manipulation_easy_42/siem/ntp.jsonl  (33 records)
 | file | one record per | main fields |
 |---|---|---|
 | `flows.jsonl` | TCP connection / UDP 5-tuple exchange / other IP pair | `src`, `dest`, `src_port`, `dest_port`, `transport`, `app`, `duration`, `packets_out/in`, `bytes_out/in` (IP bytes), `state` (`established`, `mid_session` = no SYN seen, `closed` = FIN, `reset`; UDP `bidirectional` / `one_way`) |
-| `modbus.jsonl` | request/response transaction | `unit_id`, `trans_id`, `function_code`, `function`, `write`, `table`, `address`, `quantity`, `values` (written raw registers for writes, read raw registers/bits for successful reads), `exception`, `response_time_ms`, `request_frame`; for writes to a PLC with a known register map: `point`, `unit`, `value` (engineering), `in_normal_band` |
+| `modbus.jsonl` | request/response transaction | `unit_id`, `trans_id`, `function_code`, `function`, `write`, `table`, `address`, `quantity`, `values` (written raw registers for writes, read raw registers/bits for successful reads), `exception`, `response_time_ms`, `request_frame`; for writes to a PLC with a known register map: `point`, `register` (vendor number, e.g. 40009), `desc`, `unit`, `value` (engineering), `in_normal_band` |
 | `dns.jsonl` | query/response | `query`, `qtype`, `rcode`, `answers`, `ttl`, `response_time_ms` |
 | `ntp.jsonl` | client request/server response | `version`, `stratum`, `refid`, `server_time`, `offset_ms`, `response_time_ms` |
 | `name_resolution.jsonl` | LLMNR / NBNS / mDNS / SSDP / browser datagram | `app`, `message`, `query`, `qtype`, `answers` |

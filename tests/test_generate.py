@@ -226,6 +226,11 @@ def test_modbus_log_flags_exactly_the_incident_writes_as_out_of_band(generated):
             operator["source"]["ip"], w["target"]["ip"], w["address"], [w["raw"]], w["point"])
         assert record["in_normal_band"] is True
 
+    # Each annotated write carries the register-map metadata: a non-empty description and the
+    # vendor (Modicon 4xxxx) register number matching the 0-based holding address.
+    single = [r for r in writes if isinstance(r.get("point"), str)]
+    assert single and all(r["desc"] and r["register"] == str(40001 + r["address"]) for r in single)
+
 
 def test_flow_totals_account_for_every_ip_packet_and_byte(generated):
     result, _ = generated
