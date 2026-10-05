@@ -514,6 +514,93 @@ class ModbusWriter(ModbusClientActor):
 
 
 @register
+class ModbusAlarmMask(ModbusClientActor):
+    """Two-stage attack: first move an alarm threshold so it can no longer trip, then push the
+    setpoint it was guarding out of its normal band - the dangerous change makes no alarm because
+    the threshold was blinded first. MITRE ATT&CK for ICS T0878 (Alarm Suppression / Mask) then
+    T0836 (Modify Parameter), from a host outside the approved change path (T0855)."""
+
+    type = "modbus.alarm_mask"
+
+    def plan(self) -> None:
+        plan, rng = self.plan_, self.rng
+        host = self.hosts[0]
+        target = rng.choice(plan.topology.select(self.param("targets")))
+        profile = serving_profile(plan, target.id)
+        unit = profile.unit_id
+        holding = [p for p in profile.table("holding") if p.writable and p.normal and p.name != "mode"]
+        alarms = [p for p in holding if "alarm" in p.name.split("_")]
+        setpoints = [p for p in holding if p not in alarms]
+        if not alarms or not setpoints:
+            raise ScenarioError(f"{self.type} '{self.id}': '{profile.id}' has no alarm threshold / setpoint pair")
+        # The alarm discrete each threshold guards: model {type: above|below, a: <measurement>, b: <threshold>}.
+        guards: dict[str, dict] = {}
+        for d in profile.table("discrete"):
+            if d.model and isinstance(d.model.get("b"), str):
+                guards.setdefault(d.model["b"], {"alarm": d.name, "measured": d.model.get("a"),
+                                                 "sense": d.model.get("type")})
+        factor_lo, factor_hi = DEVIATION[self.param("deviation", "moderate")]
+        masks = sorted(rng.sample(alarms, min(int(self.param("alarms", 1)), len(alarms))), key=lambda p: p.address)
+        setpoint = rng.choice(setpoints)
+        start_lo, start_hi = self.span(self.param("start", [0.3, 0.6]))
+        spread = min(float(self.param("spread", 300)), plan.duration * 0.5)
+        t0 = plan.duration * rng.uniform(start_lo, start_hi)
+        t0 = min(t0, max(plan.duration - spread - 60, plan.duration * 0.1))
+
+        writes, masked = [], []
+        session = _SessionPlanner(self, host.id, target.id, unit, t0, rng)
+        for point in masks:  # stage 1: blind the alarm(s)
+            lo, hi = point.normal
+            if _push_down(point.name, rng.child("mask")):
+                value = max(lo - (hi - lo) * rng.uniform(factor_lo, factor_hi), 0.0)
+            else:
+                value = hi + (hi - lo) * rng.uniform(factor_lo, factor_hi)
+            raw = point.encode(value)
+            action = session.write(16, point.address, [raw])
+            session.read(3, point.address, 1)
+            guard = guards.get(point.name, {})
+            writes.append({"point": point.name, "stage": "mask", "table": "holding", "address": point.address,
+                           "function": 16, "raw": raw, "value": point.decode(raw), "unit": point.unit,
+                           "normal": list(point.normal), "guards_alarm": guard.get("alarm"),
+                           "request": action_ref(action)})
+            masked.append(point.name)
+            plan.event(action, self.id, f"Mask {point.name} on {target.id} (alarm {guard.get('alarm', '?')})",
+                       ["T0878"], point=point.name, value=point.decode(raw))
+
+        # stage 2: push the governed setpoint out of band, now that the alarm cannot fire.
+        lo, hi = setpoint.normal
+        distance = (hi - lo) * rng.uniform(factor_lo, factor_hi)
+        down = _push_down(setpoint.name, rng.child("change"))
+        value = max(lo - distance, 0.0) if down and lo > 0 else hi + distance
+        raw = setpoint.encode(value)
+        at = session.t + rng.uniform(5.0, max(6.0, spread))
+        session2 = _SessionPlanner(self, host.id, target.id, unit, at, rng)
+        change = session2.write(16, setpoint.address, [raw])
+        session2.read(3, setpoint.address, 1)
+        session2.close()
+        writes.append({"point": setpoint.name, "stage": "change", "table": "holding", "address": setpoint.address,
+                       "function": 16, "raw": raw, "value": setpoint.decode(raw), "unit": setpoint.unit,
+                       "normal": list(setpoint.normal), "guards_alarm": None, "request": action_ref(change)})
+        plan.event(change, self.id, f"Move {setpoint.name} out of band on {target.id}", ["T0836"],
+                   point=setpoint.name, value=setpoint.decode(raw))
+
+        plan.facts[self.id] = {
+            "source": host_ref(host.id),
+            "target": host_ref(target.id),
+            "unit_id": unit,
+            "write_count": len(writes),
+            "writes": writes,
+            "masked_alarms": masked,
+            "changed_setpoint": setpoint.name,
+            "point_names": [w["point"] for w in writes],
+            "function_codes": sorted({w["function"] for w in writes}),
+            "mask_first": action_ref(writes[0]["request"]["$action"]),
+            "first_write": min((w["request"] for w in writes), key=lambda r: r["$action"].t),
+            "change_write": action_ref(change),
+        }
+
+
+@register
 class ModbusScanner(ModbusClientActor):
     """Reconnaissance from a host outside the approved client path: a TCP sweep of the control
     subnet for port 502, then per PLC a device-identification read (function 43) and register

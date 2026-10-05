@@ -28,7 +28,7 @@ Status: `[ ]` open, `[~]` partly done.
 
 ## 2. OT content
 
-- [~] **More OT incident scenarios**, authored by maintainers. Candidates:
+- [x] **More OT incident scenarios** (the originally listed candidates are all shipped; more can be added):
   - [x] Modbus device discovery on the control subnet (T0846, T0888, T0861): `ot-modbus-discovery`
     (`modbus.scanner` actor — a port-502 subnet sweep, device identification and register enumeration,
     no writes);
@@ -37,7 +37,9 @@ Status: `[ ]` open, `[~]` partly done.
     stay in-band, so detection pivots on source and timing);
   - [x] coil manipulation with alarm acknowledgement (T0855, T0831, T0878): `ot-modbus-coil-manipulation`
     (`modbus.coil_writer` actor — forces command coils and optionally writes the alarm_ack/reset coil);
-  - [ ] alarm-threshold masking followed by a setpoint change.
+  - [x] alarm-threshold masking followed by a setpoint change (T0878, T0836, T0855):
+    `ot-modbus-alarm-masking` (`modbus.alarm_mask` actor — blinds an alarm threshold, then pushes the
+    setpoint it guarded out of band, in that order).
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
 - [ ] **More protocols as background actors** (M each): IEC 60870-5-104 (`c104`), BACnet/IP (`bacpypes3`), EtherNet/IP/CIP, DNP3.
 - [~] **Process-model polish** (S): translated process titles (pl: done); still open: point descriptions, more device profiles (ABB, Honeywell, Phoenix Contact), and per-vendor register-map styles (1-based addressing, 32-bit floats across two registers).
