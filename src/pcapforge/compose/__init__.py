@@ -1,16 +1,16 @@
 """Compose a recording into the final capture: realistic timing, addressing, stacks and L2.
 
 Pipeline (see docs/DESIGN.md, "Composer spec"): flow/action assignment from the recording's
-markers -> causal retime (TCP segmentation) -> visibility -> header rebuild -> Ethernet + ARP,
-DHCPv4 delivery (broadcasts, address conflict detection), link-local IPv6 (ND, MLD, IPv6 copies
-of group datagrams) -> time-ordered merge -> SPAN artefacts (duplicates, drops, VLAN tag, sensor
-clock) -> pcap/pcapng. All randomness comes from the
-presentation seed, so the same plan, recording and seed always give a byte-identical file.
+markers -> causal retime (TCP segmentation) -> host firewall (filtered vs closed ports) ->
+visibility -> header rebuild -> Ethernet + ARP, DHCPv4 delivery (broadcasts, address conflict
+detection), link-local IPv6 (ND, MLD, IPv6 copies of group datagrams) -> time-ordered merge ->
+SPAN artefacts (duplicates, drops, VLAN tag, sensor clock) -> pcap/pcapng. All randomness comes
+from the presentation seed, so the same plan, recording and seed always give a byte-identical file.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,7 +19,9 @@ from pcapforge.compose.flows import assign_flows
 from pcapforge.compose.headers import Headers
 from pcapforge.compose.ipv6 import Ipv6
 from pcapforge.compose.link import BROADCAST, Link, pad
-from pcapforge.compose.packets import FIN, SYN, ComposeError, Packet, read_ipv4
+from pcapforge.compose.packets import (
+    FIN, K_DATA, K_RST, K_SYN, K_SYNACK, SYN, TCP, ComposeError, Packet, read_ipv4,
+)
 from pcapforge.compose.retime import Network, Retimer
 from pcapforge.compose.span import Span
 from pcapforge.compose.writer import WRITERS
@@ -44,6 +46,46 @@ class ComposeResult:
     sensor_clock: dict[str, float] = field(default_factory=lambda: {"offset_s": 0.0, "drift_ppm": 0.0})
 
 
+def _apply_host_firewall(timeline: list[Packet]) -> list[Packet]:
+    """Model a host firewall that drops unsolicited SYNs instead of refusing them.
+
+    A probe of a closed TCP port is refused with a RST on the loopback recording. If the target
+    host's stack drops unsolicited connections (``drops_unsolicited``, e.g. the Windows Defender
+    Firewall default), the port looks *filtered* instead: the RST never comes, and the client
+    retransmits its SYN once (at its stack's ``syn_rto_s``) before giving up. Ports on hosts that
+    refuse (Linux, the PLC stacks) keep their RST and read as *closed*. This is how a port sweep
+    tells firewalled machines from listening-but-closed ones.
+    """
+    by_flow: dict[int, list[Packet]] = {}
+    for p in timeline:
+        if p.flow.proto == TCP:
+            by_flow.setdefault(id(p.flow), []).append(p)
+    dropped: set[int] = set()
+    added: list[Packet] = []
+    for packets in by_flow.values():
+        kinds = {p.kind for p in packets}
+        refused = K_SYN in kinds and K_RST in kinds and not (kinds & {K_SYNACK, K_DATA})
+        if not refused:
+            continue
+        target = packets[0].flow.hosts[1]
+        if isinstance(target, Sink) or not target.device.stack.drops_unsolicited:
+            continue  # closed port: the RST stands
+        for p in packets:
+            if p.kind == K_RST:
+                dropped.add(id(p))
+        syns = [p for p in packets if p.kind == K_SYN and p.side == 0]
+        if syns:
+            syn = min(syns, key=lambda p: p.time)
+            rto = syn.flow.hosts[0].device.stack.syn_rto_s
+            added.append(replace(syn, time=syn.time + rto, retransmission=True))
+    if not dropped and not added:
+        return timeline
+    out = [p for p in timeline if id(p) not in dropped]
+    out.extend(added)
+    out.sort(key=lambda p: (p.time, p.order))
+    return out
+
+
 def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap") -> ComposeResult:
     writer = WRITERS.get(fmt)
     if writer is None:
@@ -56,7 +98,7 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
 
     packets = assign_flows(plan, read_ipv4(Path(recording)))
     network = Network(topology, present.child("latency"))
-    timeline = Retimer(plan, network, present).run(packets)
+    timeline = _apply_host_firewall(Retimer(plan, network, present).run(packets))
     headers = Headers(plan, present.child("headers"))
     leases = dhcp.Dhcp(plan, present.child("dhcp"))
     link = Link(plan, network, present.child("arp"), leases.joining)

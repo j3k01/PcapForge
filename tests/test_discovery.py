@@ -3,15 +3,56 @@ no writes, and per-PLC device identities that match the answer key on the wire."
 
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
+from pcapforge.compose import _apply_host_firewall
+from pcapforge.compose.packets import K_DATA, K_RST, K_SYN, K_SYNACK, RST, SYN, TCP, Flow, Packet
 from pcapforge.pipeline import generate
 from pcapforge.plan import build_plan
 from pcapforge.scenario import find
 from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
 
 SCENARIO = "ot-modbus-discovery"
+
+
+def _host(drops_unsolicited, syn_rto_s=1.0):
+    stack = SimpleNamespace(drops_unsolicited=drops_unsolicited, syn_rto_s=syn_rto_s)
+    return SimpleNamespace(device=SimpleNamespace(stack=stack))
+
+
+def _refused(target, scanner_rto=1.0):
+    """A refused connect: client SYN, server RST, nothing established."""
+    scanner = _host(False, scanner_rto)
+    flow = Flow(TCP, (scanner, target), ((b"\x7f\x00\x00\x01", 40000), (b"\x7f\x00\x00\x02", 502)))
+    syn = Packet(order=0, flow=flow, side=0, kind=K_SYN, flags=SYN, seq=1, ack=0, payload=b"", action=None, time=10.0)
+    rst = Packet(order=1, flow=flow, side=1, kind=K_RST, flags=RST, seq=0, ack=2, payload=b"", action=None, time=10.01)
+    return [syn, rst]
+
+
+def test_firewalled_host_filters_the_probe_but_a_closed_port_still_refuses():
+    # drops_unsolicited target: RST dropped, SYN retransmitted once at the client's syn_rto_s.
+    out = _apply_host_firewall(_refused(_host(True), scanner_rto=1.0))
+    assert all(p.kind != K_RST for p in out), "the RST is dropped (filtered)"
+    syns = [p for p in out if p.kind == K_SYN]
+    assert len(syns) == 2 and syns[1].retransmission
+    assert abs(syns[1].time - (syns[0].time + 1.0)) < 1e-9
+
+    # Refusing target (Linux / PLC stacks): unchanged - the RST stands (closed).
+    packets = _refused(_host(False))
+    assert _apply_host_firewall(packets) is packets
+
+
+def test_established_connections_are_left_alone():
+    scanner = _host(False)
+    flow = Flow(TCP, (scanner, _host(True)), ((b"\x7f\x00\x00\x01", 40000), (b"\x7f\x00\x00\x02", 502)))
+    syn = Packet(order=0, flow=flow, side=0, kind=K_SYN, flags=SYN, seq=1, ack=0, payload=b"", action=None, time=1.0)
+    synack = Packet(order=1, flow=flow, side=1, kind=K_SYNACK, flags=SYN, seq=5, ack=2, payload=b"",
+                    action=None, time=1.01)
+    data = Packet(order=2, flow=flow, side=0, kind=K_DATA, flags=0, seq=2, ack=6, payload=b"x", action=None, time=1.02)
+    packets = [syn, synack, data]
+    assert _apply_host_firewall(packets) is packets  # a real session is never touched
 
 
 def test_the_scan_plans_recon_actions_and_no_writes():
@@ -54,6 +95,14 @@ def test_discovery_capture_matches_the_key_with_distinct_per_plc_identities(tmp_
     syn_targets = {r[0] for r in tshark_fields(
         result.pcap, f"tcp.flags.syn==1 && tcp.flags.ack==0 && tcp.dstport==502 && ip.src=={source}", ["ip.dst"])}
     assert swept_ips <= syn_targets, "the scanner probes every swept host on port 502"
+    # The swept hosts are all Windows (drops_unsolicited): the probe is filtered, not refused -
+    # no RST comes back, and the scanner retransmits its SYN once before giving up.
+    assert not tshark_fields(result.pcap, f"tcp.flags.reset==1 && ip.dst=={source}", ["frame.number"]), \
+        "a firewalled host drops the probe instead of sending a RST"
+    for ip in swept_ips:
+        syns = tshark_fields(result.pcap, f"tcp.flags.syn==1 && tcp.flags.ack==0 && tcp.dstport==502 "
+                             f"&& ip.src=={source} && ip.dst=={ip}", ["frame.number"])
+        assert len(syns) >= 2, f"the filtered probe to {ip} is retransmitted"
     # The swept hosts are not PLCs, so none of them answers a Modbus device identification.
     assert not tshark_fields(
         result.pcap,

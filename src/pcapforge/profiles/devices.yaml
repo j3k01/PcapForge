@@ -14,9 +14,9 @@
 # `initial_window` (stacks): congestion window in segments when a message starts after idle.
 # `syn_rto_s` (stacks): initial retransmission timeout of an unanswered SYN.
 # `drops_unsolicited` (stacks): the host firewall silently drops inbound SYNs to closed ports
-# instead of answering with RST (Windows Defender Firewall default). Groundwork for modelling a
-# port sweep as filtered rather than closed; the composer does not yet synthesize this, so on the
-# loopback recording a closed port still shows a RST (see ROADMAP, "Firewalled / filtered ports").
+# instead of answering with RST (Windows Defender Firewall default). The composer then shows a probe
+# of such a host as filtered (no reply, the client retransmits its SYN at `syn_rto_s`) rather than
+# closed (RST); see `compose/_apply_host_firewall`.
 
 stacks:
   windows:
