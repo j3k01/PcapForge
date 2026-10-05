@@ -29,12 +29,15 @@ class Sink:
 
     Hosts send one-way datagrams to the sink's loopback address; the composer delivers them
     to ``group`` (or, when ``group`` is None, to the directed broadcast of the sender's
-    subnet) with the matching Ethernet group address. Routers do not forward them.
+    subnet) with the matching Ethernet group address. Routers do not forward them. Hosts
+    with IPv6 also send the datagram to ``group6``; ``ipv4`` False: only over IPv6.
     """
 
     name: str
     loopback: str
     group: str | None
+    group6: str | None = None
+    ipv4: bool = True
 
     @property
     def id(self) -> str:
@@ -42,10 +45,11 @@ class Sink:
 
 
 SINKS = {s.name: s for s in (
-    Sink("llmnr", f"{LOOPBACK_NET}.0.2", "224.0.0.252"),
-    Sink("mdns", f"{LOOPBACK_NET}.0.3", "224.0.0.251"),
-    Sink("ssdp", f"{LOOPBACK_NET}.0.4", "239.255.255.250"),
+    Sink("llmnr", f"{LOOPBACK_NET}.0.2", "224.0.0.252", "ff02::1:3"),
+    Sink("mdns", f"{LOOPBACK_NET}.0.3", "224.0.0.251", "ff02::fb"),
+    Sink("ssdp", f"{LOOPBACK_NET}.0.4", "239.255.255.250"),  # the payload names the IPv4 group
     Sink("broadcast", f"{LOOPBACK_NET}.0.5", None),
+    Sink("dhcpv6", f"{LOOPBACK_NET}.0.6", None, "ff02::1:2", ipv4=False),  # All_DHCP_Relay_Agents_and_Servers
 )}
 
 
@@ -53,6 +57,12 @@ def group_mac(ip: str) -> str:
     """Ethernet destination of an IPv4 multicast group (RFC 1112: 01:00:5e + low 23 bits)."""
     low = int(ipaddress.IPv4Address(ip)) & 0x7FFFFF
     return "01:00:5e:" + ":".join(f"{b:02x}" for b in low.to_bytes(3, "big"))
+
+
+def group6_mac(ip: str) -> str:
+    """Ethernet destination of an IPv6 multicast group (RFC 2464: 33:33 + low 32 bits)."""
+    low = ipaddress.IPv6Address(ip).packed[-4:]
+    return "33:33:" + ":".join(f"{b:02x}" for b in low)
 
 
 @dataclass

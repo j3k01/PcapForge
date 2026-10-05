@@ -344,6 +344,24 @@
                 },
                 "mid_session": {
                   "type": "boolean"
+                },
+                "span_duplicates": {
+                  "description": "Share of frames the SPAN session mirrors twice (ingress and egress copy).",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 0.05
+                },
+                "sensor_drop": {
+                  "description": "Share of frames the sensor misses; frames the answer key refers to are kept.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 0.02
+                },
+                "vlan": {
+                  "description": "802.1Q VLAN id carried by every mirrored frame.",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4094
                 }
               }
             },

@@ -84,7 +84,7 @@ actors:
     type: windows.chatter
     hosts: [hmi, historian, ews]
     when: vars.chatter
-    params: {rate: "${vars.chatter_rate}"}
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
   # Second treatment train: OEM package unit on a Siemens S7-1500, monitored over S7comm.
   - id: s7_service
     type: s7.server
@@ -127,7 +127,7 @@ actors:
     type: windows.chatter
     hosts: scada
     when: vars.opcua
-    params: {rate: "${vars.chatter_rate}"}
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
   - id: change
     type: modbus.writer
     hosts: "${vars.writer_host}"
@@ -163,9 +163,10 @@ difficulty:
       chatter: false
       s7: false
       opcua: false
+      ipv6: false
   medium:
     duration: 45m
-    impairments: {retransmit_rate: 0.0005, mid_session: true}
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20}
     vars:
       plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
       process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
@@ -185,9 +186,10 @@ difficulty:
       chatter_rate: 1
       s7: true
       opcua: true
+      ipv6: true
   hard:
     duration: 2h
-    impairments: {retransmit_rate: 0.001, mid_session: true}
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120}
     vars:
       plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
       process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
@@ -207,6 +209,7 @@ difficulty:
       chatter_rate: 2
       s7: true
       opcua: true
+      ipv6: true
 
 questions:
   - id: source_ip

@@ -105,6 +105,8 @@ class Packet:
     action: Action
     time: float = 0.0
     retransmission: bool = False
+    more: bool = False  # a segment of a message that continues in the next segment
+    train: bool = False  # one of the segments of a message larger than the MSS
 
     @property
     def src(self) -> Host:

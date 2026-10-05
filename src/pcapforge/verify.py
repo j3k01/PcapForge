@@ -15,8 +15,9 @@ from pcapforge.tools import require_answer_key_tshark, require_tool
 PREFS = ["-o", "ip.check_checksum:TRUE", "-o", "tcp.check_checksum:TRUE", "-o", "udp.check_checksum:TRUE"]
 PI_SEVERITY_MASK = 0x00F00000
 PI_ERROR = 0x00800000
-CHECKSUM_FIELDS = ["ip.checksum.status", "tcp.checksum.status", "udp.checksum.status"]
-ADDRESS_FIELDS = ["ip.src", "ip.dst", "arp.src.proto_ipv4", "arp.dst.proto_ipv4", "dns.a", "nbdgm.src.ip"]
+CHECKSUM_FIELDS = ["ip.checksum.status", "tcp.checksum.status", "udp.checksum.status", "icmpv6.checksum.status"]
+ADDRESS_FIELDS = ["ip.src", "ip.dst", "ipv6.src", "ipv6.dst", "arp.src.proto_ipv4", "arp.dst.proto_ipv4", "dns.a",
+                  "dns.aaaa", "nbdgm.src.ip"]
 INTEGRITY_FIELDS = ["frame.number", "frame.protocols", "_ws.malformed", "_ws.expert.severity",
                     *CHECKSUM_FIELDS, *ADDRESS_FIELDS]
 EXAMPLES = 10
@@ -71,6 +72,11 @@ def _expert_errors(pcap: Path) -> str:
     return "; ".join(rows[1:6])  # skip the column header
 
 
+def _loopback(address: str) -> bool:
+    """IPv4 127.0.0.0/8, IPv6 ::1 or an IPv4-mapped / -compatible loopback address."""
+    return address.startswith(("127.", "::ffff:127.", "::127.")) or address == "::1"
+
+
 def _integrity(pcap: Path, report: VerifyReport, answers: dict | None) -> None:
     args = ["-T", "fields", "-E", "separator=\t", "-E", "occurrence=a", "-E", "aggregator=,"]
     for name in INTEGRITY_FIELDS:
@@ -93,7 +99,7 @@ def _integrity(pcap: Path, report: VerifyReport, answers: dict | None) -> None:
             expert.append(number)
         if any("0" in frame.get(name, "").split(",") for name in CHECKSUM_FIELDS):
             bad_checksum.append(number)
-        if any(addr.startswith("127.") for name in ADDRESS_FIELDS for addr in frame.get(name, "").split(",")):
+        if any(_loopback(addr) for name in ADDRESS_FIELDS for addr in frame.get(name, "").split(",")):
             leaks.append(number)
 
     total = len(rows)
@@ -104,13 +110,14 @@ def _integrity(pcap: Path, report: VerifyReport, answers: dict | None) -> None:
     report.add("malformed", not malformed,
                f"malformed frames: {_frames(malformed)}" if malformed else "no malformed frames")
     report.add("checksums", not bad_checksum,
-               f"bad IP/TCP/UDP checksum in frames: {_frames(bad_checksum)}" if bad_checksum
-               else "all IP/TCP/UDP checksums valid")
+               f"bad IP/TCP/UDP/ICMPv6 checksum in frames: {_frames(bad_checksum)}" if bad_checksum
+               else "all IP/TCP/UDP/ICMPv6 checksums valid")
     report.add("expert_errors", not expert,
                f"expert errors in frames {_frames(expert)}: {_expert_errors(pcap)}" if expert
                else "no expert errors")
     report.add("loopback_leak", not leaks,
-               f"127.0.0.0/8 addresses in frames: {_frames(leaks)}" if leaks else "no loopback addresses")
+               f"loopback addresses (127.0.0.0/8, ::1) in frames: {_frames(leaks)}" if leaks
+               else "no loopback addresses")
     report.add("decoded", not undecoded,
                f"undissected payload (data) in frames: {_frames(undecoded)}" if undecoded
                else "every payload decoded by a protocol dissector")

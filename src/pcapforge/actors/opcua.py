@@ -17,8 +17,8 @@ subscription timers are stopped and a Publish request is answered at once with w
 since the subscription's last publish (or a keep-alive), as for a late subscription. All
 timestamps in the payload (request/response headers, DataValues, PublishTime, security
 token, ServerStatus) come from the scenario clock; nonces come from the behaviour seed.
-Every message is kept below one Ethernet MSS (browse one tag group at a time, one
-subscription per PLC, monitored items created per tag group).
+Requests stay small (browse one tag group at a time, one subscription per PLC, monitored
+items created per tag group); larger messages are segmented by the composer.
 """
 
 from __future__ import annotations

@@ -22,7 +22,6 @@ SERVICES = {446: "OpenSecureChannelRequest", 461: "CreateSessionRequest", 464: "
             467: "ActivateSessionRequest", 527: "BrowseRequest", 530: "BrowseResponse",
             631: "ReadRequest", 634: "ReadResponse", 787: "CreateSubscriptionRequest",
             751: "CreateMonitoredItemsRequest", 826: "PublishRequest", 829: "PublishResponse"}
-MSS = 1460
 
 
 def scenario(token_lifetime=3600):
@@ -94,7 +93,6 @@ def test_recorded_session_decodes_runs_on_the_scenario_clock_and_mirrors_the_pro
     rows = fields("opcua", "ip.src", "ip.dst", "tcp.len", "opcua.transport.type", "opcua.servicenodeid.numeric")
     ips = {h.id: h.ip for h in plan.topology.hosts}
     assert {frozenset(r[:2]) for r in rows} == {frozenset((ips["historian"], ips["scada"]))}
-    assert max(int(r[2]) for r in rows) <= MSS, "every OPC UA message fits one Ethernet segment"
     assert Counter(r[3] for r in rows)["HEL"] == 1
     services = Counter(SERVICES.get(int(r[4]), r[4]) for r in rows if r[4])
     planned = Counter(a.op for a in plan.actions if a.actor == "collector")

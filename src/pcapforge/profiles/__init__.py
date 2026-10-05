@@ -32,6 +32,16 @@ class LinkLocal:
     ttl: dict[str, int]  # per multicast group; other destinations use the stack's ttl
 
 
+
+@dataclass(frozen=True)
+class Ipv6:
+    """Link-local IPv6 of a stack that has it enabled (randomized interface identifier)."""
+
+    multicast_hop_limit: dict[str, int]  # per link-local group the host sends to
+    groups: tuple[str, ...]              # groups joined besides the solicited-node group (MLDv2)
+    router_solicitations: int            # Router Solicitations when the interface comes up
+    rs_interval_s: float
+
 @dataclass(frozen=True)
 class Stack:
     name: str
@@ -49,6 +59,8 @@ class Stack:
     delayed_ack: DelayedAck
     rto: Rto
     link_local: LinkLocal
+    initial_window: int  # congestion window after idle, in segments (RFC 6928 IW10 / RFC 3390)
+    ipv6: Ipv6 | None = None  # None: IPv6 off (not modelled for this stack)
 
 
 @dataclass(frozen=True)
@@ -75,6 +87,7 @@ class Device:
     forwarding_ms: Latency | None = None
     identity: dict[str, str] = field(default_factory=dict)
     browser: Browser | None = None  # None: the device sends no browser announcements
+    link_mbps: int = 100            # NIC speed: spacing of back-to-back segments on the wire
 
 
 @cache
@@ -102,6 +115,10 @@ def stack(name: str) -> Stack:
         rto=Rto(**raw["rto"]),
         link_local=LinkLocal(df=raw.get("link_local", {}).get("df", raw["df"]),
                              ttl=dict(raw.get("link_local", {}).get("ttl", {}))),
+        initial_window=raw["initial_window"],
+        ipv6=Ipv6(multicast_hop_limit=dict(raw["ipv6"]["multicast_hop_limit"]), groups=tuple(raw["ipv6"]["groups"]),
+                  router_solicitations=raw["ipv6"]["router_solicitations"],
+                  rs_interval_s=raw["ipv6"]["rs_interval_s"]) if "ipv6" in raw else None,
     )
 
 
@@ -121,6 +138,7 @@ def device(name: str) -> Device:
         identity=dict(raw.get("identity", {})),
         browser=Browser(tuple(raw["browser"]["os_version"]), raw["browser"]["server_type"])
         if "browser" in raw else None,
+        link_mbps=raw["link_mbps"],
     )
 
 

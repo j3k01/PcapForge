@@ -32,7 +32,7 @@ AGG = "\x1f"  # occurrence aggregator: never part of a decoded value
 
 FIELDS = [
     "frame.number", "frame.time_epoch", "frame.protocols", "eth.src", "eth.dst",
-    "ip.src", "ip.dst", "ip.proto", "ip.len",
+    "ip.src", "ip.dst", "ip.proto", "ip.len", "ipv6.src", "ipv6.dst", "ipv6.plen",
     "tcp.stream", "tcp.srcport", "tcp.dstport", "tcp.flags", "tcp.analysis.retransmission",
     "udp.stream", "udp.srcport", "udp.dstport",
     "arp.opcode", "arp.src.hw_mac", "arp.src.proto_ipv4", "arp.dst.hw_mac", "arp.dst.proto_ipv4",
@@ -55,8 +55,8 @@ F = {name: index for index, name in enumerate(FIELDS)}
 APPS = {
     "modbus": "modbus", "mbtcp": "modbus", "dns": "dns", "llmnr": "llmnr", "mdns": "mdns",
     "nbns": "nbns", "ssdp": "ssdp", "browser": "browser", "nbdgm": "nbdgm", "ntp": "ntp",
-    "dhcp": "dhcp", "http": "http", "tls": "tls", "smb": "smb", "smb2": "smb", "ssh": "ssh",
-    "icmp": "icmp", "snmp": "snmp", "syslog": "syslog", "opcua": "opcua", "s7comm": "s7comm",
+    "dhcp": "dhcp", "dhcpv6": "dhcpv6", "http": "http", "tls": "tls", "smb": "smb", "smb2": "smb", "ssh": "ssh",
+    "icmp": "icmp", "icmpv6": "icmpv6", "snmp": "snmp", "syslog": "syslog", "opcua": "opcua", "s7comm": "s7comm",
 }
 NAME_RESOLUTION = ("llmnr", "nbns", "mdns", "ssdp", "browser")
 TRANSPORTS = {"1": "icmp", "6": "tcp", "17": "udp", "58": "icmpv6"}
@@ -70,6 +70,7 @@ MODBUS_FUNCTIONS = {
     43: "read_device_identification",
 }
 MODBUS_WRITES = {5, 6, 15, 16, 22, 23}
+READ_FUNCTIONS = {1, 2, 3, 4}  # responses carry the register/bit values read (``values``)
 MODBUS_EXCEPTIONS = {
     1: "illegal_function", 2: "illegal_data_address", 3: "illegal_data_value",
     4: "server_device_failure", 5: "acknowledge", 6: "server_device_busy",
@@ -230,7 +231,7 @@ class _Exporter:
         epoch = float(row[F["frame.time_epoch"]])
         if row[F["arp.opcode"]]:
             self._arp(row, number, epoch)
-        src, dst = _first(row, "ip.src"), _first(row, "ip.dst")
+        src, dst = _first(row, "ip.src") or _first(row, "ipv6.src"), _first(row, "ip.dst") or _first(row, "ipv6.dst")
         if not src:
             return
         protocols = row[F["frame.protocols"]]
@@ -244,7 +245,7 @@ class _Exporter:
             sport, dport = _int(_first(row, "udp.srcport")), _int(_first(row, "udp.dstport"))
             key = ("udp", int(_first(row, "udp.stream")))
         else:
-            proto = _first(row, "ip.proto")
+            proto = _first(row, "ip.proto") or ("58" if "icmpv6" in protocols.split(":") else "")
             transport = TRANSPORTS.get(proto, proto)
             sport = dport = None
             key = (transport, *sorted((src, dst)))
@@ -267,7 +268,8 @@ class _Exporter:
             flow = self.flows[key] = _Flow(key, transport, number, epoch, epoch, (src, dst), (sport, dport))
         flow.last = epoch
         flow.packets[src] += 1
-        flow.bytes[src] += int(_first(row, "ip.len") or 0)
+        length = _first(row, "ip.len") or (40 + int(_first(row, "ipv6.plen")) if row[F["ipv6.plen"]] else 0)
+        flow.bytes[src] += int(length)
         flow.macs.setdefault(src, _first(row, "eth.src"))
         if flow.app is None and app is not None:
             flow.app = app
@@ -457,6 +459,15 @@ class _Exporter:
             identity = _all(row, "modbus.object_str_value")
             if identity:
                 record["device_identity"] = identity
+            if exception is None and record["function_code"] in READ_FUNCTIONS \
+                    and pdu["function_code"] == record["function_code"]:
+                if record["table"] in BIT_TABLES:
+                    values = [1 if _bool(v) else 0 for v in _all(row, "modbus.bitval")]
+                else:
+                    values = [int(v) for v in _all(row, "modbus.regval_uint16")]
+                # Bit responses are padded to whole bytes: keep only the requested quantity.
+                record["values"] = (values[:record["quantity"]] if record["quantity"] is not None
+                                    else values) or None
 
     # -- dns ---------------------------------------------------------------------------
     def _dns(self, row, key, transport, number, epoch, conn) -> None:

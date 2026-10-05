@@ -77,6 +77,27 @@ def _encode_options(names: list[str], stack: Stack, tsval: int, tsecr: int) -> b
     return bytes(out)
 
 
+@dataclass(frozen=True, slots=True)
+class Negotiated:
+    """What a client and a server stack agree on in the handshake."""
+
+    offered: frozenset[str]  # options in the client's SYN
+    ws: bool                 # window scaling on both sides
+    ts: bool                 # timestamps on every segment
+    mss: int                 # payload bytes per full-sized segment (both directions)
+    windows: tuple[int, int]  # receive window in bytes of client, server
+
+
+def negotiate(client: Stack, server: Stack) -> Negotiated:
+    offered = frozenset(_option_list(client, None, False))
+    ws = "ws" in offered and "ws" in server.syn_options and server.window_scale is not None
+    ts = client.timestamps and server.timestamps and "ts" in offered and "ts" in server.syn_options
+    # Each side sends at most the peer's announced MSS, minus the 12-byte timestamp option.
+    mss = min(client.mss, server.mss) - (12 if ts else 0)
+    windows = tuple((s.window << s.window_scale) if ws else s.syn_window for s in (client, server))
+    return Negotiated(offered, ws, ts, mss, windows)
+
+
 # -- DNS --------------------------------------------------------------------------------
 
 def _skip_name(data: bytes, offset: int) -> int:
@@ -181,7 +202,7 @@ class Headers:
         else:
             sstack = server.device.stack
             ttls, dfs = (cstack.ttl, sstack.ttl), (cstack.df, sstack.df)
-        offered = set(_option_list(cstack, None, False)) if flow.proto == TCP else set()
+        agreed = negotiate(cstack, sstack) if flow.proto == TCP else None
         state = self.flows[flow] = _FlowHeaders(
             addrs=(self.address(client, server), self.address(server, client)),
             ports=(self._client_port(flow), ports.WELL_KNOWN.get(flow.server_port, flow.server_port)),
@@ -192,9 +213,9 @@ class Headers:
             ipid=[rng.randrange(65536), rng.randrange(65536)],
             ts_base=(rng.getrandbits(32), rng.getrandbits(32)),
             ts_last=[0, 0],
-            offered=offered,
-            ws="ws" in offered and "ws" in sstack.syn_options and sstack.window_scale is not None,
-            ts=cstack.timestamps and sstack.timestamps and "ts" in offered and "ts" in sstack.syn_options,
+            offered=set(agreed.offered) if agreed else set(),
+            ws=agreed.ws if agreed else False,
+            ts=agreed.ts if agreed else False,
         )
         return state
 
@@ -202,13 +223,15 @@ class Headers:
         recorded = flow.client_port
         if recorded in ports.WELL_KNOWN:  # e.g. w32time sends from 123
             return ports.WELL_KNOWN[recorded]
-        host = flow.hosts[0]
+        return self.ephemeral(flow.hosts[0], self.rng)
+
+    def ephemeral(self, host: Host, rng: Rng) -> int:
+        """Next ephemeral port of ``host`` (shared by its IPv4 and IPv6 sockets)."""
         stack = host.device.stack
         lo, hi = stack.ephemeral_ports
         used = self.ports_used.setdefault(host.id, set())
         if len(used) > (hi - lo) // 2:
             used.clear()  # long captures: old connections have left TIME_WAIT
-        rng = self.rng
         if stack.port_allocation == "sequential":
             cursor = self.port_cursor.get(host.id)
             if cursor is None:

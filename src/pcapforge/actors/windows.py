@@ -1,5 +1,5 @@
 """Background chatter of Windows hosts on their segment: link-local name resolution (LLMNR,
-NBNS, mDNS), SSDP discovery and Computer Browser host announcements.
+NBNS, mDNS), SSDP discovery, Computer Browser host announcements and, with ``ipv6``, DHCPv6.
 
 All of it is one-way: datagrams go to recording sinks that the composer turns into the
 multicast group or the subnet broadcast address (see ``topology.SINKS``). Timing, ports and
@@ -11,7 +11,11 @@ payloads follow a Windows 10 capture:
   transaction ID), LLMNR (A and AAAA, each from its own ephemeral port and repeated once
   ~420 ms later with the same ID) and mDNS (``name.local`` from 5353) run in parallel;
 * SSDPSRV searches for an Internet gateway device in three rounds 3 s apart;
-* the Computer Browser announces the host to its domain every 12 minutes.
+* the Computer Browser announces the host to its domain every 12 minutes;
+* with ``ipv6`` (IPv6 enabled, no DHCPv6 server on the segment) the DHCPv6 client solicits
+  an address after the interface comes up and keeps retransmitting (RFC 8415 backoff up to
+  Windows' 120 s SOL_MAX_RT, one transaction ID). The composer sends LLMNR and mDNS over
+  IPv6 as well and adds the interface's DAD, Router Solicitations and MLDv2 reports.
 
 IP TTL / DF of these datagrams come from the stack profile (``link_local`` in devices.yaml).
 """
@@ -20,6 +24,10 @@ from __future__ import annotations
 
 import socket
 
+from scapy.layers.dhcp6 import (
+    DHCP6_Solicit, DHCP6OptClientFQDN, DHCP6OptClientId, DHCP6OptElapsedTime, DHCP6OptIA_NA, DHCP6OptOptReq,
+    DHCP6OptVendorClass, DUID_LLT, VENDOR_CLASS_DATA,
+)
 from scapy.layers.dns import DNS, DNSQR
 from scapy.layers.llmnr import LLMNRQuery
 from scapy.layers.netbios import NBNSHeader, NBNSQueryRequest, NBTDatagram
@@ -46,6 +54,14 @@ NB_WORKSTATION, NB_SERVER, NB_MASTER_BROWSER = 0x00, 0x20, 0x1D
 # Default printer names: Brother "BRN" + MAC, HP JetDirect "NPI" + last three MAC bytes.
 BROTHER_OUIS = ("001BA9", "008077", "30055C")
 
+DAD_S = 1.0                   # RetransTimer: the link-local address is usable after DAD
+SOLICIT_DELAY = 1.0           # SOL_MAX_DELAY before the first Solicit
+SOLICIT_IRT, SOLICIT_MRT = 1.0, 120.0
+DUID_EPOCH = 946684800        # DUID-LLT time: seconds since 2000-01-01 UTC
+MICROSOFT = 311               # IANA enterprise number of the "MSFT 5.0" vendor class
+# Placeholder link-layer address in the recorded DUID; the composer writes the host's MAC.
+DUID_MAC = "00:00:00:00:00:00"
+
 
 def nb_suffix(suffix: int) -> int:
     """Scapy's form of a NetBIOS name suffix byte (first-level encoding: two letters)."""
@@ -62,7 +78,7 @@ class WindowsChatter(Actor):
 
     type = "windows.chatter"
     sinks = (("broadcast", ports.NBNS), ("broadcast", ports.NBDGM), ("llmnr", ports.LLMNR),
-             ("mdns", ports.MDNS), ("ssdp", ports.SSDP))
+             ("mdns", ports.MDNS), ("ssdp", ports.SSDP), ("dhcpv6", ports.DHCPV6_SERVER))
 
     def plan(self) -> None:
         rate = float(self.param("rate", 1.0))
@@ -80,6 +96,8 @@ class WindowsChatter(Actor):
             self._plan_searches(host, rng.child("ssdp"), rng.uniform(*searches) * rate / 3600.0)
             if host.device.browser is not None:
                 self._plan_announcements(host, rng.child("browser"))
+            if self.param("ipv6", False):
+                self._plan_dhcpv6(host, rng.child("dhcpv6"))
 
     # -- names ----------------------------------------------------------------------
     def _unknown_names(self, rng) -> list[tuple[str, int]]:
@@ -187,6 +205,22 @@ class WindowsChatter(Actor):
                      period_ms=int(ANNOUNCE_PERIOD * 1000), datagram_id=datagram_id)
             t += ANNOUNCE_PERIOD + rng.uniform(0.0, 2.5)
 
+    def _plan_dhcpv6(self, host, rng) -> None:
+        """Solicit retransmissions of an interface whose IPv6 comes up ``up`` s into the capture."""
+        plan = self.plan_
+        up = round(rng.uniform(0.0, 0.5), 6)
+        first = up + DAD_S + rng.uniform(0.0, SOLICIT_DELAY)
+        xid, iaid = rng.getrandbits(24), rng.getrandbits(32)
+        installed = int(plan.start_epoch - rng.uniform(30.0, 1500.0) * 86400.0) - DUID_EPOCH
+        t, rt = first, SOLICIT_IRT * (1.0 + rng.uniform(0.0, 0.1))  # first RT strictly above IRT
+        while t < plan.duration:
+            plan.add(t, self.id, host.id, "dhcpv6.solicit", up=up, xid=xid, iaid=iaid, duid_time=installed,
+                     elapsed=min(round((t - first) * 100), 0xFFFF), fqdn=f"{host.name}.{plan.topology.domain}")
+            t += rt
+            rt = 2 * rt + rng.uniform(-0.1, 0.1) * rt
+            if rt > SOLICIT_MRT:
+                rt = SOLICIT_MRT * (1.0 + rng.uniform(-0.1, 0.1))
+
     # -- recording ------------------------------------------------------------------
     def execute(self, action, rt) -> None:
         a = action.args
@@ -220,6 +254,14 @@ class WindowsChatter(Actor):
                         / SMBMailslot_Write(Setup=[1, 0, 2], Name=b"\\MAILSLOT\\BROWSE",
                                             Buffer=[("Data", announcement)]))
             self._send(source, ports.NBDGM, "broadcast", ports.NBDGM, bytes(datagram))
+        elif action.op == "dhcpv6.solicit":
+            solicit = (DHCP6_Solicit(trid=a["xid"]) / DHCP6OptElapsedTime(elapsedtime=a["elapsed"])
+                       / DHCP6OptClientId(duid=DUID_LLT(lladdr=DUID_MAC, timeval=a["duid_time"]))
+                       / DHCP6OptIA_NA(iaid=a["iaid"], T1=0, T2=0)
+                       / DHCP6OptClientFQDN(flags=0, fqdn=a["fqdn"].encode())
+                       / DHCP6OptVendorClass(enterprisenum=MICROSOFT, vcdata=[VENDOR_CLASS_DATA(data=b"MSFT 5.0")])
+                       / DHCP6OptOptReq(reqopts=[17, 23, 24, 39]))
+            self._send(source, ports.DHCPV6_CLIENT, "dhcpv6", ports.DHCPV6_SERVER, bytes(solicit))
         else:
             raise ValueError(f"unknown operation {action.op}")
 

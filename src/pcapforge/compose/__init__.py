@@ -1,9 +1,10 @@
 """Compose a recording into the final capture: realistic timing, addressing, stacks and L2.
 
 Pipeline (see docs/DESIGN.md, "Composer spec"): flow/action assignment from the recording's
-markers -> causal retime -> visibility -> header rebuild -> Ethernet + ARP -> time-ordered
-merge -> pcap/pcapng. All randomness comes from the presentation seed, so the same plan,
-recording and seed always give a byte-identical file.
+markers -> causal retime (TCP segmentation) -> visibility -> header rebuild -> Ethernet + ARP,
+link-local IPv6 (ND, MLD, IPv6 copies of group datagrams) -> time-ordered merge -> SPAN
+artefacts (duplicates, drops, VLAN tag) -> pcap/pcapng. All randomness comes from the
+presentation seed, so the same plan, recording and seed always give a byte-identical file.
 """
 
 from __future__ import annotations
@@ -14,11 +15,14 @@ from typing import TYPE_CHECKING
 
 from pcapforge.compose.flows import assign_flows
 from pcapforge.compose.headers import Headers
+from pcapforge.compose.ipv6 import Ipv6
 from pcapforge.compose.link import Link, pad
 from pcapforge.compose.packets import FIN, SYN, ComposeError, Packet, read_ipv4
 from pcapforge.compose.retime import Network, Retimer
+from pcapforge.compose.span import Span
 from pcapforge.compose.writer import WRITERS
 from pcapforge.rng import Rng
+from pcapforge.topology import Sink
 
 if TYPE_CHECKING:
     from pcapforge.plan import Plan
@@ -51,21 +55,31 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
     timeline = Retimer(plan, network, present).run(packets)
     headers = Headers(plan, present.child("headers"))
     link = Link(plan, network, present.child("arp"))
+    ipv6 = Ipv6(plan, headers, present.child("ipv6"))
 
-    # (time, emission index, frame, packet or None for synthesized ARP)
+    # (time, emission index, frame, packet or None for synthesized ARP / ND / MLD / IPv6 copies)
     frames: list[tuple[float, int, bytes, Packet | None]] = []
     for p in timeline:
+        ipv4 = not isinstance(p.dst, Sink) or p.dst.ipv4
         view = link.view(p.src, p.dst)
         if view is None:
-            headers.skip(p)
+            if ipv4:
+                headers.skip(p)
             continue
         eth, hops = view
-        for t, arp in link.arp_before(p.time, p.src, p.dst):
-            frames.append((t, len(frames), arp, None))
-        frames.append((p.time, len(frames), pad(eth + headers.build(p, hops)), p))
+        for t, frame in ipv6.start_before(p.time, p.src):
+            frames.append((t, len(frames), frame, None))
+        if ipv4:
+            for t, arp in link.arp_before(p.time, p.src, p.dst):
+                frames.append((t, len(frames), arp, None))
+            frames.append((p.time, len(frames), pad(eth + headers.build(p, hops)), p))
+        copy = ipv6.datagram(p)
+        if copy is not None:
+            frames.append((copy[0], len(frames), copy[1], None))
     if not frames:
         raise ComposeError("no packet of the recording is visible at the sensor")
     frames.sort(key=lambda f: (f[0], f[1]))
+    frames = Span(plan, present.child("span")).apply(frames)
 
     micros = [round(f[0] * 1_000_000) for f in frames]
     out = Path(out)
@@ -75,7 +89,8 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
     requests: dict[int, int] = {}
     controls: dict[int, int] = {}  # SYN / FIN of actions without application data
     for number, (_t, _i, _data, p) in enumerate(frames, 1):
-        if p is None or p.side != 0 or p.retransmission:
+        # A segmented request is decoded (reassembled) in the frame of its last segment.
+        if p is None or p.side != 0 or p.retransmission or p.more:
             continue
         if p.is_request:
             requests.setdefault(p.action.id, number)

@@ -9,6 +9,9 @@
 # broadcast; defaults to the stack's `df` and `ttl`.
 # `browser` (devices): Computer Browser host announcements (`windows.chatter`): announced OS
 # version and SV_TYPE_* server type bits; devices without it do not announce themselves.
+# `link_mbps` (devices): NIC speed; back-to-back TCP segments of a message are spaced by their
+# serialisation time (routed senders: the slower of the sender's and the router's link).
+# `initial_window` (stacks): congestion window in segments when a message starts after idle.
 
 stacks:
   windows:
@@ -25,12 +28,21 @@ stacks:
     port_allocation: sequential
     delayed_ack: {probability: 0.55, min_ms: 1, max_ms: 200}
     rto: {min_ms: 300, plus_rtt: false}   # retransmission timeout on a LAN
+    initial_window: 10     # segments after idle (IW10 since Windows Server 2016 / Windows 10)
     # Checked against a Windows 10 capture: no DF on link-local datagrams; LLMNR (dnscache)
     # TTL 1, SSDP M-SEARCH (SSDPSRV) TTL 4; mDNS uses 255 (RFC 6762 section 11); NBNS and
     # browser broadcasts keep the default 128.
     link_local:
       df: false
       ttl: {224.0.0.252: 1, 239.255.255.250: 4, 224.0.0.251: 255}
+    # IPv6 is on by default with a randomized link-local interface identifier. LLMNR and
+    # DHCPv6 use hop limit 1, mDNS 255 (RFC 6762); ND (255) and MLD (1) are fixed by their RFCs.
+    # Groups: LLMNR, mDNS, SSDP (besides the solicited-node group). RS: RFC 4861 defaults.
+    ipv6:
+      multicast_hop_limit: {ff02::1:3: 1, ff02::fb: 255, ff02::1:2: 1}
+      groups: [ff02::1:3, ff02::fb, ff02::c]
+      router_solicitations: 3
+      rs_interval_s: 4
   linux:
     ttl: 64
     df: true
@@ -45,6 +57,7 @@ stacks:
     port_allocation: random
     delayed_ack: {probability: 0.35, min_ms: 40, max_ms: 45}
     rto: {min_ms: 200, plus_rtt: true}    # srtt + max(rto_min, 4 * rttvar)
+    initial_window: 10     # RFC 6928, Linux >= 2.6.39
   vxworks:
     ttl: 64
     df: false
@@ -59,78 +72,91 @@ stacks:
     port_allocation: sequential
     delayed_ack: {probability: 0.2, min_ms: 5, max_ms: 50}
     rto: {min_ms: 500, plus_rtt: false}
+    initial_window: 3      # RFC 3390: min(4 * MSS, max(2 * MSS, 4380 bytes))
 
 devices:
   schneider-m340:
     vendor: Schneider Electric
     ouis: ["00:80:F4", "00:00:54"]
     stack: vxworks
+    link_mbps: 100
     processing_ms: {median: 4.0, sigma: 0.45}
     identity: {VendorName: Schneider Electric, ProductCode: BMX P34 2020, MajorMinorRevision: v3.20}
   siemens-s7-1200:
     vendor: Siemens
     ouis: ["00:1B:1B", "00:0E:8C", "28:63:36"]
     stack: vxworks
+    link_mbps: 100
     processing_ms: {median: 6.0, sigma: 0.5}
     identity: {VendorName: Siemens, ProductCode: 6ES7 214-1AG40-0XB0, MajorMinorRevision: V4.5}
   siemens-s7-1500:
     vendor: Siemens
     ouis: ["00:1B:1B", "00:0E:8C", "28:63:36"]
     stack: vxworks
+    link_mbps: 100
     processing_ms: {median: 3.0, sigma: 0.45}
     identity: {VendorName: Siemens, ProductCode: 6ES7 513-1AL02-0AB0, MajorMinorRevision: V2.9}
   rockwell-micro850:
     vendor: Rockwell Automation
     ouis: ["00:00:BC", "00:1D:9C"]
     stack: vxworks
+    link_mbps: 100
     processing_ms: {median: 5.0, sigma: 0.5}
     identity: {VendorName: Rockwell Automation, ProductCode: 2080-LC50-24QWB, MajorMinorRevision: "21.011"}
   abb-ac500:
     vendor: ABB
     ouis: ["00:0C:DE"]
     stack: vxworks
+    link_mbps: 100
     processing_ms: {median: 5.0, sigma: 0.5}
     identity: {VendorName: ABB, ProductCode: PM5650-2ETH, MajorMinorRevision: "3.6.0"}
   phoenix-axc-f2152:
     vendor: Phoenix Contact
     ouis: ["00:A0:45", "A8:74:1D"]
     stack: linux  # PLCnext Linux runtime
+    link_mbps: 100
     processing_ms: {median: 3.0, sigma: 0.5}
     identity: {VendorName: Phoenix Contact, ProductCode: AXC F 2152, MajorMinorRevision: "2024.0.4"}
   wago-pfc200:
     vendor: WAGO
     ouis: ["00:30:DE"]
     stack: linux  # embedded Linux controller
+    link_mbps: 100
     processing_ms: {median: 3.5, sigma: 0.5}
     identity: {VendorName: WAGO, ProductCode: 750-8212, MajorMinorRevision: "04.04.03(26)"}
   beckhoff-cx9020:
     vendor: Beckhoff
     ouis: ["00:01:05"]
     stack: windows  # TwinCAT on Windows Embedded
+    link_mbps: 100
     processing_ms: {median: 2.5, sigma: 0.5}
     identity: {VendorName: Beckhoff Automation, ProductCode: CX9020, MajorMinorRevision: "3.1.4024"}
   honeywell-controledge:
     vendor: Honeywell
     ouis: ["00:40:84"]
     stack: vxworks
+    link_mbps: 100
     processing_ms: {median: 6.0, sigma: 0.5}
     identity: {VendorName: Honeywell, ProductCode: ControlEdge PLC 900, MajorMinorRevision: "R170"}
   moxa-gateway:
     vendor: Moxa
     ouis: ["00:90:E8"]
     stack: vxworks
+    link_mbps: 100
     processing_ms: {median: 8.0, sigma: 0.6}
     identity: {VendorName: Moxa, ProductCode: MGate MB3170, MajorMinorRevision: "4.3"}
   windows-workstation:
     vendor: Dell
     ouis: ["00:14:22", "70:B5:E8", "98:90:96", "D8:9E:F3", "E4:54:E8", "F0:1F:AF"]
     stack: windows
+    link_mbps: 1000
     processing_ms: {median: 0.4, sigma: 0.6}
     browser: {os_version: [10, 0], server_type: 0x00011003}  # Workstation, Server, NT Workstation, Potential Browser
   windows-server-vm:
     vendor: VMware
     ouis: ["00:50:56", "00:0C:29"]
     stack: windows
+    link_mbps: 10000
     processing_ms: {median: 0.3, sigma: 0.5}
     browser: {os_version: [10, 0], server_type: 0x00019003}  # ... + NT Server
   # SCADA / OPC UA server VM: the OPC UA stack answers in about a millisecond; `identity` is
@@ -139,6 +165,7 @@ devices:
     vendor: VMware
     ouis: ["00:50:56", "00:0C:29"]
     stack: windows
+    link_mbps: 10000
     processing_ms: {median: 1.1, sigma: 0.5}
     browser: {os_version: [10, 0], server_type: 0x00019003}
     identity: {ManufacturerName: Plant Automation Systems, ProductName: SCADA OPC UA Server,
@@ -148,21 +175,25 @@ devices:
     vendor: HP
     ouis: ["3C:D9:2B", "00:1A:4B"]
     stack: windows
+    link_mbps: 1000
     processing_ms: {median: 0.4, sigma: 0.6}
     browser: {os_version: [10, 0], server_type: 0x00011003}
   raspberry-pi:
     vendor: Raspberry Pi
     ouis: ["B8:27:EB", "DC:A6:32", "D8:3A:DD", "2C:CF:67"]
     stack: linux
+    link_mbps: 1000
     processing_ms: {median: 0.6, sigma: 0.5}
   linux-laptop:
     vendor: Dell
     ouis: ["70:B5:E8", "F0:1F:AF"]
     stack: linux
+    link_mbps: 1000
     processing_ms: {median: 0.3, sigma: 0.5}
   fortigate:
     vendor: Fortinet
     ouis: ["00:09:0F"]
     stack: linux
+    link_mbps: 1000
     processing_ms: {median: 0.2, sigma: 0.4}
     forwarding_ms: {median: 0.25, sigma: 0.4}

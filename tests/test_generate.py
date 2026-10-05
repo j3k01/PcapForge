@@ -15,12 +15,14 @@ from collections import Counter
 
 import pytest
 from scapy.layers.inet import IP, TCP, UDP
-from scapy.utils import PcapReader
+from scapy.layers.inet6 import IPv6
+from scapy.utils import PcapReader, RawPcapReader
 
 from pcapforge.compose import compose
 from pcapforge.detections import SID_BASE
 from pcapforge.pipeline import generate
 from pcapforge.plan import build_plan
+from pcapforge.profiles import device
 from pcapforge.record import recording_for
 from pcapforge.scenario import find
 from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
@@ -180,9 +182,46 @@ def test_flow_totals_account_for_every_ip_packet_and_byte(generated):
             if IP in pkt:
                 packets += 1
                 octets += pkt[IP].len
+            elif IPv6 in pkt:
+                packets += 1
+                octets += 40 + pkt[IPv6].plen
     flows = jsonl(result.exports["siem/flows.jsonl"])
     assert sum(f["packets_out"] + f["packets_in"] for f in flows) == packets
     assert sum(f["bytes_out"] + f["bytes_in"] for f in flows) == octets
+
+
+def test_windows_hosts_on_the_sensor_segment_show_an_ipv6_link_local_baseline(generated):
+    result, answers = generated
+    rows = tshark_fields(result.pcap, "ipv6", ["frame.time_epoch", "eth.src", "eth.dst", "ipv6.src", "ipv6.dst",
+                                               "ipv6.hlim", "icmpv6.type", "udp.dstport",
+                                               "dhcpv6.duidllt.link_layer_addr", "dns.qry.name"])
+    if not find(SCENARIO).level(answers["scenario"]["difficulty"])["vars"].get("ipv6"):
+        assert not rows
+        return
+    sensor_id = next(s["id"] for s in answers["topology"]["subnets"] if s["sensor"])
+    windows = {i["mac"] for h in answers["topology"]["hosts"] if device(h["device"]).stack.ipv6
+               for i in h["interfaces"] if i["subnet"] == sensor_id}
+    hop_limits = {"133": 255, "135": 255, "143": 1, "5355": 1, "5353": 255, "547": 1}
+    address_of: dict[str, str] = {}
+    dad: dict[str, float] = {}
+    for epoch, mac, eth_dst, src, dst, hops, icmp_type, port, duid_mac, _name in rows:
+        assert mac in windows, f"IPv6 from {mac}, not a Windows host on the sensor segment"
+        group = ipaddress.IPv6Address(dst)
+        assert group.is_multicast and eth_dst == "33:33:" + ":".join(f"{b:02x}" for b in group.packed[-4:])
+        assert int(hops) == hop_limits[icmp_type or port]
+        if src == "::":  # interface start: MLD join of the solicited-node group, then DAD
+            if icmp_type == "135":
+                dad[mac] = float(epoch)
+            continue
+        assert float(epoch) >= dad.get(mac, 0.0) + 0.999, "the link-local address is used before DAD completes"
+        assert ipaddress.IPv6Address(src) in ipaddress.IPv6Network("fe80::/64")
+        assert address_of.setdefault(mac, src) == src, "one link-local address per host"
+        if duid_mac:
+            assert duid_mac == mac
+    assert {r[6] for r in rows} >= {"133", "135", "143"} and {r[7] for r in rows} >= {"5355", "5353", "547"}
+    # LLMNR asks the same names over IPv6 as over IPv4.
+    v4 = {r[0] for r in tshark_fields(result.pcap, "ip && llmnr", ["dns.qry.name"])}
+    assert {r[9] for r in rows if r[7] == "5355"} == v4
 
 
 def test_opcua_background_runs_only_between_the_historian_and_the_scada_server(generated):
@@ -194,10 +233,36 @@ def test_opcua_background_runs_only_between_the_historian_and_the_scada_server(g
     collector = answers["facts"]["historian_opcua"]
     assert {frozenset(r[:2]) for r in rows} == {frozenset((collector["hosts"][0]["ip"], collector["server"]["ip"]))}
     services = Counter(int(r[2]) for r in rows if r[2])
+    # Messages the sensor missed show up as a gap before the sender's next segment.
+    missed = len(tshark_fields(result.pcap, "tcp.port == 4840 && tcp.analysis.lost_segment", ["frame.number"]))
     # The session predates the capture: watchdog Reads (631/634) and Publish (826/829) only.
-    assert services[631] == services[634] > 0
-    assert services[826] == services[829] > services[631]
+    assert services[631] > 0 and abs(services[631] - services[634]) <= missed
+    assert services[826] > services[631] and abs(services[826] - services[829]) <= missed
     assert set(services) <= {631, 634, 826, 829, 446, 449}  # + OpenSecureChannel renewals
+
+
+def test_sensor_artefacts_follow_the_level_impairments(generated):
+    result, answers = generated
+    impairments = find(SCENARIO).level(answers["scenario"]["difficulty"]).get("impairments", {})
+    vlan = impairments.get("vlan")
+    with RawPcapReader(str(result.pcap)) as reader:
+        frames = [(meta.sec * 1_000_000 + meta.usec, data) for data, meta in reader]
+    tags = Counter(data[12:16] for _, data in frames)
+    if vlan:
+        assert tags == {b"\x81\x00" + vlan.to_bytes(2, "big"): len(frames)}, "every frame carries the 802.1Q tag"
+    else:
+        assert b"\x81\x00" not in {tag[:2] for tag in tags}
+    # SPAN duplicates: the same bytes again a few microseconds later.
+    copies = 0
+    for index, (micros, data) in enumerate(frames):
+        for later, other in frames[index + 1:index + 6]:
+            # (MLD reports repeat byte for byte, but 0.2-1 s later)
+            if other == data and later - micros <= 50:
+                copies += 1
+    assert (copies > 0) == bool(impairments.get("span_duplicates"))
+    # Sensor drops: tshark reports the gaps.
+    gaps = tshark_fields(result.pcap, "tcp.analysis.lost_segment || tcp.analysis.ack_lost_segment", ["frame.number"])
+    assert bool(gaps) == bool(impairments.get("sensor_drop"))
 
 
 def _eve_epoch(timestamp: str) -> float:
