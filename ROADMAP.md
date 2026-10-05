@@ -21,17 +21,25 @@ Status: `[ ]` open, `[~]` partly done.
   - sensor drops ("ACKed unseen segment");
   - 802.1Q VLAN tags;
   - sensor clock offset/drift: `impairments.clock_offset` and `clock_drift_ppm` (number or per-seed range); answers.json records the applied values under `capture.sensor_clock`.
-- [ ] **DHCPv4** (M): leases and renewals for DHCP-managed hosts (IT side of the OT DMZ, laptops); static IPs stay on the control LAN.
+- [x] **DHCPv4** (M): `dhcp.server` / `dhcp.client` actors with Windows and dhcpcd message formats; joins (DORA, ARP address conflict detection, DHCPINFORM), renewals at T1 and releases; static hosts stay outside the pool. `siem/dhcp.jsonl` in the SIEM export. In `ot-modbus-write-manipulation` the rogue Raspberry Pi (easy) leases its address when it is plugged in, and a vendor service laptop joins and leaves on medium/hard. Still open: DHCP on the IT side (not visible from the control-LAN sensor in the current scenarios).
+- [x] **Firewalled / filtered ports** (M): the composer honours the stack's `drops_unsolicited` / `syn_rto_s` (`compose/_apply_host_firewall`), so a port sweep of a host-firewalled machine (Windows default) shows a retransmitted SYN and no reply (filtered) instead of a RST (closed). In `ot-modbus-discovery` the swept Windows hosts read as filtered and the PLCs' closed/listening ports differ.
 - [ ] **Windows domain baseline** (L): Kerberos/LDAP/SMB to the DC using a *synthetic* local directory, e.g. a Samba AD container. Never the machine's real credentials.
 - [ ] **Long captures** (M): 24 h and multi-million packets. Needs a streaming compose and memory profiling, and a check that recording time scales linearly.
 
 ## 2. OT content
 
-- [ ] **More OT incident scenarios**, authored by maintainers. Automated AI-assisted authoring of new incident behaviour is often stopped by content filters, so these are best written by hand and then reviewed. Candidates:
-  - coil manipulation with alarm acknowledgement: T0831, T0878;
-  - Modbus device discovery on the control subnet: T0846, T0888;
-  - replay of captured legitimate commands;
-  - alarm-threshold masking followed by a setpoint change.
+- [x] **More OT incident scenarios** (the originally listed candidates are all shipped; more can be added):
+  - [x] Modbus device discovery on the control subnet (T0846, T0888, T0861): `ot-modbus-discovery`
+    (`modbus.scanner` actor — a port-502 subnet sweep, device identification and register enumeration,
+    no writes);
+  - [x] replay of captured legitimate commands (T0855, T0831): `ot-modbus-command-replay`
+    (`modbus.replay` actor — re-sends the operator's writes verbatim from an unapproved host; values
+    stay in-band, so detection pivots on source and timing);
+  - [x] coil manipulation with alarm acknowledgement (T0855, T0831, T0878): `ot-modbus-coil-manipulation`
+    (`modbus.coil_writer` actor — forces command coils and optionally writes the alarm_ack/reset coil);
+  - [x] alarm-threshold masking followed by a setpoint change (T0878, T0836, T0855):
+    `ot-modbus-alarm-masking` (`modbus.alarm_mask` actor — blinds an alarm threshold, then pushes the
+    setpoint it guarded out of band, in that order).
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
 - [ ] **More protocols as background actors** (M each): IEC 60870-5-104 (`c104`), BACnet/IP (`bacpypes3`), EtherNet/IP/CIP, DNP3.
 - [~] **Process-model polish** (S): translated process titles (pl: done); still open: point descriptions, more device profiles (ABB, Honeywell, Phoenix Contact), and per-vendor register-map styles (1-based addressing, 32-bit floats across two registers).
@@ -61,7 +69,7 @@ Status: `[ ]` open, `[~]` partly done.
 - [~] **Suricata rules.** Generated rules exist and are tested against Suricata 7 in WSL. Still to do: confirm in the CI log that the Suricata tests run rather than being skipped.
 - [ ] **Validate SPL/KQL hunting queries** (M) against real Splunk and Elastic, e.g. Docker images in a separate CI job.
 - [ ] **Zeek output** (M): when `zeek` is available (or via Docker), produce real `conn.log`/`modbus.log`/`dns.log` alongside the pcapforge JSONL.
-- [ ] **Sigma rules** (S) over the exported JSONL, for SIEM-agnostic detections.
+- [x] **Sigma rules** (S): `detections/sigma/*.yml` over the exported JSONL (`logsource: {product: pcapforge, service: <dataset>}`): unapproved writer, out-of-band write, device identification, Modbus connection from an unexpected host (the port-502 sweep, flows dataset), and new host on the control LAN (DHCP). Generated from `answers.json`; convert with sigma-cli.
 
 ## 6. Platform and project
 

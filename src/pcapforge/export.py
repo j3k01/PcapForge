@@ -48,6 +48,10 @@ FIELDS = [
     "http.request.method", "http.request.uri", "http.response.code", "http.request.line",
     "http.response.line",
     "browser.command", "browser.server", "nbdgm.source_name", "nbdgm.destination_name",
+    "dhcp.option.dhcp", "dhcp.id", "dhcp.flags.bc", "dhcp.hw.mac_addr", "dhcp.ip.client", "dhcp.ip.your",
+    "dhcp.option.requested_ip_address", "dhcp.option.dhcp_server_id", "dhcp.option.hostname",
+    "dhcp.fqdn.name", "dhcp.option.vendor_class_id", "dhcp.option.ip_address_lease_time",
+    "dhcp.option.router", "dhcp.option.domain_name_server", "dhcp.option.domain_name",
 ]
 F = {name: index for index, name in enumerate(FIELDS)}
 
@@ -87,6 +91,8 @@ BROWSER_COMMANDS = {1: "host_announcement", 2: "announcement_request", 8: "elect
                     9: "get_backup_list_request", 10: "get_backup_list_response",
                     11: "become_backup", 12: "domain_announcement", 13: "master_announcement",
                     14: "reset_browser_state", 15: "local_master_announcement"}
+DHCP_TYPES = {1: "discover", 2: "offer", 3: "request", 4: "decline", 5: "ack", 6: "nak", 7: "release",
+              8: "inform"}
 
 
 # --- tshark ------------------------------------------------------------------------
@@ -224,6 +230,7 @@ class _Exporter:
         self.ntp_pending: dict[tuple, list[dict]] = defaultdict(list)
         self.names: list[dict] = []
         self.arp: list[dict] = []
+        self.dhcp: list[dict] = []
 
     # -- per frame -------------------------------------------------------------------
     def frame(self, row: list[str]) -> None:
@@ -261,6 +268,8 @@ class _Exporter:
             self._ntp(row, key, number, epoch, conn)
         elif app in NAME_RESOLUTION:
             self._name(row, app, number, epoch, conn)
+        elif app == "dhcp" and row[F["dhcp.option.dhcp"]]:
+            self._dhcp(row, number, epoch, conn)
 
     def _flow(self, row, key, transport, number, epoch, src, dst, sport, dport, app) -> None:
         flow = self.flows.get(key)
@@ -606,6 +615,40 @@ class _Exporter:
             "dest": target, "dest_mac": _first(row, "arp.dst.hw_mac"),
             "eth_src": _first(row, "eth.src"), "eth_dst": _first(row, "eth.dst"),
             "gratuitous": sender == target,
+            "probe": opcode == 1 and sender == "0.0.0.0",  # RFC 5227 address conflict detection
+            "frame": number,
+        })
+
+    # -- dhcp --------------------------------------------------------------------------
+    def _dhcp(self, row, number, epoch, conn) -> None:
+        message = _int(_first(row, "dhcp.option.dhcp"))
+        lease = _int(_first(row, "dhcp.option.ip_address_lease_time"))
+
+        def address(name: str) -> str | None:
+            value = _first(row, name)
+            return None if value in ("", "0.0.0.0") else value
+
+        self.dhcp.append({
+            **_stamp(epoch),
+            **conn,
+            "transport": "udp",
+            "app": "dhcp",
+            "message": DHCP_TYPES.get(message, str(message)),
+            "xid": _first(row, "dhcp.id") or None,
+            "broadcast_flag": _bool(_first(row, "dhcp.flags.bc")),
+            "client_mac": _first(row, "dhcp.hw.mac_addr") or None,
+            "client_addr": address("dhcp.ip.client"),
+            "assigned_addr": address("dhcp.ip.your"),
+            "requested_addr": address("dhcp.option.requested_ip_address"),
+            "server_id": address("dhcp.option.dhcp_server_id"),
+            "host_name": _first(row, "dhcp.option.hostname") or None,
+            "client_fqdn": _first(row, "dhcp.fqdn.name") or None,
+            "vendor_class": _first(row, "dhcp.option.vendor_class_id") or None,
+            "lease_time_s": lease,
+            "router": _all(row, "dhcp.option.router"),
+            "dns_servers": _all(row, "dhcp.option.domain_name_server"),
+            "domain": _first(row, "dhcp.option.domain_name") or None,
+            "eth_src": _first(row, "eth.src"),
             "frame": number,
         })
 
@@ -632,6 +675,7 @@ class _Exporter:
             "ntp": ordered(self.ntp),
             "name_resolution": ordered(self.names),
             "arp": ordered(self.arp),
+            "dhcp": ordered(self.dhcp),
         }
 
 

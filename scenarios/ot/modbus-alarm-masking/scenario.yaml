@@ -1,0 +1,261 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-modbus-alarm-masking
+title: Alarm-threshold masking before an out-of-band setpoint change
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [modbus, ics, alarm, masking, setpoint, ot, water, wastewater, hvac, power]
+summary: >
+  A SCADA HMI and a historian poll the PLCs of an industrial site over Modbus/TCP. During the
+  capture a host that is not allowed to change PLC parameters first moves an alarm threshold so it
+  can no longer trip, and only then pushes the setpoint that threshold was guarding out of its
+  normal band. Because the alarm was blinded first, the dangerous change raises no alarm - the
+  order of the two writes is the story.
+
+briefing: |
+  You are the OT SOC analyst for the {site_name} site ({domain}), {process_title}.
+  The attached capture comes from the SPAN port of the control-network switch ({sensor_subnet}).
+  Only the SCADA HMI and the historian poll the PLCs, and only the engineering workstation is
+  allowed to change setpoints. A process value drifted well outside its safe band during the shift,
+  yet no alarm was logged. Work out why the alarm stayed silent: look at every parameter write, in
+  order, and find the one that disabled the alarm before the harmful change was made.
+  The PLC register map is included below.
+
+mitre:
+  - {framework: ics, id: T0878, name: Alarm Suppression}
+  - {framework: ics, id: T0836, name: Modify Parameter}
+  - {framework: ics, id: T0855, name: Unauthorized Command Message}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [wtp, sut, zuw, stw]
+  start_hours: [6, 21]
+  weekdays: [0, 1, 2, 3, 4, 5]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: plc, count: "${vars.plc_count}", device: "${vars.plc_devices}", subnet: control, name: "plc-{code}-{index:02d}"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.writer_host == 'rogue'"}
+    - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.writer_host == 'itpc'"}
+
+actors:
+  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: scada_poll
+    type: modbus.poller
+    hosts: hmi
+    params: {targets: plc, interval: "${vars.hmi_interval}", jitter: 0.03}
+  - id: historian_poll
+    type: modbus.poller
+    hosts: historian
+    params: {targets: plc, interval: 10, jitter: 0.01, groups: [0, 1]}
+  - id: operator_changes
+    type: modbus.operator
+    hosts: ews
+    params: {targets: plc, count: "${vars.operator_writes}"}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian, ews]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian, ews, plc]
+    when: vars.ntp
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian, ews]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The incident: blind an alarm threshold, then push the setpoint it guarded out of band.
+  - id: mask
+    type: modbus.alarm_mask
+    hosts: "${vars.writer_host}"
+    incident: true
+    params:
+      targets: plc
+      alarms: "${vars.alarms}"
+      deviation: "${vars.deviation}"
+      start: "${vars.start}"
+      spread: "${vars.spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      plc_devices: [schneider-m340, schneider-m340, siemens-s7-1200, rockwell-micro850]
+      process: water_treatment
+      plc_count: 2
+      hmi_interval: 2.0
+      writer_host: rogue
+      alarms: 1
+      deviation: extreme
+      start: [0.4, 0.6]
+      spread: 90
+      operator_writes: 0
+      dns: false
+      ntp: true
+      chatter: false
+      ipv6: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [2, 4]}
+      hmi_interval: 1.0
+      writer_host: itpc
+      alarms: 1
+      deviation: moderate
+      start: [0.3, 0.65]
+      spread: 600
+      operator_writes: 2
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 1
+      ipv6: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [3, 5]}
+      hmi_interval: 1.0
+      writer_host: itpc
+      alarms: 2
+      deviation: subtle
+      start: [0.25, 0.7]
+      spread: 2400
+      operator_writes: 6
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 2
+      ipv6: true
+
+questions:
+  - id: source_ip
+    text: Which IP address made the parameter changes (both the alarm threshold and the setpoint)?
+    answer: "${facts.mask.source.ip}"
+    type: ip
+    points: 15
+    hint: List every host issuing Modbus writes (function 6, 16). Only the engineering workstation is approved; any other writer is the answer.
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.mask.source.ip} && !modbus.request_frame"
+      expect: {min: "${facts.mask.write_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true | stats count AS writes, values(point) AS points BY src | sort - writes"
+      kql: "write : true"
+      look_for: Every host that writes parameters. Any writer other than the engineering workstation is the source.
+  - id: masked_alarm
+    text: Which alarm-threshold point did the source change first to blind the alarm? (register map name)
+    answer: "${facts.mask.masked_alarms}"
+    type: set
+    points: 15
+    hint: The first write targets an alarm threshold (its name ends in _alarm). Moving it out of band stops the alarm from ever tripping.
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.mask.source.ip} point=*alarm* | sort 0 epoch | table ts point value"
+      kql: "write : true and src : \"${facts.mask.source.ip}\" and point : *alarm*"
+      look_for: An alarm threshold (name ends in _alarm) written out of its normal band, before any other change.
+  - id: changed_setpoint
+    text: Which setpoint did the source then push out of its normal band?
+    answer: "${facts.mask.changed_setpoint}"
+    type: text
+    points: 15
+    hint: After the threshold was moved, a second write pushes a governed setpoint out of band - the change the alarm would have caught.
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.mask.source.ip} in_normal_band=false point!=*alarm* | table ts point value"
+      kql: "write : true and src : \"${facts.mask.source.ip}\" and in_normal_band : false"
+      look_for: The non-alarm setpoint written out of band after the threshold was blinded.
+  - id: order
+    text: Which came first - the alarm-threshold change or the setpoint change? (answer "alarm" or "setpoint")
+    answer: alarm
+    accept: [alarm, "alarm threshold", "threshold", "alarm first"]
+    type: text
+    points: 10
+    hint: Sort the source's writes by time. The masking write must precede the harmful change for the alarm to stay silent.
+    check:
+      filter: "frame.number == ${facts.mask.mask_first.frame} && ip.src == ${facts.mask.source.ip} && modbus.func_code in {6, 16}"
+      expect: {count: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.mask.source.ip} | sort 0 epoch | table ts point value in_normal_band"
+      kql: "write : true and src : \"${facts.mask.source.ip}\""
+      look_for: The alarm threshold is written first; the setpoint follows. The order is what makes this alarm masking.
+  - id: first_write
+    text: At what time (UTC) was the first unauthorized write (the alarm-threshold change) sent?
+    answer: "${facts.mask.mask_first.time}"
+    type: timestamp
+    tolerance_s: 1
+    points: 10
+    check:
+      filter: "frame.number == ${facts.mask.mask_first.frame} && ip.src == ${facts.mask.source.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.mask.source.ip} | sort 0 epoch | head 1 | table ts point request_frame"
+      kql: "write : true and src : \"${facts.mask.source.ip}\""
+      look_for: The earliest write from the source is the alarm-threshold change; request_frame is the frame to open.
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique describes disabling the alarm before the harmful change?
+    answer: T0878
+    accept: [T0878, "Alarm Suppression", T0836, "Modify Parameter", T0855, "Unauthorized Command Message"]
+    type: text
+    points: 10
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.mask.source.ip} point=*alarm* | stats count"
+      kql: "write : true and point : *alarm*"
+      look_for: >-
+        Moving the threshold so the alarm cannot fire is Alarm Suppression (T0878); the out-of-band setpoint is
+        Modify Parameter (T0836); both come from a host not authorised to write (T0855).
+
+translations:
+  pl:
+    title: Maskowanie progu alarmu przed zmianą nastawy poza pasmem
+    briefing: |
+      Jesteś analitykiem OT SOC w zakładzie {site_name} ({domain}), {process_title}.
+      Załączone nagranie pochodzi z portu SPAN przełącznika sieci sterowania ({sensor_subnet}).
+      Z PLC odpytują się tylko HMI SCADA i historian, a nastawy może zmieniać wyłącznie stacja
+      inżynierska. W trakcie zmiany wartość procesowa wyszła daleko poza bezpieczne pasmo, a mimo to
+      nie zapisano żadnego alarmu. Ustal, czemu alarm milczał: przejrzyj wszystkie zapisy parametrów
+      w kolejności i znajdź ten, który wyłączył alarm przed szkodliwą zmianą.
+      Mapa rejestrów PLC znajduje się poniżej.
+    questions:
+      source_ip:
+        text: Z jakiego adresu IP dokonano zmian parametrów (progu alarmu i nastawy)?
+        hint: Wypisz każdego hosta wysyłającego zapisy Modbus (funkcje 6, 16). Uprawniona jest tylko stacja inżynierska; każdy inny zapisujący to odpowiedź.
+      masked_alarm:
+        text: Który punkt progu alarmu źródło zmieniło najpierw, aby oślepić alarm? (nazwa z mapy rejestrów)
+        hint: Pierwszy zapis dotyczy progu alarmu (nazwa kończy się na _alarm). Wyprowadzenie go poza pasmo sprawia, że alarm nigdy się nie załącza.
+      changed_setpoint:
+        text: Którą nastawę źródło następnie wypchnęło poza normalne pasmo?
+        hint: Po przesunięciu progu drugi zapis wypycha sterowaną nastawę poza pasmo - zmianę, którą alarm by wychwycił.
+      order:
+        text: Co było pierwsze - zmiana progu alarmu czy zmiana nastawy? (odpowiedz "alarm" lub "setpoint")
+        hint: Posortuj zapisy źródła po czasie. Zapis maskujący musi poprzedzać szkodliwą zmianę, żeby alarm milczał.
+      first_write:
+        text: O której godzinie (UTC) wysłano pierwszy nieautoryzowany zapis (zmianę progu alarmu)?
+      technique:
+        text: Która technika MITRE ATT&CK for ICS opisuje wyłączenie alarmu przed szkodliwą zmianą?

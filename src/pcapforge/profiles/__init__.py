@@ -61,6 +61,8 @@ class Stack:
     link_local: LinkLocal
     initial_window: int  # congestion window after idle, in segments (RFC 6928 IW10 / RFC 3390)
     ipv6: Ipv6 | None = None  # None: IPv6 off (not modelled for this stack)
+    syn_rto_s: float = 1.0           # first retransmission timeout of an unanswered SYN
+    drops_unsolicited: bool = False  # host firewall drops SYNs to closed ports (no RST)
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,8 @@ def stack(name: str) -> Stack:
         ipv6=Ipv6(multicast_hop_limit=dict(raw["ipv6"]["multicast_hop_limit"]), groups=tuple(raw["ipv6"]["groups"]),
                   router_solicitations=raw["ipv6"]["router_solicitations"],
                   rs_interval_s=raw["ipv6"]["rs_interval_s"]) if "ipv6" in raw else None,
+        syn_rto_s=float(raw.get("syn_rto_s", 1.0)),
+        drops_unsolicited=bool(raw.get("drops_unsolicited", False)),
     )
 
 
