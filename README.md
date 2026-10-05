@@ -241,7 +241,8 @@ use one index per file (`pcapforge-modbus`, ...) with `ts` as the timestamp fiel
 - `sigma/*.yml`: SIEM-agnostic [Sigma](https://sigmahq.io) rules over the JSON-lines export
   (`logsource: {product: pcapforge, service: <dataset>}`): the unapproved-writer and device-identification
   rules (same roles as the Suricata ones), an out-of-band write rule keyed on the export's `in_normal_band`
-  field, and, when a `dhcp.client` runs, a new-host-on-the-control-LAN rule. Convert with
+  field, a connection-from-an-unexpected-host rule over the `flows` dataset (the port-502 sweep), and,
+  when a `dhcp.client` runs, a new-host-on-the-control-LAN rule. Convert with
   [sigma-cli](https://github.com/SigmaHQ/sigma-cli), e.g. `sigma convert -t splunk detections/sigma/`.
 - `hunting.md`: per question, the answer, the verified Wireshark filters from the answer key, and a
   Splunk SPL search and Kibana KQL filter over the export with a "what to look for" note. The SPL/KQL

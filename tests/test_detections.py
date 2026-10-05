@@ -45,6 +45,7 @@ def test_each_rule_is_valid_sigma_with_a_deterministic_id():
     assert "Modbus write from an unapproved host" in titles
     assert "Modbus setpoint written outside its normal band" in titles
     assert "Modbus device identification from an unexpected host" in titles
+    assert "Modbus connection from an unexpected host" in titles
     assert "New host leased an address on the control LAN" in titles
     ids = [r["id"] for r in rules]
     assert len(set(ids)) == len(ids)
@@ -71,6 +72,10 @@ def test_approved_writers_and_clients_are_excluded_by_the_filter():
     assert write["condition"] == "writes and not approved"
     ident = rules["Modbus device identification from an unexpected host"]["detection"]
     assert ident["approved"] == {"src": ["10.0.0.20", "10.0.0.21", "10.0.0.22"]}
+    conn = rules["Modbus connection from an unexpected host"]["detection"]
+    assert conn["selection"] == {"dest_port": 502, "dest": ["10.0.0.10", "10.0.0.11"]}
+    assert conn["approved"] == {"src": ["10.0.0.20", "10.0.0.21", "10.0.0.22"]}
+    assert rules["Modbus connection from an unexpected host"]["logsource"]["service"] == "flows"
 
 
 def test_without_an_approved_writer_every_write_fires():
@@ -93,7 +98,7 @@ def test_no_rules_without_a_modbus_server():
 def test_write_detections_emits_parseable_sigma_files(tmp_path):
     paths = write_detections(answers(), tmp_path)
     sigma = {k: p for k, p in paths.items() if k.startswith("sigma/")}
-    assert len(sigma) == 4
+    assert len(sigma) == 5
     for path in sigma.values():
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert {"title", "id", "logsource", "detection", "level", "tags"} <= set(doc)

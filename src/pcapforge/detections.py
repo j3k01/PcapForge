@@ -212,6 +212,22 @@ def sigma_rules(answers: dict) -> list[dict]:
         falsepositives=["An asset-inventory or vulnerability scan run by the OT team."],
         fields=["ts", "src", "dest", "function_code", "request_frame"]))
 
+    conn_sel = {"dest_port": MODBUS_PORT, "dest": plcs}
+    if clients:
+        conn = {"selection": conn_sel, "approved": {"src": clients}, "condition": "selection and not approved"}
+        conn_desc = (f"A TCP connection to a PLC's Modbus port (502) from a host other than the known SCADA / HMI "
+                     f"/ historian clients: {', '.join(names[h] for h in _hosts(answers, CLIENT_TYPES))}. One host "
+                     f"opening 502 to several PLCs in a short window is a Modbus service sweep.")
+    else:
+        conn = {"selection": conn_sel, "condition": "selection"}
+        conn_desc = "A TCP connection to a PLC's Modbus port (502). One host opening 502 to several PLCs is a sweep."
+    rules.append(_sigma(
+        answers, key="modbus-connection-from-unexpected-host", title="Modbus connection from an unexpected host",
+        description=conn_desc, service="flows", level="medium", detection=conn,
+        tags=["attack.t0846"],
+        falsepositives=["A new or reconfigured SCADA client, or an OT-team asset scan."],
+        fields=["ts", "src", "dest", "dest_port", "state", "packets_out"]))
+
     if any(a["type"] == "dhcp.client" for a in answers["actors"]):
         rules.append(_sigma(
             answers, key="dhcp-new-host-on-control-lan", title="New host leased an address on the control LAN",

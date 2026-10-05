@@ -124,6 +124,13 @@ def test_discovery_capture_matches_the_key_with_distinct_per_plc_identities(tmp_
         assert rows, f"no identity response from {ip}"
         reported = rows[0][0].replace(",", " ")
         assert entry["identity"].split()[0] in reported  # vendor name on the wire matches the key
+    # The Sigma connection rule ships and excludes the approved clients, so it flags the scanner.
+    import yaml
+    conn = next(yaml.safe_load(p.read_text(encoding="utf-8"))
+                for k, p in result.exports.items() if k.endswith("modbus_connection_from_an_unexpected_host.yml"))
+    assert conn["logsource"]["service"] == "flows"
+    assert source not in conn["detection"].get("approved", {}).get("src", [])
+
     # The two PLCs in the easy run are different vendors, so the wire shows two distinct identities.
     seen = set()
     for entry in scan["identities"]:
