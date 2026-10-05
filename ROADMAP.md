@@ -22,16 +22,19 @@ Status: `[ ]` open, `[~]` partly done.
   - 802.1Q VLAN tags;
   - sensor clock offset/drift: `impairments.clock_offset` and `clock_drift_ppm` (number or per-seed range); answers.json records the applied values under `capture.sensor_clock`.
 - [x] **DHCPv4** (M): `dhcp.server` / `dhcp.client` actors with Windows and dhcpcd message formats; joins (DORA, ARP address conflict detection, DHCPINFORM), renewals at T1 and releases; static hosts stay outside the pool. `siem/dhcp.jsonl` in the SIEM export. In `ot-modbus-write-manipulation` the rogue Raspberry Pi (easy) leases its address when it is plugged in, and a vendor service laptop joins and leaves on medium/hard. Still open: DHCP on the IT side (not visible from the control-LAN sensor in the current scenarios).
+- [ ] **Firewalled / filtered ports** (M): honour the stack's `drops_unsolicited` / `syn_rto_s` in the composer so a port sweep of a host-firewalled machine (Windows default) shows SYN retransmits and no reply (filtered) instead of a RST (closed). The stack profiles already carry the fields; `ot-modbus-discovery` would then distinguish filtered Windows hosts from closed PLC ports.
 - [ ] **Windows domain baseline** (L): Kerberos/LDAP/SMB to the DC using a *synthetic* local directory, e.g. a Samba AD container. Never the machine's real credentials.
 - [ ] **Long captures** (M): 24 h and multi-million packets. Needs a streaming compose and memory profiling, and a check that recording time scales linearly.
 
 ## 2. OT content
 
-- [ ] **More OT incident scenarios**, authored by maintainers. Automated AI-assisted authoring of new incident behaviour is often stopped by content filters, so these are best written by hand and then reviewed. Candidates:
-  - coil manipulation with alarm acknowledgement: T0831, T0878;
-  - Modbus device discovery on the control subnet: T0846, T0888;
-  - replay of captured legitimate commands;
-  - alarm-threshold masking followed by a setpoint change.
+- [~] **More OT incident scenarios**, authored by maintainers. Candidates:
+  - [x] Modbus device discovery on the control subnet (T0846, T0888, T0861): `ot-modbus-discovery`
+    (`modbus.scanner` actor — a port-502 subnet sweep, device identification and register enumeration,
+    no writes);
+  - [ ] coil manipulation with alarm acknowledgement: T0831, T0878;
+  - [ ] replay of captured legitimate commands;
+  - [ ] alarm-threshold masking followed by a setpoint change.
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
 - [ ] **More protocols as background actors** (M each): IEC 60870-5-104 (`c104`), BACnet/IP (`bacpypes3`), EtherNet/IP/CIP, DNP3.
 - [~] **Process-model polish** (S): translated process titles (pl: done); still open: point descriptions, more device profiles (ABB, Honeywell, Phoenix Contact), and per-vendor register-map styles (1-based addressing, 32-bit floats across two registers).

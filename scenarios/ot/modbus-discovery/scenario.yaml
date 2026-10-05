@@ -1,0 +1,271 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-modbus-discovery
+title: Modbus/TCP device discovery on the control subnet
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [modbus, ics, discovery, recon, ot, water, wastewater, hvac, power]
+summary: >
+  A SCADA HMI and a historian poll the PLCs of an industrial site over Modbus/TCP. During the
+  capture a host that is not a normal Modbus client sweeps the control subnet for port 502 and
+  then, on each PLC, reads the device identification (function 43) and enumerates the register
+  map (oversized reads rejected with illegal_data_address). No values are changed - this is
+  reconnaissance that precedes an attack.
+
+briefing: |
+  You are the OT SOC analyst for the {site_name} site ({domain}), {process_title}.
+  The attached capture comes from the SPAN port of the control-network switch ({sensor_subnet}).
+  Normally only the SCADA HMI and the historian talk Modbus/TCP to the PLCs, with cyclic read
+  requests. During this shift something new appears on the control subnet: a host probing for
+  Modbus services and reading back device identities and register layouts. Nothing was written,
+  but map the activity so the intrusion can be scoped.
+  The PLC register map is included below.
+
+mitre:
+  - {framework: ics, id: T0846, name: Remote System Discovery}
+  - {framework: ics, id: T0888, name: Remote System Information Discovery}
+  - {framework: ics, id: T0861, name: Point & Tag Identification}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [wtp, sut, zuw, stw]
+  start_hours: [6, 21]
+  weekdays: [0, 1, 2, 3, 4, 5]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: plc, count: "${vars.plc_count}", device: "${vars.plc_devices}", subnet: control, name: "plc-{code}-{index:02d}"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.scanner_host == 'rogue'"}
+    - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.scanner_host == 'itpc'"}
+
+actors:
+  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: scada_poll
+    type: modbus.poller
+    hosts: hmi
+    params: {targets: plc, interval: "${vars.hmi_interval}", jitter: 0.03}
+  - id: historian_poll
+    type: modbus.poller
+    hosts: historian
+    params: {targets: plc, interval: 10, jitter: 0.01, groups: [0, 1]}
+  # Present at every level so the site model names the approved writer (count may be 0).
+  - id: operator_changes
+    type: modbus.operator
+    hosts: ews
+    params: {targets: plc, count: "${vars.operator_writes}"}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian, ews]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian, ews, plc]
+    when: vars.ntp
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian, ews]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The reconnaissance: a sweep of the control subnet for port 502, then identity reads and
+  # register enumeration on every PLC. No writes.
+  - id: scan
+    type: modbus.scanner
+    hosts: "${vars.scanner_host}"
+    incident: true
+    params:
+      targets: plc
+      sweep: [hmi, historian, ews]
+      start: "${vars.start}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      plc_devices: [schneider-m340, schneider-m340, siemens-s7-1200, rockwell-micro850]
+      process: water_treatment
+      plc_count: 2
+      hmi_interval: 2.0
+      scanner_host: rogue
+      start: [0.35, 0.55]
+      operator_writes: 0
+      dns: false
+      ntp: true
+      chatter: false
+      ipv6: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [2, 4]}
+      hmi_interval: 1.0
+      scanner_host: itpc
+      start: [0.25, 0.65]
+      operator_writes: 2
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 1
+      ipv6: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [3, 5]}
+      hmi_interval: 1.0
+      scanner_host: itpc
+      start: [0.2, 0.75]
+      operator_writes: 6
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 2
+      ipv6: true
+
+questions:
+  - id: scanner_ip
+    text: Which IP address performed the Modbus device discovery?
+    answer: "${facts.scan.source.ip}"
+    type: ip
+    points: 15
+    hint: Read Device Identification is Modbus function code 43. Find who sends it; the normal SCADA clients never do.
+    check:
+      filter: "mbtcp && modbus.func_code == 43 && ip.src == ${facts.scan.source.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code=43 | stats count values(dest) AS plcs BY src"
+      kql: "function_code : 43"
+      look_for: >-
+        Function 43 (Read Device Identification) from a host that is not a SCADA / HMI / historian client,
+        followed by reads of whole register ranges.
+  - id: scan_start
+    text: At what time (UTC) did the discovery begin (the first probe or identity read from that host)?
+    answer: "${facts.scan.scan_start.time}"
+    type: timestamp
+    tolerance_s: 2
+    points: 10
+    check:
+      filter: "frame.number == ${facts.scan.scan_start.frame} && ip.src == ${facts.scan.source.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} | sort 0 epoch | head 1 | table ts dest dest_port"
+      kql: "src : \"${facts.scan.source.ip}\""
+      look_for: The earliest activity from the scanning host - the subnet sweep for port 502 or the first identity read.
+  - id: swept_port
+    text: The host first swept the control subnet looking for one TCP service port. Which port?
+    answer: 502
+    type: number
+    points: 10
+    hint: Look for many short-lived TCP connections (SYN) from one host to the same destination port across several addresses.
+    check:
+      filter: "tcp.flags.syn == 1 && tcp.flags.ack == 0 && tcp.dstport == 502 && ip.src == ${facts.scan.source.ip}"
+      expect: {min: 2}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} dest_port=502 | stats count values(dest) AS scanned BY dest_port"
+      kql: "src : \"${facts.scan.source.ip}\" and dest_port : 502"
+      look_for: One host opening TCP 502 to many addresses in a short window, several of them refused (RST).
+  - id: plcs_enumerated
+    text: How many PLCs did the host read a device identification from?
+    answer: "${facts.scan.plc_count}"
+    type: number
+    points: 15
+    check:
+      filter: "mbtcp && modbus.func_code == 43 && tcp.srcport == 502 && modbus.object_str_value"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code=43 src=${facts.scan.source.ip} | stats dc(dest) AS plcs"
+      kql: "function_code : 43 and src : \"${facts.scan.source.ip}\""
+      look_for: Distinct PLCs that answered the function 43 request.
+  - id: functions_used
+    text: Which Modbus function codes did the discovery use (identification and reads)?
+    answer: "${facts.scan.function_codes}"
+    type: set
+    points: 10
+    hunt:
+      dataset: modbus
+      wireshark: "mbtcp && ip.src == ${facts.scan.source.ip} && !modbus.request_frame"
+      spl: "index=* sourcetype=pcapforge:modbus src=${facts.scan.source.ip} | stats count BY function_code, function"
+      kql: "src : \"${facts.scan.source.ip}\""
+      look_for: 43 = Read Device Identification; 1/2/3/4 = coil / discrete / holding / input reads of the whole map.
+  - id: enumeration_evidence
+    text: How did the register enumeration show up on the wire (which Modbus exception do the oversized reads return)?
+    answer: illegal_data_address
+    accept: [illegal_data_address, "illegal data address", 2, "exception 2"]
+    type: text
+    points: 10
+    hint: An oversized read of a register table is rejected by the PLC. Which exception code (and name) comes back?
+    check:
+      filter: "mbtcp && modbus.exception_code == 2 && ip.dst == ${facts.scan.source.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus exception=illegal_data_address dest=${facts.scan.source.ip}"
+      kql: "exception : \"illegal_data_address\""
+      look_for: The PLC answers an out-of-range read with exception 2 (illegal data address) until the scanner finds the real table size.
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique best describes reading the PLC identities and register map?
+    answer: T0888
+    accept: [T0888, "Remote System Information Discovery", T0846, "Remote System Discovery", T0861, "Point & Tag Identification"]
+    type: text
+    points: 10
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code=43 | stats count BY src, dest"
+      kql: "function_code : 43"
+      look_for: >-
+        Sweeping for Modbus services is Remote System Discovery (T0846); reading device identity and
+        register layout is Remote System Information Discovery (T0888) and Point & Tag Identification (T0861).
+
+translations:
+  pl:
+    title: Rozpoznanie urządzeń Modbus/TCP w sieci sterowania
+    briefing: |
+      Jesteś analitykiem OT SOC w zakładzie {site_name} ({domain}), {process_title}.
+      Załączone nagranie pochodzi z portu SPAN przełącznika sieci sterowania ({sensor_subnet}).
+      W normalnej pracy z PLC przez Modbus/TCP komunikują się tylko HMI SCADA i historian,
+      wysyłając cykliczne żądania odczytu. W trakcie tej zmiany w sieci sterowania pojawia się
+      coś nowego: host szukający usług Modbus i odczytujący identyfikację urządzeń oraz układ
+      rejestrów. Nic nie zostało zapisane, ale zmapuj tę aktywność, aby określić zasięg włamania.
+      Mapa rejestrów PLC znajduje się poniżej.
+    questions:
+      scanner_ip:
+        text: Z jakiego adresu IP przeprowadzono rozpoznanie urządzeń Modbus?
+        hint: Read Device Identification to kod funkcji Modbus 43. Znajdź, kto go wysyła; normalni klienci SCADA tego nie robią.
+      scan_start:
+        text: O której godzinie (UTC) rozpoczęło się rozpoznanie (pierwsza sonda lub odczyt identyfikacji z tego hosta)?
+      swept_port:
+        text: Host najpierw przeskanował sieć sterowania w poszukiwaniu jednego portu TCP. Którego?
+        hint: Poszukaj wielu krótkich połączeń TCP (SYN) z jednego hosta na ten sam port docelowy pod różnymi adresami.
+      plcs_enumerated:
+        text: Z ilu PLC host odczytał identyfikację urządzenia?
+      functions_used:
+        text: Jakich kodów funkcji Modbus użyto podczas rozpoznania (identyfikacja i odczyty)?
+      enumeration_evidence:
+        text: Jak enumeracja rejestrów ujawniła się w ruchu (jaki wyjątek Modbus zwracają zbyt duże odczyty)?
+        hint: Zbyt duży odczyt tabeli rejestrów jest odrzucany przez PLC. Jaki kod wyjątku (i nazwa) wraca?
+      technique:
+        text: Która technika MITRE ATT&CK for ICS najlepiej opisuje odczyt identyfikacji PLC i mapy rejestrów?

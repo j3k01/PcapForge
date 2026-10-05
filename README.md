@@ -255,6 +255,7 @@ the out-of-band rules fire; the unapproved-writer rule fires on easy and medium.
 | id | line | techniques | what happens |
 |---|---|---|---|
 | `ot-modbus-write-manipulation` | OT | T0855, T0836 (+T0888, T0861 with discovery) | An HMI and a historian poll the water-treatment PLCs (medium/hard: also a SCADA/OPC UA server and an S7comm-monitored S7-1500). A host outside the approved change path writes setpoints outside their normal band. |
+| `ot-modbus-discovery` | OT | T0846, T0888, T0861 | An HMI and a historian poll the PLCs. A host that is not a normal Modbus client sweeps the control subnet for port 502, then reads each PLC's device identification (function 43) and enumerates its register map (oversized reads rejected with illegal_data_address). Reconnaissance only — nothing is written. |
 | `ot-baseline-operations` | OT | none (no incident) | Normal operations only: polling, OPC UA/S7 monitoring (medium/hard), approved operator changes, NTP/DNS/Windows chatter. Process drawn per seed on every level. For baselining exercises, false-positive tuning and anomaly-detection datasets. |
 
 Difficulty levels of `ot-modbus-write-manipulation`:

@@ -12,6 +12,11 @@
 # `link_mbps` (devices): NIC speed; back-to-back TCP segments of a message are spaced by their
 # serialisation time (routed senders: the slower of the sender's and the router's link).
 # `initial_window` (stacks): congestion window in segments when a message starts after idle.
+# `syn_rto_s` (stacks): initial retransmission timeout of an unanswered SYN.
+# `drops_unsolicited` (stacks): the host firewall silently drops inbound SYNs to closed ports
+# instead of answering with RST (Windows Defender Firewall default). Groundwork for modelling a
+# port sweep as filtered rather than closed; the composer does not yet synthesize this, so on the
+# loopback recording a closed port still shows a RST (see ROADMAP, "Firewalled / filtered ports").
 
 stacks:
   windows:
@@ -29,6 +34,8 @@ stacks:
     delayed_ack: {probability: 0.55, min_ms: 1, max_ms: 200}
     rto: {min_ms: 300, plus_rtt: false}   # retransmission timeout on a LAN
     initial_window: 10     # segments after idle (IW10 since Windows Server 2016 / Windows 10)
+    syn_rto_s: 3.0         # TCP InitialRto (netsh int tcp show global: 3000 ms)
+    drops_unsolicited: true
     # Checked against a Windows 10 capture: no DF on link-local datagrams; LLMNR (dnscache)
     # TTL 1, SSDP M-SEARCH (SSDPSRV) TTL 4; mDNS uses 255 (RFC 6762 section 11); NBNS and
     # browser broadcasts keep the default 128.
@@ -58,6 +65,7 @@ stacks:
     delayed_ack: {probability: 0.35, min_ms: 40, max_ms: 45}
     rto: {min_ms: 200, plus_rtt: true}    # srtt + max(rto_min, 4 * rttvar)
     initial_window: 10     # RFC 6928, Linux >= 2.6.39
+    syn_rto_s: 1.0         # TCP_TIMEOUT_INIT (RFC 6298)
   vxworks:
     ttl: 64
     df: false
@@ -73,6 +81,7 @@ stacks:
     delayed_ack: {probability: 0.2, min_ms: 5, max_ms: 50}
     rto: {min_ms: 500, plus_rtt: false}
     initial_window: 3      # RFC 3390: min(4 * MSS, max(2 * MSS, 4380 bytes))
+    syn_rto_s: 3.0         # RFC 1122 initial RTO
 
 devices:
   schneider-m340:

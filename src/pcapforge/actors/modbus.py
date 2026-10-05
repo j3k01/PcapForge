@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import socket
+
 from pymodbus.client import ModbusTcpClient
-from pymodbus.pdu.device import ModbusDeviceIdentification
+from pymodbus.pdu.device import ModbusControlBlock, ModbusDeviceIdentification
 from pymodbus.server import ModbusTcpServer
 from pymodbus.simulator import DataType, SimData, SimDevice
 
 from pcapforge import ports
 from pcapforge.actors import register
 from pcapforge.actors.base import Actor
-from pcapforge.plan import host_ref
+from pcapforge.plan import action_ref, host_ref
 from pcapforge.process import BIT_TABLES, FUNCTION_TABLE, ProcessProfile, ProcessSim
 
 
@@ -125,8 +127,26 @@ class ModbusClientActor(Actor):
             client = self._client(rt, action.host, a["target"])
             getattr(client, READERS[a["function"]])(a["start"], count=a["count"], device_id=a["unit"])
         elif action.op == "modbus.identify":
+            # pymodbus answers Read Device Identification (function 43) from a process-global
+            # control block, not per server, so with several PLCs the last one created would win.
+            # Device identification is only ever requested here, one exchange at a time, so set the
+            # global to the target PLC's identity for the duration of this blocking read.
+            identity = rt.plan.topology.by_id[a["target"]].device.identity
+            ModbusControlBlock().Identity.update(ModbusDeviceIdentification(info_name=dict(identity or {})))
             client = self._client(rt, action.host, a["target"])
             client.read_device_information(read_code=1, object_id=0, device_id=a["unit"])
+        elif action.op == "modbus.probe":
+            # A bare TCP connect to port 502 on a host that may not run Modbus: the SYN and the
+            # peer's answer (RST on a closed port) are captured; a refusal is expected and ignored.
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            try:
+                sock.bind((rt.loopback(action.host), 0))
+                sock.connect((rt.loopback(a["target"]), ports.MODBUS))
+            except OSError:
+                pass
+            finally:
+                sock.close()
         elif action.op == "modbus.write":
             client = self._client(rt, action.host, a["target"])
             fn, addr, values = a["function"], a["address"], a["values"]
@@ -356,4 +376,66 @@ class ModbusWriter(ModbusClientActor):
             "discovery": discovery_action is not None,
             "reported_identity": f"{identity.get('VendorName', '')} {identity.get('ProductCode', '')}".strip(),
             "affected_measurements": affected,
+        }
+
+
+@register
+class ModbusScanner(ModbusClientActor):
+    """Reconnaissance from a host outside the approved client path: a TCP sweep of the control
+    subnet for port 502, then per PLC a device-identification read (function 43) and register
+    enumeration (oversized reads rejected with illegal_data_address until the real map is found).
+    No writes - this is discovery only (MITRE ATT&CK for ICS T0846, T0888, T0861)."""
+
+    type = "modbus.scanner"
+
+    def plan(self) -> None:
+        plan, rng = self.plan_, self.rng
+        host = self.hosts[0]
+        targets = sorted(plan.topology.select(self.param("targets")), key=lambda h: h.id)
+        sweep = plan.topology.select(self.param("sweep")) if self.param("sweep") else []
+        start_lo, start_hi = self.span(self.param("start", [0.2, 0.5]))
+        t = plan.duration * rng.uniform(start_lo, start_hi)
+        scan_start = None
+
+        # Port sweep: a SYN to port 502 on each swept host, ordered by address (the attacker walks
+        # the subnet). Hosts that do not serve Modbus answer with a RST; the PLCs are probed below.
+        for swept in sorted(sweep, key=lambda h: h.id):
+            action = plan.add(t, self.id, host.id, "modbus.probe", target=swept.id)
+            scan_start = scan_start or action
+            t += rng.uniform(0.05, 0.4)
+
+        identities, enumerated = [], []
+        for target in targets:
+            profile = serving_profile(plan, target.id)
+            unit = profile.unit_id
+            session = _SessionPlanner(self, host.id, target.id, unit, t, rng)
+            ident = session.add("modbus.identify", gap=(0.01, 0.1))
+            scan_start = scan_start or ident
+            # Enumerate the map: the oversized read (125 registers) is rejected with
+            # illegal_data_address before the real table sizes are read.
+            session.read(3, 0, 125)
+            for function, table in ((3, "holding"), (4, "input"), (1, "coils"), (2, "discrete")):
+                size = profile.size(table)
+                if size:
+                    session.read(function, 0, size)
+            session.close()
+            identity = target.device.identity
+            reported = f"{identity.get('VendorName', '')} {identity.get('ProductCode', '')}".strip()
+            identities.append({"target": host_ref(target.id), "unit_id": unit,
+                               "identity": reported, "identify": action_ref(ident)})
+            enumerated.append(host_ref(target.id))
+            t = session.t + rng.uniform(0.2, 1.0)
+            plan.event(ident, self.id, f"Device identification and register enumeration of {target.id}",
+                       ["T0846", "T0888", "T0861"], vendor=identity.get("VendorName"),
+                       product=identity.get("ProductCode"))
+
+        plan.facts[self.id] = {
+            "source": host_ref(host.id),
+            "targets": enumerated,
+            "plc_count": len(enumerated),
+            "swept": [host_ref(s.id) for s in sorted(sweep, key=lambda h: h.id)],
+            "identities": identities,
+            "reported_identities": sorted({i["identity"] for i in identities if i["identity"]}),
+            "function_codes": [1, 2, 3, 4, 43],
+            "scan_start": action_ref(scan_start) if scan_start else None,
         }
