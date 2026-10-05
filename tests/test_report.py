@@ -90,6 +90,22 @@ def test_every_written_point_is_charted_as_well_formed_svg_without_external_reso
 
 
 @capture_tools
+def test_change_headings_name_the_register_description(run, tmp_path):
+    from pcapforge.process import ProcessProfile
+
+    run_dir, answers = run
+    text = report(run_dir, tmp_path)
+    process = answers["facts"]["plc_service"]["process"]
+    profile = ProcessProfile(process)
+    changed = {w["point"] for fact in answers["facts"].values() if isinstance(fact, dict)
+               for w in fact.get("writes", [])}
+    assert changed
+    for name in changed:
+        desc = profile.by_name[name].desc
+        assert desc and html.escape(desc) in text, f"heading for {name} lacks its description"
+
+
+@capture_tools
 def test_report_without_siem_explains_how_to_create_it(run, tmp_path):
     run_dir, answers = run
     bare = tmp_path / "bare"
