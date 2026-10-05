@@ -11,18 +11,16 @@ Status: `[ ]` open, `[~]` partly done.
 
 ## 1. Realism of the traffic (highest value, fully defensive)
 
-- [ ] **IPv6 baseline on Windows hosts** (L). Real Windows machines always show:
+- [x] **IPv6 baseline on Windows hosts** (L), behind the scenario var `ipv6` (medium/hard). Windows hosts on the sensor segment get a link-local address with DAD, Router Solicitations and MLDv2 reports, synthesized like ARP. They also send LLMNR/mDNS over IPv6 (copies of the recorded datagrams) and recorded DHCPv6 Solicits. Still open: unicast IPv6 conversations and Router Advertisements (there is no IPv6 router in the model). Original notes on what real Windows machines show:
   - link-local addresses;
   - Router/Neighbor Solicitation and MLD reports;
   - DHCPv6 Solicit, and LLMNR/mDNS over IPv6.
-
-  Needs IPv6 support in the composer (headers, checksums, L2 multicast mapping, visibility). This is the most visible gap for an experienced analyst.
-- [ ] **TCP segmentation in the composer** (M): split payloads larger than the MSS into several segments with correct seq/ack. This removes the "every message fits in one segment" limit (today it constrains OPC UA) and allows bulk transfers.
-- [ ] **SPAN/sensor artefacts as difficulty knobs** (M):
+- [x] **TCP segmentation in the composer** (M). Payloads larger than the path MSS go out as full segments with correct seq/ack and PSH only on the last. They are spaced at the sender's link rate and limited by the initial congestion window and the receiver's window; the receiver ACKs every second segment. The shipped OT scenarios contain no message above the MSS, so this is proven by `tests/test_compose_segmentation.py`.
+- [x] **SPAN/sensor artefacts as difficulty knobs** (M): `impairments.span_duplicates`, `sensor_drop` and `vlan`. Frames the answer key refers to are never dropped or duplicated. Original scope:
   - duplicated frames (a SPAN that mirrors both directions);
   - sensor drops ("ACKed unseen segment");
   - 802.1Q VLAN tags;
-  - sensor clock offset/drift.
+  - sensor clock offset/drift (still open).
 - [ ] **DHCPv4** (M): leases and renewals for DHCP-managed hosts (IT side of the OT DMZ, laptops); static IPs stay on the control LAN.
 - [ ] **Windows domain baseline** (L): Kerberos/LDAP/SMB to the DC using a *synthetic* local directory, e.g. a Samba AD container. Never the machine's real credentials.
 - [ ] **Long captures** (M): 24 h and multi-million packets. Needs a streaming compose and memory profiling, and a check that recording time scales linearly.
@@ -50,7 +48,7 @@ Status: `[ ]` open, `[~]` partly done.
 
 ## 4. Training workflow
 
-- [ ] **Debrief report** (M): `pcapforge report <run>` builds a static HTML page with:
+- [x] **Debrief report** (M): `pcapforge report <run> [--grades grades.json]` writes a self-contained HTML page (inline SVG, no external resources) with:
   - the incident timeline, with frame numbers;
   - before/after charts of the affected process values, from `siem/modbus.jsonl`;
   - the questions with answers, and the class score summary from `pcapforge grade --json`.

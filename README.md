@@ -72,6 +72,7 @@ Other commands:
 - `pcapforge package <run dir>` writes a student zip and an instructor zip (see [Grading and packaging](#grading-and-packaging)).
 - `pcapforge grade answers.json <submissions>` scores student answers. Hints listed under `hints_used` cost 20 % of the question's points (rounded up).
 - `pcapforge export-ctfd <run dir>` writes one CTFd challenge per question in the `ctfcli` format (`ctfd/qNN-<id>/challenge.yml`). Install each with `ctf challenge install <dir>`. The first challenge carries the capture and the briefing. Sets, maps and timestamps use a canonical flag format that each challenge description states.
+- `pcapforge report <run dir> [--grades grades.json]` writes `report.html` for the debrief: one self-contained page (inline SVG, no external resources) with the incident timeline and frame numbers, before/after charts of the changed setpoints and affected measurements (needs `siem/`, i.e. `--siem` or `pcapforge export`), the answers with their tshark checks, and optional class results from `pcapforge grade --json`.
 
 ### What the analyst sees (easy, seed 42)
 
@@ -205,7 +206,7 @@ out/ot-modbus-write-manipulation_easy_42/siem/ntp.jsonl  (33 records)
 | file | one record per | main fields |
 |---|---|---|
 | `flows.jsonl` | TCP connection / UDP 5-tuple exchange / other IP pair | `src`, `dest`, `src_port`, `dest_port`, `transport`, `app`, `duration`, `packets_out/in`, `bytes_out/in` (IP bytes), `state` (`established`, `mid_session` = no SYN seen, `closed` = FIN, `reset`; UDP `bidirectional` / `one_way`) |
-| `modbus.jsonl` | request/response transaction | `unit_id`, `trans_id`, `function_code`, `function`, `write`, `table`, `address`, `quantity`, `values` (written raw registers), `exception`, `response_time_ms`, `request_frame`; for writes to a PLC with a known register map: `point`, `unit`, `value` (engineering), `in_normal_band` |
+| `modbus.jsonl` | request/response transaction | `unit_id`, `trans_id`, `function_code`, `function`, `write`, `table`, `address`, `quantity`, `values` (written raw registers for writes, read raw registers/bits for successful reads), `exception`, `response_time_ms`, `request_frame`; for writes to a PLC with a known register map: `point`, `unit`, `value` (engineering), `in_normal_band` |
 | `dns.jsonl` | query/response | `query`, `qtype`, `rcode`, `answers`, `ttl`, `response_time_ms` |
 | `ntp.jsonl` | client request/server response | `version`, `stratum`, `refid`, `server_time`, `offset_ms`, `response_time_ms` |
 | `name_resolution.jsonl` | LLMNR / NBNS / mDNS / SSDP / browser datagram | `app`, `message`, `query`, `qtype`, `answers` |
@@ -257,7 +258,7 @@ Difficulty levels of `ot-modbus-write-manipulation`:
 | discovery | identity read + register enumeration | yes | none |
 | changes | burst of extreme values | spread over 20 min, moderate values | spread over 1 h, values just outside the band, mixed with 6 legitimate operator changes |
 | OT background | HMI and historian poll the PLCs (Modbus/TCP) | + SCADA server polls the PLCs and serves them over OPC UA to the historian (one subscription per PLC: Publish every 2 s, ServerStatus Read every 5 s); HMI and historian read the S7-1500 over S7comm | + OPC UA secure-channel renewals |
-| noise | NTP, ARP | + DNS, Windows chatter (LLMNR, NBNS, mDNS, SSDP, browser announcements), retransmissions, capture starts mid-session | + more retransmissions, twice the Windows chatter |
+| noise | NTP, ARP | + DNS, Windows chatter (LLMNR, NBNS, mDNS, SSDP, browser announcements), IPv6 link-local baseline of the Windows hosts (DAD, Router Solicitation, MLDv2, LLMNR/mDNS over IPv6, DHCPv6 Solicit), retransmissions, capture starts mid-session, SPAN artefacts (VLAN 20, 0.2 % duplicated frames, 0.05 % sensor drops) | + more retransmissions, twice the Windows chatter, VLAN 120, 0.5 % duplicates, 0.1 % drops |
 
 ## How it works
 
@@ -286,7 +287,7 @@ flowchart LR
    - ARP is synthesized
 4. **Answer key and verification.** Facts resolve to frames and timestamps. tshark checks:
    - no malformed frames, bad checksums or expert errors
-   - no loopback addresses leak
+   - no loopback addresses leak (127.0.0.0/8, ::1)
    - every question's filter matches the capture
 
 ### Reproducibility

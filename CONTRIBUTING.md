@@ -188,6 +188,11 @@ difficulty:
 - `duration`: capture length; longer captures bury the incident in more background.
 - `impairments.retransmit_rate` (at most 0.05): TCP data segments lost after the sensor and retransmitted.
 - `impairments.mid_session`: the capture starts after persistent sessions were opened (no handshakes).
+- `impairments.span_duplicates` (at most 0.05): share of frames the SPAN session mirrors twice.
+  `impairments.sensor_drop` (at most 0.02): share of frames the sensor misses; frames the answer key
+  refers to are always kept. `impairments.vlan` (1–4094): 802.1Q VLAN id on every frame.
+- `vars.ipv6` (passed to `windows.chatter` as `ipv6`): IPv6 link-local baseline of the Windows hosts on
+  the sensor segment (DAD, Router Solicitation, MLDv2, LLMNR/mDNS over IPv6, DHCPv6 Solicit).
 - `vars`: everything else, consumed through `${vars.*}` and `when`. Good knobs make the incident harder
   to *find*, not just bigger: a source that blends in (approved host, routed host behind a gateway MAC),
   values just outside the normal band, events spread over a longer window, legitimate look-alike activity,
