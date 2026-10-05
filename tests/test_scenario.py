@@ -124,3 +124,11 @@ def test_recording_key_changes_when_only_the_site_naming_changes(scenario):
     for host in plan.topology.hosts:
         host.name = host.name + "x"
     assert plan.digest() != before
+
+
+@pytest.mark.parametrize("difficulty", ["easy", "medium", "hard"])
+@pytest.mark.parametrize("duration", [120, 600, None])
+def test_every_incident_write_happens_inside_the_capture(scenario, difficulty, duration):
+    plan = build_plan(scenario, difficulty, "inside", duration_override=duration)
+    times = [w["request"]["$action"].t for w in plan.facts["change"]["writes"]]
+    assert times and max(times) < plan.duration

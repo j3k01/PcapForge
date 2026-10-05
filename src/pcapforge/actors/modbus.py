@@ -283,7 +283,9 @@ class ModbusWriter(ModbusClientActor):
         factor_lo, factor_hi = DEVIATION[self.param("deviation", "moderate")]
         function_mode = self.param("function", "single")
         start_lo, start_hi = self.span(self.param("start", [0.3, 0.6]))
-        spread = float(self.param("spread", 120))
+        # Short captures (--duration) must still contain every write: cap the spread at half
+        # the capture. The shipped difficulty levels are unaffected (spread <= duration / 2).
+        spread = min(float(self.param("spread", 120)), plan.duration * 0.5)
         t0 = plan.duration * rng.uniform(start_lo, start_hi)
         t0 = min(t0, max(plan.duration - spread - 60, plan.duration * 0.1))
         one_session = spread <= 180
