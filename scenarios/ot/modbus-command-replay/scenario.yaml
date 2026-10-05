@@ -1,0 +1,260 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-modbus-command-replay
+title: Replay of legitimate Modbus/TCP commands from an unapproved host
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [modbus, ics, replay, ot, water, wastewater, hvac, power]
+summary: >
+  A SCADA HMI and a historian poll the PLCs of an industrial site over Modbus/TCP, and the
+  engineering workstation makes approved setpoint changes. During the capture a host that is not
+  allowed to change PLC parameters re-sends copies of those legitimate operator commands - same
+  register, same value - so every written value is inside the normal band. The giveaway is the
+  source and the off-cycle timing, not the value.
+
+briefing: |
+  You are the OT SOC analyst for the {site_name} site ({domain}), {process_title}.
+  The attached capture comes from the SPAN port of the control-network switch ({sensor_subnet}).
+  Only the SCADA HMI and the historian poll the PLCs, and only the engineering workstation is
+  allowed to change setpoints. Operations saw setpoints move back to earlier values without an
+  operator touching the HMI. Every suspicious write carries a perfectly normal, in-band value,
+  so you cannot rely on range alarms - work out who sent the commands and how they differ from
+  the genuine operator changes.
+  The PLC register map is included below.
+
+mitre:
+  - {framework: ics, id: T0855, name: Unauthorized Command Message}
+  - {framework: ics, id: T0831, name: Manipulation of Control}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [wtp, sut, zuw, stw]
+  start_hours: [6, 21]
+  weekdays: [0, 1, 2, 3, 4, 5]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: plc, count: "${vars.plc_count}", device: "${vars.plc_devices}", subnet: control, name: "plc-{code}-{index:02d}"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.replay_host == 'rogue'"}
+    - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.replay_host == 'itpc'"}
+
+actors:
+  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: scada_poll
+    type: modbus.poller
+    hosts: hmi
+    params: {targets: plc, interval: "${vars.hmi_interval}", jitter: 0.03}
+  - id: historian_poll
+    type: modbus.poller
+    hosts: historian
+    params: {targets: plc, interval: 10, jitter: 0.01, groups: [0, 1]}
+  # The genuine operator changes the attacker later replays.
+  - id: operator_changes
+    type: modbus.operator
+    hosts: ews
+    params: {targets: plc, count: "${vars.operator_writes}"}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian, ews]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian, ews, plc]
+    when: vars.ntp
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian, ews]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The incident: the unapproved host replays the operator's commands verbatim.
+  - id: replay
+    type: modbus.replay
+    hosts: "${vars.replay_host}"
+    incident: true
+    params:
+      source: operator_changes
+      count: "${vars.replays}"
+      spread: "${vars.spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      plc_devices: [schneider-m340, schneider-m340, siemens-s7-1200, rockwell-micro850]
+      process: water_treatment
+      plc_count: 2
+      hmi_interval: 2.0
+      replay_host: rogue
+      operator_writes: 3
+      replays: [2, 2]
+      spread: 120
+      dns: false
+      ntp: true
+      chatter: false
+      ipv6: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [2, 4]}
+      hmi_interval: 1.0
+      replay_host: itpc
+      operator_writes: 4
+      replays: [2, 3]
+      spread: 900
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 1
+      ipv6: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [3, 5]}
+      hmi_interval: 1.0
+      replay_host: itpc
+      operator_writes: 6
+      replays: [3, 4]
+      spread: 3600
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 2
+      ipv6: true
+
+questions:
+  - id: replay_source_ip
+    text: Which IP address sent the replayed write commands?
+    answer: "${facts.replay.source.ip}"
+    type: ip
+    points: 15
+    hint: List every host that issues Modbus writes (function 5, 6, 15, 16). Only the engineering workstation is approved; compare the writers with their expected roles.
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.replay.source.ip} && !modbus.request_frame"
+      expect: {min: "${facts.replay.write_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true | stats count AS writes, values(point) AS points BY src"
+      kql: "write : true"
+      look_for: >-
+        Every host that writes to a PLC. The approved writer is the engineering workstation
+        (${facts.operator_changes.source.ip}); any other writer is the replay source, even though its values look normal.
+  - id: replay_count
+    text: How many replayed write requests did that host send?
+    answer: "${facts.replay.write_count}"
+    type: number
+    points: 15
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.replay.source.ip} && !modbus.request_frame"
+      expect: {count: "${facts.replay.write_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.replay.source.ip} | stats count"
+      kql: "write : true and src : \"${facts.replay.source.ip}\""
+      look_for: Count the write requests from the replay source.
+  - id: values_in_band
+    text: Were the replayed values inside or outside the PLCs' normal operating bands? (answer "inside" or "outside")
+    answer: inside
+    accept: [inside, "in band", "in-band", normal, within]
+    type: text
+    points: 10
+    hint: Decode each written register to its engineering value and compare with the normal band in the register map. Replayed values are copies of legitimate changes.
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.replay.source.ip} | stats values(in_normal_band) AS in_band BY point"
+      kql: "write : true and src : \"${facts.replay.source.ip}\""
+      look_for: >-
+        in_normal_band is true for every replayed write - range alarms will not fire. The anomaly is the source
+        and the timing, not the value.
+  - id: replayed_points
+    text: Which PLC points (register map names) were written by the replay?
+    answer: "${facts.replay.point_names}"
+    type: set
+    points: 15
+    foreach: facts.replay.writes
+    check:
+      filter: "mbtcp && ip.src == ${facts.replay.source.ip} && (modbus.reference_num == ${item.address} || modbus.regnum16 == ${item.address}) && modbus.func_code == ${item.function} && !modbus.request_frame"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.replay.source.ip} | stats values(point) AS points"
+      kql: "write : true and src : \"${facts.replay.source.ip}\""
+      look_for: The point names come from the register map; each matches a value the operator wrote earlier.
+  - id: approved_writer_ip
+    text: Which host is the legitimate source of those same setpoint changes (the engineering workstation)?
+    answer: "${facts.operator_changes.source.ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.operator_changes.source.ip} && !modbus.request_frame"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true | stats earliest(ts) AS first count BY src, point"
+      kql: "write : true"
+      look_for: >-
+        The engineering workstation made each change first; the replay source repeats the same point and value
+        later. Matching (point, value) pairs across two sources is the tell.
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique best describes re-sending captured legitimate commands?
+    answer: T0855
+    accept: [T0855, "Unauthorized Command Message", T0831, "Manipulation of Control"]
+    type: text
+    points: 10
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true | stats count BY src"
+      kql: "write : true"
+      look_for: >-
+        Commands from a host not authorised to issue them are Unauthorized Command Message (T0855); driving the
+        process with replayed setpoints is Manipulation of Control (T0831).
+
+translations:
+  pl:
+    title: Powtórzenie legalnych poleceń Modbus/TCP z nieuprawnionego hosta
+    briefing: |
+      Jesteś analitykiem OT SOC w zakładzie {site_name} ({domain}), {process_title}.
+      Załączone nagranie pochodzi z portu SPAN przełącznika sieci sterowania ({sensor_subnet}).
+      Z PLC odpytują się tylko HMI SCADA i historian, a nastawy może zmieniać wyłącznie stacja
+      inżynierska. Służby ruchu zauważyły, że nastawy wracały do wcześniejszych wartości, choć
+      operator nie dotykał HMI. Każdy podejrzany zapis niesie całkowicie normalną wartość w paśmie,
+      więc alarmy zakresu nie pomogą - ustal, kto wysłał polecenia i czym różnią się od prawdziwych
+      zmian operatora.
+      Mapa rejestrów PLC znajduje się poniżej.
+    questions:
+      replay_source_ip:
+        text: Z jakiego adresu IP wysłano powtórzone polecenia zapisu?
+        hint: Wypisz każdego hosta wysyłającego zapisy Modbus (funkcje 5, 6, 15, 16). Tylko stacja inżynierska jest uprawniona; porównaj zapisujących z ich rolami.
+      replay_count:
+        text: Ile powtórzonych żądań zapisu wysłał ten host?
+      values_in_band:
+        text: Czy powtórzone wartości były w normalnych pasmach pracy PLC, czy poza nimi? (odpowiedz "inside" lub "outside")
+        hint: Zdekoduj każdy zapisany rejestr do wartości inżynierskiej i porównaj z pasmem w mapie rejestrów. Powtórzone wartości to kopie legalnych zmian.
+      replayed_points:
+        text: Które punkty PLC (nazwy z mapy rejestrów) zapisało powtórzenie?
+      approved_writer_ip:
+        text: Który host jest legalnym źródłem tych samych zmian nastaw (stacja inżynierska)?
+      technique:
+        text: Która technika MITRE ATT&CK for ICS najlepiej opisuje ponowne wysłanie przechwyconych legalnych poleceń?

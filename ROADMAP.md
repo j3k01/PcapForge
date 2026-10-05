@@ -32,8 +32,10 @@ Status: `[ ]` open, `[~]` partly done.
   - [x] Modbus device discovery on the control subnet (T0846, T0888, T0861): `ot-modbus-discovery`
     (`modbus.scanner` actor — a port-502 subnet sweep, device identification and register enumeration,
     no writes);
+  - [x] replay of captured legitimate commands (T0855, T0831): `ot-modbus-command-replay`
+    (`modbus.replay` actor — re-sends the operator's writes verbatim from an unapproved host; values
+    stay in-band, so detection pivots on source and timing);
   - [ ] coil manipulation with alarm acknowledgement: T0831, T0878;
-  - [ ] replay of captured legitimate commands;
   - [ ] alarm-threshold masking followed by a setpoint change.
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
 - [ ] **More protocols as background actors** (M each): IEC 60870-5-104 (`c104`), BACnet/IP (`bacpypes3`), EtherNet/IP/CIP, DNP3.

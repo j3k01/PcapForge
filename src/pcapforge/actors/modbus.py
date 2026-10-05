@@ -14,6 +14,7 @@ from pcapforge.actors import register
 from pcapforge.actors.base import Actor
 from pcapforge.plan import action_ref, host_ref
 from pcapforge.process import BIT_TABLES, FUNCTION_TABLE, ProcessProfile, ProcessSim
+from pcapforge.scenario import ScenarioError
 
 
 @register
@@ -267,6 +268,64 @@ class ModbusOperator(ModbusClientActor):
             plan.event(action, self.id, f"Operator adjusts {point.name} on {target.id}", [],
                        point=point.name, value=point.decode(raw), legitimate=True)
         plan.facts[self.id] = {"source": host_ref(host.id), "write_count": len(writes), "writes": writes}
+
+
+@register
+class ModbusReplay(ModbusClientActor):
+    """Replay attack: a host outside the approved change path re-issues legitimate operator writes.
+
+    It copies writes already planned by another actor (``source``, a ``modbus.operator``) and sends
+    them again, byte for byte (same function, register and value), from a host that is never allowed
+    to change PLC parameters. The values are inside the normal band - what is wrong is the source and
+    the off-cycle timing, so out-of-band detection does not catch it (MITRE ATT&CK for ICS T0855).
+    """
+
+    type = "modbus.replay"
+
+    def plan(self) -> None:
+        plan, rng = self.plan_, self.rng
+        host = self.hosts[0]
+        source = self.param("source")
+        captured = plan.facts.get(source, {}).get("writes", [])
+        if not captured:
+            raise ScenarioError(f"{self.type} '{self.id}': '{source}' planned no writes to replay")
+        lo_n, hi_n = (int(v) for v in self.span(self.param("count", [2, 3])))
+        # Only commands the operator has already issued can be replayed, and each replay lands after
+        # the command it copies: capture it, wait, resend. Pick from the earliest operator writes so
+        # there is room to replay them before the capture ends.
+        in_order = sorted(captured, key=lambda w: w["request"]["$action"].t)
+        picks = in_order[:min(rng.randint(lo_n, hi_n), len(in_order))]
+        spread = min(float(self.param("spread", 600)), plan.duration * 0.5)
+
+        replays = []
+        for original in picks:
+            target_id = original["target"]["$host"]
+            profile = serving_profile(plan, target_id)
+            function, address, raw = original["function"], original["address"], original["raw"]
+            captured_at = original["request"]["$action"].t
+            at = min(captured_at + rng.uniform(30.0, spread), plan.duration - 10.0)
+            at = max(at, captured_at + 5.0)
+            session = _SessionPlanner(self, host.id, target_id, profile.unit_id, at, rng)
+            action = session.write(function, address, [raw], gap=(0.1, 0.6))
+            session.read(3, address, 1)
+            session.close()
+            replays.append({"target": host_ref(target_id), "point": original["point"], "address": address,
+                            "raw": raw, "value": original["value"], "unit": original["unit"],
+                            "function": function, "replayed_from": original["point"],
+                            "request": action_ref(action)})
+            label = f"Replay of {original['point']} = {original['value']} {original['unit']}".rstrip()
+            plan.event(action, self.id, label, ["T0855", "T0831"],
+                       point=original["point"], value=original["value"], legitimate=False)
+        plan.facts[self.id] = {
+            "source": host_ref(host.id),
+            "replayed_source": host_ref(plan.facts[source]["source"]["$host"]),
+            "write_count": len(replays),
+            "writes": replays,
+            "point_names": sorted({w["point"] for w in replays}),
+            "function_codes": sorted({w["function"] for w in replays}),
+            "first_write": min((w["request"] for w in replays), key=lambda r: r["$action"].t),
+            "last_write": max((w["request"] for w in replays), key=lambda r: r["$action"].t),
+        }
 
 
 DEVIATION = {"extreme": (2.5, 5.0), "moderate": (0.5, 1.2), "subtle": (0.08, 0.25)}
