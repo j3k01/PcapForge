@@ -17,7 +17,7 @@ composes the traffic into a believable site topology, and writes:
 - `answers.json`: IOCs, timeline with frame numbers, MITRE ATT&CK (Enterprise/ICS) mapping, questions with answers and the tshark filter that proves each answer
 - `briefing.md`: the student handout (scenario text, asset inventory, register map, questions without answers)
 - `submission_template.yaml`: the questions as a blank answer sheet for `pcapforge grade`
-- with `--siem`: `siem/*.jsonl` logs for Splunk/Elastic and `detections/` (Suricata rules, hunting guide)
+- with `--siem`: `siem/*.jsonl` logs for Splunk/Elastic and `detections/` (Suricata rules, Sigma rules, hunting guide)
 
 The same seed always gives the same exercise, and every student can get their own variant.
 
@@ -194,6 +194,7 @@ could be read.
 $ pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42 --siem
 $ pcapforge export out/ot-modbus-write-manipulation_easy_42
 out/ot-modbus-write-manipulation_easy_42/detections/hunting.md
+out/ot-modbus-write-manipulation_easy_42/detections/sigma/*.yml  (4 rules)
 out/ot-modbus-write-manipulation_easy_42/detections/suricata.rules
 out/ot-modbus-write-manipulation_easy_42/siem/arp.jsonl  (25 records)
 out/ot-modbus-write-manipulation_easy_42/siem/dhcp.jsonl  (4 records)
@@ -237,6 +238,11 @@ use one index per file (`pcapforge-modbus`, ...) with `ts` as the timestamp fiel
   SCADA client, and per writable holding register with a normal band, writes above / below the band
   (raw register units). Suricata's Modbus parser is off by default:
   `suricata -r capture.pcap -S suricata.rules --set app-layer.protocols.modbus.enabled=true -k none -l logs`.
+- `sigma/*.yml`: SIEM-agnostic [Sigma](https://sigmahq.io) rules over the JSON-lines export
+  (`logsource: {product: pcapforge, service: <dataset>}`): the unapproved-writer and device-identification
+  rules (same roles as the Suricata ones), an out-of-band write rule keyed on the export's `in_normal_band`
+  field, and, when a `dhcp.client` runs, a new-host-on-the-control-LAN rule. Convert with
+  [sigma-cli](https://github.com/SigmaHQ/sigma-cli), e.g. `sigma convert -t splunk detections/sigma/`.
 - `hunting.md`: per question, the answer, the verified Wireshark filters from the answer key, and a
   Splunk SPL search and Kibana KQL filter over the export with a "what to look for" note. The SPL/KQL
   are templates from the scenario's `hunt` blocks and are not machine-verified.

@@ -61,7 +61,7 @@ Status: `[ ]` open, `[~]` partly done.
 - [~] **Suricata rules.** Generated rules exist and are tested against Suricata 7 in WSL. Still to do: confirm in the CI log that the Suricata tests run rather than being skipped.
 - [ ] **Validate SPL/KQL hunting queries** (M) against real Splunk and Elastic, e.g. Docker images in a separate CI job.
 - [ ] **Zeek output** (M): when `zeek` is available (or via Docker), produce real `conn.log`/`modbus.log`/`dns.log` alongside the pcapforge JSONL.
-- [ ] **Sigma rules** (S) over the exported JSONL, for SIEM-agnostic detections.
+- [x] **Sigma rules** (S): `detections/sigma/*.yml` over the exported JSONL (`logsource: {product: pcapforge, service: <dataset>}`): unapproved writer, out-of-band write, device identification, and new host on the control LAN (DHCP). Generated from `answers.json`; convert with sigma-cli.
 
 ## 6. Platform and project
 

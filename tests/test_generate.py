@@ -100,7 +100,7 @@ def test_checksums_hold_when_recomputed_by_scapy(generated):
             ip = pkt[IP]
             fresh = IP(bytes(ip))
             del fresh.chksum
-            layers = [l for l in (TCP, UDP) if l in fresh]
+            layers = [layer for layer in (TCP, UDP) if layer in fresh]
             for layer in layers:
                 del fresh[layer].chksum
             rebuilt = IP(bytes(fresh))
@@ -320,6 +320,29 @@ def test_sensor_artefacts_follow_the_level_impairments(generated):
 
 def _eve_epoch(timestamp: str) -> float:
     return dt.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f%z").timestamp()
+
+
+def test_sigma_rules_ship_and_match_the_incident_in_the_modbus_export(generated):
+    import yaml
+
+    result, answers = generated
+    change = answers["facts"]["change"]
+    rules = {}
+    for key, path in result.exports.items():
+        if key.startswith("detections/sigma/"):
+            rules[path.stem] = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert "modbus_write_from_an_unapproved_host" in rules
+    write = rules["modbus_write_from_an_unapproved_host"]["detection"]
+    approved = set(write.get("approved", {}).get("src", []))
+    # On easy/medium the writer is an unapproved host; on hard it is the legitimate workstation
+    # (there the band rule, not the source rule, catches the out-of-band writes).
+    writer_is_approved = answers["scenario"]["difficulty"] == "hard"
+    assert (change["source"]["ip"] in approved) == writer_is_approved
+    # Every incident write is out of band, so the rows the band rule selects on exist in the export.
+    oob = [r for r in jsonl(result.exports["siem/modbus.jsonl"]) if r["write"] and r["in_normal_band"] is False]
+    assert len(oob) == change["write_count"]
+    # A DHCP client actor runs at every level (the rogue on easy, a service laptop on medium/hard).
+    assert "new_host_leased_an_address_on_the_control_lan" in rules
 
 
 @pytest.mark.skipif(not shutil.which("suricata"), reason="requires suricata on PATH")

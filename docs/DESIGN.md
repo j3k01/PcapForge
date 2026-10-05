@@ -113,7 +113,7 @@ Done and committed (verify with `git log --oneline`):
   ICMP unreachable). Stack profiles carry `link_local` TTL/DF (Windows: LLMNR 1, SSDP 4,
   mDNS 255, broadcasts 128, no DF); devices with `browser` announce themselves.
 - `record.py` — `recording_for(plan)` → cached pcap (DLT_NULL on Windows) + `.json` meta.
-  Verified: easy plan = 4018 actions, 20 020 packets, 0 drops, 2.9 s wall.
+  Verified: easy plan = 4020 actions, 20 025 packets, 0 drops, ~3.7 s wall.
 - `compose/` — `compose(plan, recording, out, seed, fmt)` → `ComposeResult` (spec below).
   Verified with tshark: 0 malformed/checksum/expert errors on easy and medium; ~120k pkt/s.
 
@@ -127,7 +127,10 @@ subscription (`vars.opcua`), see below.
     request/response by (TCP stream, transaction id) because exception responses carry no
     `modbus.request_frame`; TCP retransmissions are skipped. Writes are annotated from the register map
     of the PLC's process profile.
-  - `detections.py` — `suricata.rules` + `hunting.md` from `answers.json` alone. answers.json now has
+  - `detections.py` — `suricata.rules`, `sigma/*.yml` and `hunting.md` from `answers.json` alone. The
+    Sigma rules (SIEM-agnostic, `logsource.service` = dataset) mirror the Suricata roles over the JSONL
+    export plus an out-of-band write rule (on the export's `in_normal_band`) and, with a `dhcp.client`, a
+    new-host-on-the-control-LAN rule; ids are a stable uuid5 of scenario+difficulty+seed+key. answers.json now has
     `actors` (id, type, incident, host ids) so roles come from actor types: PLCs = `modbus.server`,
     approved writers = non-incident `modbus.operator`, SCADA clients = `modbus.poller` + operators.
     The scenario's `operator_changes` actor is present at every level (count 0 on easy) so the approved
