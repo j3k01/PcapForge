@@ -349,6 +349,12 @@ class DhcpClient(Actor):
                 at += renewal
             if leave is not None and release:
                 released = plan.add(gone, self.id, host.id, "dhcp.release", xid=rng.getrandbits(32), **common)
+            if joined is not None:
+                plan.event(joined, self.id, f"{host.name} joins the {server.subnet} network (DHCP)", [],
+                           host=host_ref(host.id), style=style)
+            if released is not None:
+                plan.event(released, self.id, f"{host.name} releases its DHCP lease and leaves", [],
+                           host=host_ref(host.id))
             facts.append({
                 "host": host_ref(host.id),
                 "style": style,

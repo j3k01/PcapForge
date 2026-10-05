@@ -10,7 +10,7 @@ Generate realistic, labeled packet captures with answer keys for blue-team, SOC 
 detection-engineering training.
 
 Pick a scenario, a difficulty and a seed. pcapforge records **real protocol stacks** (OS
-TCP/IP, pymodbus, asyncua OPC UA, S7comm, DNS, NTP) talking to each other on loopback addresses,
+TCP/IP, pymodbus, asyncua OPC UA, S7comm, DNS, NTP, DHCP) talking to each other on loopback addresses,
 composes the traffic into a believable site topology, and writes:
 
 - `capture.pcap` / `capture.pcapng`: decodes cleanly in Wireshark, tshark, Zeek, Suricata and Splunk Stream
@@ -43,10 +43,10 @@ $ pcapforge list
 ot-modbus-write-manipulation  OT  easy/medium/hard  T0855,T0836     Unauthorized Modbus/TCP setpoint changes on a water-treatment PLC
 
 $ pcapforge generate --scenario ot-modbus-write-manipulation --difficulty easy --seed 42
-  [42] plan: 4018 actions, recording key bbf20dc600bfba1913ac4a0c
+  [42] plan: 4020 actions, recording key 088575127c99cf5e0fbfc8c4
   [42] recording: captured
-  [42] composed 13739 packets
-out/ot-modbus-write-manipulation_easy_42/capture.pcap  (13739 packets, verified)
+  [42] composed 13751 packets
+out/ot-modbus-write-manipulation_easy_42/capture.pcap  (13751 packets, verified)
 ```
 
 Optional protocol extras record more industrial background traffic: `pip install -e .[opcua]` (OPC UA,
@@ -79,9 +79,9 @@ Other commands:
 ```console
 $ tshark -r capture.pcap -Y "modbus.func_code in {6, 43} && !modbus.request_frame" \
     -T fields -e frame.time_utc -e eth.src -e ip.src -e ip.dst -e modbus.func_code -e modbus.reference_num -e modbus.regval_uint16
-2025-03-22T11:45:33.663741Z  b8:27:eb:23:26:6d  10.241.35.164  10.241.35.159  43
-2025-03-22T11:45:36.016219Z  b8:27:eb:23:26:6d  10.241.35.164  10.241.35.159  6  8  1587
-2025-03-22T11:45:37.918517Z  b8:27:eb:23:26:6d  10.241.35.164  10.241.35.159  6  4  635
+2025-03-22T11:45:33.663741Z  b8:27:eb:23:26:6d  10.241.35.219  10.241.35.159  43
+2025-03-22T11:45:36.016219Z  b8:27:eb:23:26:6d  10.241.35.219  10.241.35.159  6  8  1587
+2025-03-22T11:45:37.918517Z  b8:27:eb:23:26:6d  10.241.35.219  10.241.35.159  6  4  635
 ...
 ```
 
@@ -98,7 +98,7 @@ And the matching entry in `answers.json`:
   "type": "timestamp",
   "answer": "2025-03-22T11:45:36.016219Z",
   "tolerance_s": 1,
-  "checks": [{"filter": "frame.number == 7197 && modbus.func_code in {5, 6, 15, 16} && ip.src == 10.241.35.164",
+  "checks": [{"filter": "frame.number == 7209 && modbus.func_code in {5, 6, 15, 16} && ip.src == 10.241.35.219",
               "expect": {"count": 1}}]
 }
 ```
@@ -125,39 +125,41 @@ Students fill in `submission_template.yaml` (one file per student, named after t
 ```yaml
 # 1. Which IP address issued the unauthorized Modbus write requests?
 #    (10 points; answer: an IP address)
-source_ip: 10.241.35.164
+source_ip: 10.241.35.219
 # 2. Which MAC address did the sensor see on the frames carrying those write requests?
 #    (5 points; answer: a MAC address)
 source_mac: B8-27-EB-23-26-6D
 target_ip: 10.241.35.159
 first_write: 2025-03-22 11:45:36.4
 points_changed: [pid_level_ti, level_high_alarm, level_low_alarm]
-values_written: {pid_level_ti: 1587, level_high_alarm: 635, level_low_alarm: 356, chlorine_dose_sp: 8.45}
+values_written: {pid_level_ti: 1587, level_high_alarm: 635, level_low_alarm: 0, chlorine_dose_sp: 8.45}
 functions_used: [6, 16]
 discovery: Rockwell Automation 2080-LC50-24QWB
 impact: [chlorine_residual, level_high, level_low]
+joined_host_name: raspberrypi
 technique: T0831
 ```
 
 A whole class can also hand in one CSV with the columns `student,question,answer`. Repeat a row to give
 several elements of a list (`alice,points_changed,pid_level_ti`), or write them in one cell separated by
-commas; map answers are `name=value` pairs (`pid_level_ti=1587; level_low_alarm=356`).
+commas; map answers are `name=value` pairs (`pid_level_ti=1587; level_low_alarm=0`).
 
 ```console
 $ pcapforge grade out/ot-modbus-write-manipulation_easy_42/answers.json submissions/jane-doe.yaml
-jane-doe: 80/95 (84.2 %)   [submissions/jane-doe.yaml]
-question        type       score     result   given
---------------  ---------  --------  -------  ----------------------------------------
-source_ip       ip         10/10     correct  10.241.35.164
-source_mac      mac        5/5       correct  B8-27-EB-23-26-6D
-target_ip       ip         10/10     correct  10.241.35.159
-first_write     timestamp  10/10     correct  2025-03-22 11:45:36.4
-points_changed  set        11.25/15  partial  ["pid_level_ti", "level_high_alarm", "l…
-values_written  map        11.25/15  partial  {"pid_level_ti": "1587", "level_high_al…
-functions_used  set        2.5/5     partial  ["6", "16"]
-discovery       text       10/10     correct  Rockwell Automation 2080-LC50-24QWB
-impact          set        10/10     correct  ["chlorine_residual", "level_high", "le…
-technique       text       0/5       wrong    T0831
+jane-doe: 85/100 (85 %)   [submissions/jane-doe.yaml]
+question          type       score     result   given
+----------------  ---------  --------  -------  ----------------------------------------
+source_ip         ip         10/10     correct  10.241.35.219
+source_mac        mac        5/5       correct  B8-27-EB-23-26-6D
+target_ip         ip         10/10     correct  10.241.35.159
+first_write       timestamp  10/10     correct  2025-03-22 11:45:36.4
+points_changed    set        11.25/15  partial  ["pid_level_ti", "level_high_alarm", "l…
+values_written    map        11.25/15  partial  {"pid_level_ti": "1587", "level_high_al…
+functions_used    set        2.5/5     partial  ["6", "16"]
+discovery         text       10/10     correct  Rockwell Automation 2080-LC50-24QWB
+impact            set        10/10     correct  ["chlorine_residual", "level_high", "le…
+joined_host_name  text       5/5       correct  raspberrypi
+technique         text       0/5       wrong    T0831
 
 $ pcapforge grade answers.json submissions/*.yaml class.csv --json > grades.json
 ```
@@ -170,7 +172,7 @@ Each question is scored by its `type` in `answers.json`:
 
 | type | correct when | partial credit |
 |---|---|---|
-| `ip` | same address; whitespace and leading zeros (`10.241.035.164`) ignored | - |
+| `ip` | same address; whitespace and leading zeros (`10.241.035.219`) ignored | - |
 | `mac` | same 12 hex digits; case and `:` `-` `.` separators ignored | - |
 | `number` | equal, or within `tolerance` when the key has one | - |
 | `timestamp` | within `tolerance_s`; ISO 8601 with `T` or space, any fractional digits, `Z` or an offset; times without a zone are UTC | - |
@@ -193,9 +195,10 @@ $ pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42 --siem
 $ pcapforge export out/ot-modbus-write-manipulation_easy_42
 out/ot-modbus-write-manipulation_easy_42/detections/hunting.md
 out/ot-modbus-write-manipulation_easy_42/detections/suricata.rules
-out/ot-modbus-write-manipulation_easy_42/siem/arp.jsonl  (20 records)
+out/ot-modbus-write-manipulation_easy_42/siem/arp.jsonl  (25 records)
+out/ot-modbus-write-manipulation_easy_42/siem/dhcp.jsonl  (4 records)
 out/ot-modbus-write-manipulation_easy_42/siem/dns.jsonl  (0 records)
-out/ot-modbus-write-manipulation_easy_42/siem/flows.jsonl  (38 records)
+out/ot-modbus-write-manipulation_easy_42/siem/flows.jsonl  (40 records)
 out/ot-modbus-write-manipulation_easy_42/siem/modbus.jsonl  (3975 records)
 out/ot-modbus-write-manipulation_easy_42/siem/name_resolution.jsonl  (0 records)
 out/ot-modbus-write-manipulation_easy_42/siem/ntp.jsonl  (33 records)
@@ -210,16 +213,17 @@ out/ot-modbus-write-manipulation_easy_42/siem/ntp.jsonl  (33 records)
 | `dns.jsonl` | query/response | `query`, `qtype`, `rcode`, `answers`, `ttl`, `response_time_ms` |
 | `ntp.jsonl` | client request/server response | `version`, `stratum`, `refid`, `server_time`, `offset_ms`, `response_time_ms` |
 | `name_resolution.jsonl` | LLMNR / NBNS / mDNS / SSDP / browser datagram | `app`, `message`, `query`, `qtype`, `answers` |
-| `arp.jsonl` | ARP packet | `operation`, `src`, `src_mac`, `dest`, `dest_mac`, `gratuitous` |
+| `arp.jsonl` | ARP packet | `operation`, `src`, `src_mac`, `dest`, `dest_mac`, `gratuitous`, `probe` (RFC 5227 address conflict probe from 0.0.0.0) |
+| `dhcp.jsonl` | DHCPv4 message | `message` (`discover`, `offer`, `request`, `ack`, `inform`, `release`, ...), `xid`, `client_mac`, `client_addr`, `assigned_addr`, `requested_addr`, `server_id`, `host_name`, `client_fqdn`, `vendor_class`, `lease_time_s`, `router`, `dns_servers`, `domain` |
 
 Every record has `ts` (ISO-8601 UTC, microseconds, `Z`) for Splunk `_time` / Elastic `@timestamp`
 and `epoch`; field names follow the Splunk CIM (`src`, `dest`, `src_port`, `dest_port`, `transport`, `app`).
 A write from the easy run above:
 
 ```json
-{"ts": "2025-03-22T11:45:36.016219Z", "src": "10.241.35.164", "src_port": 42462, "dest": "10.241.35.159", "dest_port": 502,
+{"ts": "2025-03-22T11:45:36.016219Z", "src": "10.241.35.219", "src_port": 37312, "dest": "10.241.35.159", "dest_port": 502,
  "src_mac": "b8:27:eb:23:26:6d", "function_code": 6, "function": "write_single_register", "write": true, "table": "holding",
- "address": 8, "quantity": 1, "values": [1587], "response_time_ms": 2.932, "request_frame": 7191,
+ "address": 8, "quantity": 1, "values": [1587], "response_time_ms": 5.318, "request_frame": 7209,
  "point": "pid_level_ti", "unit": "s", "value": 1587.0, "in_normal_band": false, ...}
 ```
 
@@ -254,11 +258,11 @@ Difficulty levels of `ot-modbus-write-manipulation`:
 | length | 15 min, ~14k packets | 45 min, ~199k packets | 2 h, ~694k packets |
 | process | drinking water | drawn per seed: drinking water, wastewater, building HVAC or power substation | drawn per seed (same four) |
 | PLCs | 2 | 2–4 Modbus (per seed) + 1 Siemens S7-1500 | 3–5 Modbus (per seed) + 1 Siemens S7-1500 |
-| writer | unknown Raspberry Pi on the control LAN | laptop on the IT subnet, routed through the firewall (gateway MAC) | the legitimate engineering workstation |
+| writer | unknown Raspberry Pi plugged into the control LAN during the capture (leases its address from the firewall's DHCP pool) | laptop on the IT subnet, routed through the firewall (gateway MAC) | the legitimate engineering workstation |
 | discovery | identity read + register enumeration | yes | none |
 | changes | burst of extreme values | spread over 20 min, moderate values | spread over 1 h, values just outside the band, mixed with 6 legitimate operator changes |
 | OT background | HMI and historian poll the PLCs (Modbus/TCP) | + SCADA server polls the PLCs and serves them over OPC UA to the historian (one subscription per PLC: Publish every 2 s, ServerStatus Read every 5 s); HMI and historian read the S7-1500 over S7comm | + OPC UA secure-channel renewals |
-| noise | NTP, ARP | + DNS, Windows chatter (LLMNR, NBNS, mDNS, SSDP, browser announcements), IPv6 link-local baseline of the Windows hosts (DAD, Router Solicitation, MLDv2, LLMNR/mDNS over IPv6, DHCPv6 Solicit), retransmissions, capture starts mid-session, SPAN artefacts (VLAN 20, 0.2 % duplicated frames, 0.05 % sensor drops) | + more retransmissions, twice the Windows chatter, VLAN 120, 0.5 % duplicates, 0.1 % drops |
+| noise | NTP, ARP | + a vendor service laptop that joins over DHCP (DORA, ARP probes, DHCPINFORM) and releases its lease before leaving, DNS, Windows chatter (LLMNR, NBNS, mDNS, SSDP, browser announcements), IPv6 link-local baseline of the Windows hosts (DAD, Router Solicitation, MLDv2, LLMNR/mDNS over IPv6, DHCPv6 Solicit), retransmissions, capture starts mid-session, SPAN artefacts (VLAN 20, 0.2 % duplicated frames, 0.05 % sensor drops) | + more retransmissions, twice the Windows chatter, VLAN 120, 0.5 % duplicates, 0.1 % drops |
 
 ## How it works
 
@@ -342,6 +346,7 @@ Built-in actor types:
 - `ntp.server`, `ntp.client`
 - `s7.server`, `s7.client` (Siemens S7comm on ISO-TSAP port 102, optional extra `s7`): an S7-1200/1500 CPU whose data blocks mirror its process model (DB1 measurements and DB2 setpoints as REAL, DB3 status bits) and whose SZL identity (order code, firmware, module name, serial) follows the device profile; the client keeps one session per PLC (COTP connect, setup communication, SZL identification), reads the DBs with cyclic multi-item Read Var jobs and the CPU state (SZL 0x0424) every `szl_interval` seconds. `params: {process, rack, slot}` / `{targets, interval, jitter, dbs, identify, szl_interval}`
 - `opcua.server`, `opcua.client` (OPC UA binary on port 4840, SecurityPolicy None, optional extra `opcua`): a SCADA / OPC UA server that publishes the process points of the PLCs in `sources` (hosts of a `modbus.server`) as tags `ns=2;s=PLC01.clearwell_level`, grouped per PLC into `Measurements`, `Setpoints`, `Commands` and `Status`, with values from the PLC's process model at the request's virtual time and its BuildInfo from the device profile's `identity`; the client (historian / MES collector) opens one long-lived session (Hello, OpenSecureChannel, CreateSession, ActivateSession, NamespaceArray read, browse of the tag tree), creates one subscription per PLC with monitored items per tag group, sends Publish requests every `publishing_interval`, reads ServerStatus State/CurrentTime every `keepalive_interval` and renews the secure channel at 75 % of `token_lifetime`. `params: {sources}` / `{server, publishing_interval, keepalive_interval, token_lifetime, jitter, application, product_uri}`
+- `dhcp.server`, `dhcp.client` (DHCPv4, RFC 2131): the server (e.g. the firewall) leases addresses from `pool` on one subnet and hands out router, DNS, domain and NTP; static hosts on that subnet stay outside the pool. A client either holds a lease from before the capture and renews it at T1, or joins at `join` (DISCOVER / OFFER / REQUEST / ACK from 0.0.0.0 to 255.255.255.255, ARP address conflict detection, then a DHCPINFORM on Windows) and can leave at `leave` with a DHCPRELEASE. Message formats follow the OS client (`style`: `windows`, `dhcpcd`). `params: {subnet, pool, lease, dns, ntp}` / `{server, join, leave, release, style}`
 - `windows.chatter` (names the site DNS does not know: NXDOMAIN, then LLMNR, NBNS and mDNS fallback; SSDP; browser host announcements; `params: {rate}`)
 
 Device and OS-stack profiles are in [`profiles/devices.yaml`](src/pcapforge/profiles/devices.yaml). Their OUIs are checked against Wireshark's manufacturer database. Process models are in [`profiles/processes/`](src/pcapforge/profiles/processes/). New actors go in `src/pcapforge/actors/` and implement `plan()`, plus `serve()` for servers or `execute()` for clients. Actors that send one-way multicast or broadcast datagrams list the recording sinks they use in `sinks` (see `topology.SINKS`). Actors built on a third-party library declare it as an optional extra in `requires` and import it lazily. [CONTRIBUTING.md](CONTRIBUTING.md#extending-the-engine) has the details.

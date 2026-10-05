@@ -499,7 +499,8 @@
                   "dns",
                   "ntp",
                   "name_resolution",
-                  "arp"
+                  "arp",
+                  "dhcp"
                 ],
                 "description": "SIEM export file the SPL/KQL queries search"
               },

@@ -23,7 +23,7 @@ SID_BAND_BASE = SID_BASE + 100
 MODBUS_PORT = 502
 WRITER_TYPES = ("modbus.operator",)
 CLIENT_TYPES = ("modbus.poller", "modbus.operator")
-DATASETS = ("flows", "modbus", "dns", "ntp", "name_resolution", "arp")
+DATASETS = ("flows", "modbus", "dns", "ntp", "name_resolution", "arp", "dhcp")
 
 
 @dataclass(frozen=True)

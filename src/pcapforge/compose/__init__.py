@@ -2,8 +2,9 @@
 
 Pipeline (see docs/DESIGN.md, "Composer spec"): flow/action assignment from the recording's
 markers -> causal retime (TCP segmentation) -> visibility -> header rebuild -> Ethernet + ARP,
-link-local IPv6 (ND, MLD, IPv6 copies of group datagrams) -> time-ordered merge -> SPAN
-artefacts (duplicates, drops, VLAN tag) -> pcap/pcapng. All randomness comes from the
+DHCPv4 delivery (broadcasts, address conflict detection), link-local IPv6 (ND, MLD, IPv6 copies
+of group datagrams) -> time-ordered merge -> SPAN artefacts (duplicates, drops, VLAN tag, sensor
+clock) -> pcap/pcapng. All randomness comes from the
 presentation seed, so the same plan, recording and seed always give a byte-identical file.
 """
 
@@ -13,10 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pcapforge.compose import dhcp
 from pcapforge.compose.flows import assign_flows
 from pcapforge.compose.headers import Headers
 from pcapforge.compose.ipv6 import Ipv6
-from pcapforge.compose.link import Link, pad
+from pcapforge.compose.link import BROADCAST, Link, pad
 from pcapforge.compose.packets import FIN, SYN, ComposeError, Packet, read_ipv4
 from pcapforge.compose.retime import Network, Retimer
 from pcapforge.compose.span import Span
@@ -56,7 +58,8 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
     network = Network(topology, present.child("latency"))
     timeline = Retimer(plan, network, present).run(packets)
     headers = Headers(plan, present.child("headers"))
-    link = Link(plan, network, present.child("arp"))
+    leases = dhcp.Dhcp(plan, present.child("dhcp"))
+    link = Link(plan, network, present.child("arp"), leases.joining)
     ipv6 = Ipv6(plan, headers, present.child("ipv6"))
 
     # (time, emission index, frame, packet or None for synthesized ARP / ND / MLD / IPv6 copies)
@@ -72,9 +75,15 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
         for t, frame in ipv6.start_before(p.time, p.src):
             frames.append((t, len(frames), frame, None))
         if ipv4:
-            for t, arp in link.arp_before(p.time, p.src, p.dst):
+            delivery = dhcp.delivery(p)
+            if delivery is None:
+                for t, arp in link.arp_before(p.time, p.src, p.dst):
+                    frames.append((t, len(frames), arp, None))
+            elif delivery.broadcast:
+                eth = BROADCAST + eth[6:]
+            frames.append((p.time, len(frames), pad(eth + headers.build(p, hops, delivery)), p))
+            for t, arp in leases.after(p):
                 frames.append((t, len(frames), arp, None))
-            frames.append((p.time, len(frames), pad(eth + headers.build(p, hops)), p))
         copy = ipv6.datagram(p)
         if copy is not None:
             frames.append((copy[0], len(frames), copy[1], None))

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from pcapforge.compose import compose
+from pcapforge.export import _ns_epoch
 from pcapforge.plan import build_plan
 from pcapforge.record import record, recording_for
 from pcapforge.scenario import Scenario, ScenarioError
@@ -67,7 +68,10 @@ capture_tools = (find_tool("tshark") and (find_tool("dumpcap") or find_tool("tcp
 
 
 def _epoch(text: str) -> float:
-    """tshark absolute time (ISO 8601, nanoseconds, Z or +hhmm) -> epoch seconds."""
+    """tshark absolute time (ISO 8601, nanoseconds, Z or +hhmm) -> epoch seconds. Some 4.4 builds print
+    OPC UA times as ``Sep 22, 2025 09:52:24.088022 UTC``, which the SIEM export also accepts."""
+    if not text.strip()[:4].isdigit():
+        return _ns_epoch(text.strip())
     text = re.sub(r"(\.\d{6})\d*", r"\1", text.strip())
     return dt.datetime.fromisoformat(text).timestamp()
 

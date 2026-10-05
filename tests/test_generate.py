@@ -128,6 +128,9 @@ def test_group_and_broadcast_frames_carry_matching_l2_addresses_and_stay_on_the_
     display_filter = f"ip && (ip.dst == 224.0.0.0/4 || eth.dst.ig == 1 || ip.dst in {{{broadcasts}}})"
     rows = tshark_fields(result.pcap, display_filter, ["eth.dst", "ip.src", "ip.dst"])
     for eth_dst, src, dst in rows:
+        if dst == "255.255.255.255":  # DHCP: limited broadcast, also from a client without an address
+            assert eth_dst == "ff:ff:ff:ff:ff:ff" and (src == "0.0.0.0" or ipaddress.ip_address(src) in sensor)
+            continue
         assert ipaddress.ip_address(src) in sensor, f"{src} -> {dst} is not link-local to the sensor"
         group = ipaddress.ip_address(dst)
         if group.is_multicast:
@@ -137,6 +140,56 @@ def test_group_and_broadcast_frames_carry_matching_l2_addresses_and_stay_on_the_
             assert (dst, eth_dst) == (str(sensor.broadcast_address), "ff:ff:ff:ff:ff:ff")
     if answers["scenario"]["difficulty"] != "easy":
         assert rows, "Windows hosts on the sensor segment send link-local chatter"
+
+
+def test_dhcp_clients_lease_their_address_the_way_rfc_2131_delivers_it(generated):
+    result, answers = generated
+    facts = answers["facts"]
+    clients = [c for actor in ("rogue_join", "service_visit") if actor in facts for c in facts[actor]["clients"]]
+    server = facts["dhcp_service"]["hosts"][0]
+    rows = tshark_fields(result.pcap, "dhcp", ["frame.time_epoch", "eth.src", "eth.dst", "ip.src", "ip.dst",
+                                               "udp.srcport", "udp.dstport", "dhcp.option.dhcp", "dhcp.flags.bc",
+                                               "dhcp.hw.mac_addr", "dhcp.ip.your", "dhcp.option.hostname",
+                                               "dhcp.option.dhcp_server_id", "dhcp.option.router"])
+    for row in rows:  # chaddr, and again in the client identifier (option 61)
+        row[9] = row[9].split(",")[0]
+    assert {c["host"]["mac"] for c in clients} == {r[9] for r in rows}
+    for client in clients:
+        host = client["host"]
+        mine = [r for r in rows if r[9] == host["mac"]]
+        types = [int(r[7]) for r in mine]
+        assert types[:4] == [1, 2, 3, 5], "DISCOVER / OFFER / REQUEST / ACK"
+        windows = client["style"] == "windows"
+        for epoch, eth_src, eth_dst, src, dst, sport, dport, kind, bc, _, yiaddr, name, server_id, router in mine:
+            kind = int(kind)
+            if kind in (1, 3):  # the client has no address yet
+                assert (src, dst, eth_dst, sport, dport) == ("0.0.0.0", "255.255.255.255", "ff:ff:ff:ff:ff:ff",
+                                                             "68", "67")
+                assert eth_src == host["mac"] and name == host["name"] and (bc == "True") == windows
+            elif kind in (2, 5) and yiaddr != "0.0.0.0":  # lease: broadcast flag -> broadcast, else unicast
+                assert (src, eth_src, yiaddr, server_id, router) == (server["ip"], server["mac"], host["ip"],
+                                                                      server["ip"], server["ip"])
+                assert (dst, eth_dst) == (("255.255.255.255", "ff:ff:ff:ff:ff:ff") if windows
+                                          else (host["ip"], host["mac"]))
+            elif kind == 8:  # DHCPINFORM from the leased address
+                assert (src, dst) == (host["ip"], "255.255.255.255")
+            elif kind == 7:  # DHCPRELEASE: unicast to the server
+                assert (src, dst, eth_dst) == (host["ip"], server["ip"], server["mac"])
+        assert (8 in types) == (client["inform"] is not None) and (7 in types) == (client["released"] is not None)
+        # Address conflict detection: ARP probes from 0.0.0.0 for the lease, then announcements, and the
+        # address is not used before that.
+        ack = next(float(r[0]) for r in mine if r[7] == "5")
+        probes = tshark_fields(result.pcap, f"arp.src.hw_mac == {host['mac']} && arp.dst.proto_ipv4 == {host['ip']}",
+                               ["frame.time_epoch", "arp.src.proto_ipv4"])
+        senders = [s for _, s in probes]
+        assert senders[:3] == ["0.0.0.0"] * 3 and host["ip"] in senders[3:]
+        assert all(float(t) > ack for t, _ in probes)
+        ready = max(float(t) for t, s in probes if s == "0.0.0.0")
+        used = tshark_fields(result.pcap, f"ip.src == {host['ip']} && !dhcp", ["frame.time_epoch"])
+        assert all(float(t) > ready for (t,) in used)
+    records = jsonl(result.exports["siem/dhcp.jsonl"])
+    assert len(records) == len(rows)
+    assert {r["host_name"] for r in records if r["message"] == "discover"} == {c["host"]["name"] for c in clients}
 
 
 def test_same_seed_is_byte_identical_and_new_seed_changes_presentation(tmp_path):

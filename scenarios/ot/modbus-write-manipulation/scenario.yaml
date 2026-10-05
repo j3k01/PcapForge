@@ -52,6 +52,7 @@ topology:
     - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.writer_host == 'itpc'"}
     - {id: s7plc, device: siemens-s7-1500, subnet: control, name: "plc-{code}-tr2", when: vars.s7}
     - {id: scada, device: scada-server-vm, subnet: control, name: "SCADA-{CODE}-01", when: vars.opcua}
+    - {id: svc_laptop, device: windows-workstation, subnet: control, name: "SVC-{CODE}-LT01", when: vars.service_laptop}
 
 actors:
   - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
@@ -128,6 +129,25 @@ actors:
     hosts: scada
     when: vars.opcua
     params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The firewall leases addresses from a small pool on the control LAN for maintenance laptops;
+  # PLCs, HMI, historian and workstations keep their static addresses outside it.
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: firewall
+    params: {subnet: control, pool: [200, 230], lease: 1d, dns: dc, ntp: dc}
+  # A device plugged into the control LAN during the shift gets its address from that pool.
+  - id: rogue_join
+    type: dhcp.client
+    hosts: rogue
+    incident: true
+    when: "vars.writer_host == 'rogue'"
+    params: {server: firewall, join: [0.05, 0.25]}
+  # An approved vendor visit (medium/hard): a service laptop joins, stays a while and leaves.
+  - id: service_visit
+    type: dhcp.client
+    hosts: svc_laptop
+    when: vars.service_laptop
+    params: {server: firewall, join: [0.05, 0.3], leave: [0.7, 0.95], release: true}
   - id: change
     type: modbus.writer
     hosts: "${vars.writer_host}"
@@ -164,6 +184,7 @@ difficulty:
       s7: false
       opcua: false
       ipv6: false
+      service_laptop: false
   medium:
     duration: 45m
     impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
@@ -187,6 +208,7 @@ difficulty:
       s7: true
       opcua: true
       ipv6: true
+      service_laptop: true
   hard:
     duration: 2h
     impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
@@ -210,6 +232,7 @@ difficulty:
       s7: true
       opcua: true
       ipv6: true
+      service_laptop: true
 
 questions:
   - id: source_ip
@@ -341,6 +364,23 @@ questions:
       look_for: >-
         The logs carry the changed setpoints; the register map links each setpoint to the measured input
         registers that follow it. Watch those inputs drift in the HMI poll responses after the writes.
+  - id: joined_host_name
+    when: "vars.writer_host == 'rogue'"
+    text: The writing device was connected to the control LAN during the capture. Which host name did it announce when it requested its IP address?
+    answer: "${facts.change.source.name}"
+    points: 5
+    hint: A host without an address asks the DHCP server for one (DHCP Discover / Request, option 12).
+    check:
+      filter: "dhcp.option.dhcp in {1, 3} && dhcp.hw.mac_addr == ${facts.change.source.mac} && dhcp.option.hostname == \"${facts.change.source.name}\""
+      expect: {min: 2}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message=discover | table ts client_mac host_name vendor_class requested_addr"
+      kql: "message : \"discover\""
+      look_for: >-
+        A DHCP Discover from a MAC that is not in the asset inventory, followed by the Offer / Request / ACK of
+        its lease and ARP probes for the leased address. `host_name` and `vendor_class` (dhcpcd on Linux)
+        identify the device.
   - id: technique
     text: Which MITRE ATT&CK for ICS technique best describes the setpoint changes?
     answer: T0836
@@ -397,6 +437,9 @@ translations:
         text: Czy przed zapisem źródło odpytało PLC o identyfikację? Jeśli tak, jakiego producenta/produkt zgłosił PLC?
       impact:
         text: Na które mierzone wartości procesowe wpływają zmienione nastawy?
+      joined_host_name:
+        text: Urządzenie zapisujące zostało podłączone do sieci sterowania w trakcie nagrania. Jaką nazwę hosta podało, prosząc o adres IP?
+        hint: Host bez adresu prosi serwer DHCP o jego przydzielenie (DHCP Discover / Request, opcja 12).
       technique:
         text: Która technika MITRE ATT&CK for ICS najlepiej opisuje zmiany nastaw?
       legit_vs_unauthorized:

@@ -99,6 +99,10 @@ Done and committed (verify with `git log --oneline`):
 - `plan.py` — `build_plan(scenario, difficulty, seed, base_seed, duration_override)`,
   `start_epoch` (behaviour level: NTP payloads carry it), `digest()` = recording cache key
 - `actors/` — `modbus.server|poller|operator|writer`, `dns.server|client`, `ntp.server|client`,
+  `dhcp.server|client` (DHCPv4 over real UDP sockets between the loopback addresses; the composer
+  rewrites addresses and chaddr / client id, delivers DORA as 0.0.0.0 → 255.255.255.255 broadcasts or
+  unicast to yiaddr by the broadcast flag, and adds RFC 5227 ARP probes / announcements after the ACK
+  of a new lease, see `compose/dhcp.py`),
   `windows.chatter` (LLMNR, NBNS, mDNS, SSDP M-SEARCH, browser host announcements; timing,
   ports and payloads checked against a Windows 10 capture). Lookups only use names the site
   DNS zone does not resolve; hosts with a `dns.client` first query the site server for
@@ -119,7 +123,7 @@ background protocols on medium/hard: S7comm (`vars.s7`) and a SCADA OPC UA serve
 subscription (`vars.opcua`), see below.
 - SIEM export + detection content (`generate --siem`, `pcapforge export <run>`):
   - `export.py` — one tshark pass (`-T fields`, ~70 fields, occurrence aggregator `\x1f`), streamed and
-    aggregated in Python into `siem/{flows,modbus,dns,ntp,name_resolution,arp}.jsonl`. Modbus pairs
+    aggregated in Python into `siem/{flows,modbus,dns,ntp,name_resolution,arp,dhcp}.jsonl`. Modbus pairs
     request/response by (TCP stream, transaction id) because exception responses carry no
     `modbus.request_frame`; TCP retransmissions are skipped. Writes are annotated from the register map
     of the PLC's process profile.
