@@ -88,6 +88,13 @@ def test_every_point_has_a_description_and_a_vendor_register_label(name):
         assert profile.register_label(point) == str(style[point.table] + point.address)
 
 
+def test_register_label_falls_back_to_the_wire_address_without_a_style():
+    profile = ProcessProfile(PROFILES[0])
+    profile.register_style = {}  # a profile that defines no vendor numbering
+    for point in profile.points:
+        assert profile.register_label(point) == str(point.address)
+
+
 @pytest.mark.parametrize("start_hour", [0.0, 7.0, 13.0, 19.0])
 @pytest.mark.parametrize("name", BACKGROUND_PROFILES)
 def test_background_process_stays_in_band_for_two_hours(name, start_hour):
