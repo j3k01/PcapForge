@@ -35,7 +35,8 @@ Status: `[ ]` open, `[~]` partly done.
   - [x] replay of captured legitimate commands (T0855, T0831): `ot-modbus-command-replay`
     (`modbus.replay` actor — re-sends the operator's writes verbatim from an unapproved host; values
     stay in-band, so detection pivots on source and timing);
-  - [ ] coil manipulation with alarm acknowledgement: T0831, T0878;
+  - [x] coil manipulation with alarm acknowledgement (T0855, T0831, T0878): `ot-modbus-coil-manipulation`
+    (`modbus.coil_writer` actor — forces command coils and optionally writes the alarm_ack/reset coil);
   - [ ] alarm-threshold masking followed by a setpoint change.
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
 - [ ] **More protocols as background actors** (M each): IEC 60870-5-104 (`c104`), BACnet/IP (`bacpypes3`), EtherNet/IP/CIP, DNP3.

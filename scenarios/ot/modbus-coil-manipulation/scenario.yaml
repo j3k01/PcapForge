@@ -1,0 +1,280 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-modbus-coil-manipulation
+title: Unauthorized Modbus/TCP coil commands forcing actuator state
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [modbus, ics, coil, command, ot, water, wastewater, hvac, power]
+summary: >
+  A SCADA HMI and a historian poll the PLCs of an industrial site over Modbus/TCP. During the
+  capture a host that is not allowed to command the plant writes Modbus coils that force actuators
+  out of their normal state - stopping a pump, opening a breaker, disabling a fan - and on
+  medium/hard acknowledges the resulting alarm so it clears from the HMI. The status discretes that
+  mirror each command flip accordingly.
+
+briefing: |
+  You are the OT SOC analyst for the {site_name} site ({domain}), {process_title}.
+  The attached capture comes from the SPAN port of the control-network switch ({sensor_subnet}).
+  Only the SCADA HMI and the historian talk Modbus/TCP to the PLCs, and only the engineering
+  workstation is allowed to change parameters. Operators reported equipment changing state on its
+  own and an alarm that cleared without anyone acknowledging it at the HMI. Modbus coil writes
+  (function 5 / 15) command actuators directly; find who sent them, what they forced and whether an
+  alarm was suppressed.
+  The PLC register map is included below.
+
+mitre:
+  - {framework: ics, id: T0855, name: Unauthorized Command Message}
+  - {framework: ics, id: T0831, name: Manipulation of Control}
+  - {framework: ics, id: T0878, name: Alarm Suppression, when: vars.ack}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [wtp, sut, zuw, stw]
+  start_hours: [6, 21]
+  weekdays: [0, 1, 2, 3, 4, 5]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: plc, count: "${vars.plc_count}", device: "${vars.plc_devices}", subnet: control, name: "plc-{code}-{index:02d}"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.writer_host == 'rogue'"}
+    - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.writer_host == 'itpc'"}
+
+actors:
+  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: scada_poll
+    type: modbus.poller
+    hosts: hmi
+    params: {targets: plc, interval: "${vars.hmi_interval}", jitter: 0.03}
+  - id: historian_poll
+    type: modbus.poller
+    hosts: historian
+    params: {targets: plc, interval: 10, jitter: 0.01, groups: [0, 1]}
+  - id: operator_changes
+    type: modbus.operator
+    hosts: ews
+    params: {targets: plc, count: "${vars.operator_writes}"}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian, ews]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian, ews, plc]
+    when: vars.ntp
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian, ews]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The incident: unauthorized coil commands forcing actuators, optionally acknowledging the alarm.
+  - id: force
+    type: modbus.coil_writer
+    hosts: "${vars.writer_host}"
+    incident: true
+    params:
+      targets: plc
+      count: "${vars.forces}"
+      function: "${vars.coil_function}"
+      ack: "${vars.ack}"
+      start: "${vars.start}"
+      spread: "${vars.spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      plc_devices: [schneider-m340, schneider-m340, siemens-s7-1200, rockwell-micro850]
+      process: water_treatment
+      plc_count: 2
+      hmi_interval: 2.0
+      writer_host: rogue
+      forces: [2, 2]
+      coil_function: single
+      ack: false
+      start: [0.4, 0.6]
+      spread: 90
+      operator_writes: 0
+      dns: false
+      ntp: true
+      chatter: false
+      ipv6: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [2, 4]}
+      hmi_interval: 1.0
+      writer_host: itpc
+      forces: [2, 3]
+      coil_function: mixed
+      ack: true
+      start: [0.3, 0.65]
+      spread: 600
+      operator_writes: 2
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 1
+      ipv6: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_count: {range: [3, 5]}
+      hmi_interval: 1.0
+      writer_host: itpc
+      forces: [3, 4]
+      coil_function: multiple
+      ack: true
+      start: [0.25, 0.7]
+      spread: 2400
+      operator_writes: 6
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 2
+      ipv6: true
+
+questions:
+  - id: source_ip
+    text: Which IP address issued the unauthorized Modbus coil commands?
+    answer: "${facts.force.source.ip}"
+    type: ip
+    points: 15
+    hint: Coil writes are Modbus function codes 5 (write single coil) and 15 (write multiple coils). Find who sends them; the SCADA clients only read.
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 15} && ip.src == ${facts.force.source.ip} && !modbus.request_frame"
+      expect: {min: "${facts.force.write_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) | stats count AS writes, values(point) AS coils BY src"
+      kql: "function_code : (5 or 15)"
+      look_for: Every host that writes coils. Only the engineering workstation is allowed to command; any other writer is the answer.
+  - id: target_ip
+    text: Which PLC (IP address) received the coil commands?
+    answer: "${facts.force.target.ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 15} && ip.src == ${facts.force.source.ip} && ip.dst == ${facts.force.target.ip}"
+      expect: {min: "${facts.force.write_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) src=${facts.force.source.ip} | stats count BY dest"
+      kql: "function_code : (5 or 15) and src : \"${facts.force.source.ip}\""
+      look_for: The PLC that received the coil writes.
+  - id: first_force
+    text: At what time (UTC) was the first unauthorized coil command sent?
+    answer: "${facts.force.first_write.time}"
+    type: timestamp
+    tolerance_s: 1
+    points: 10
+    check:
+      filter: "frame.number == ${facts.force.first_write.frame} && modbus.func_code in {5, 15} && ip.src == ${facts.force.source.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) src=${facts.force.source.ip} | sort 0 epoch | head 1 | table ts dest point request_frame"
+      kql: "function_code : (5 or 15) and src : \"${facts.force.source.ip}\""
+      look_for: The earliest coil write from the source; request_frame is the frame to open in Wireshark.
+  - id: coils_forced
+    text: Which coils (register map names) did the source command? List them.
+    answer: "${facts.force.point_names}"
+    type: set
+    points: 15
+    foreach: facts.force.writes
+    check:
+      filter: "mbtcp && ip.src == ${facts.force.source.ip} && ip.dst == ${facts.force.target.ip} && modbus.func_code in {5, 15} && (modbus.reference_num == ${item.address} || modbus.bitnum == ${item.address}) && !modbus.request_frame"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) src=${facts.force.source.ip} | stats values(point) AS coils BY dest"
+      kql: "function_code : (5 or 15) and src : \"${facts.force.source.ip}\""
+      look_for: The coil names come from the register map (coils table) in the briefing.
+  - id: functions_used
+    text: Which Modbus function codes did the source use to command the coils?
+    answer: "${facts.force.function_codes}"
+    type: set
+    points: 10
+    hunt:
+      dataset: modbus
+      wireshark: "mbtcp && ip.src == ${facts.force.source.ip} && modbus.func_code in {5, 15} && !modbus.request_frame"
+      spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) src=${facts.force.source.ip} | stats count BY function_code, function"
+      kql: "function_code : (5 or 15) and src : \"${facts.force.source.ip}\""
+      look_for: 5 = Write Single Coil, 15 = Write Multiple Coils.
+  - id: alarm_suppressed
+    when: vars.ack
+    text: Did the source acknowledge or reset the alarms after forcing the coils? (answer "yes" or "no")
+    answer: "${facts.force.alarm_acknowledged}"
+    type: text
+    accept: [true, "true", "yes"]
+    points: 10
+    hint: Look for a write to the alarm_ack / alarm_reset coil from the same source after the actuator commands.
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) src=${facts.force.source.ip} point IN (alarm_ack, alarm_reset)"
+      kql: "function_code : (5 or 15) and src : \"${facts.force.source.ip}\""
+      look_for: A write to alarm_ack / alarm_reset from the attacker clears the alarm that the forced actuator raised (T0878).
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique best describes commanding actuators with Modbus coils from an unapproved host?
+    answer: T0831
+    accept: [T0831, "Manipulation of Control", T0855, "Unauthorized Command Message", T0878, "Alarm Suppression"]
+    type: text
+    points: 10
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) | stats count BY src, dest"
+      kql: "function_code : (5 or 15)"
+      look_for: >-
+        Coil commands from an unapproved source are Unauthorized Command Message (T0855); forcing actuator
+        state is Manipulation of Control (T0831); clearing the alarm is Alarm Suppression (T0878).
+
+translations:
+  pl:
+    title: Nieautoryzowane polecenia cewek Modbus/TCP wymuszające stan siłowników
+    briefing: |
+      Jesteś analitykiem OT SOC w zakładzie {site_name} ({domain}), {process_title}.
+      Załączone nagranie pochodzi z portu SPAN przełącznika sieci sterowania ({sensor_subnet}).
+      Z PLC przez Modbus/TCP komunikują się tylko HMI SCADA i historian, a parametry może zmieniać
+      wyłącznie stacja inżynierska. Operatorzy zgłosili, że urządzenia samoczynnie zmieniały stan,
+      a alarm skasował się bez potwierdzenia na HMI. Zapisy cewek Modbus (funkcja 5 / 15) sterują
+      siłownikami bezpośrednio; ustal, kto je wysłał, co wymusił i czy alarm został stłumiony.
+      Mapa rejestrów PLC znajduje się poniżej.
+    questions:
+      source_ip:
+        text: Z jakiego adresu IP wysłano nieautoryzowane polecenia cewek Modbus?
+        hint: Zapisy cewek to kody funkcji Modbus 5 (zapis pojedynczej cewki) i 15 (zapis wielu cewek). Znajdź nadawcę; klienci SCADA tylko odczytują.
+      target_ip:
+        text: Który PLC (adres IP) otrzymał polecenia cewek?
+      first_force:
+        text: O której godzinie (UTC) wysłano pierwsze nieautoryzowane polecenie cewki?
+      coils_forced:
+        text: Które cewki (nazwy z mapy rejestrów) wymusił nadawca? Wymień je.
+      functions_used:
+        text: Jakich kodów funkcji Modbus użył nadawca do sterowania cewkami?
+      alarm_suppressed:
+        text: Czy po wymuszeniu cewek nadawca potwierdził lub skasował alarmy? (odpowiedz "yes" lub "no")
+        hint: Poszukaj zapisu do cewki alarm_ack / alarm_reset od tego samego nadawcy po poleceniach siłowników.
+      technique:
+        text: Która technika MITRE ATT&CK for ICS najlepiej opisuje sterowanie siłownikami cewkami Modbus z nieuprawnionego hosta?

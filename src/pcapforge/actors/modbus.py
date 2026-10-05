@@ -328,6 +328,81 @@ class ModbusReplay(ModbusClientActor):
         }
 
 
+@register
+class ModbusCoilWriter(ModbusClientActor):
+    """Forces command coils from a host outside the approved change path: opens a breaker, stops a
+    pump, disables a fan - and, with ``ack``, acknowledges the resulting alarm so it clears from the
+    HMI. MITRE ATT&CK for ICS T0855 (Unauthorized Command Message), T0831 (Manipulation of Control)
+    and, when it suppresses the alarm, T0878 (Alarm Suppression)."""
+
+    type = "modbus.coil_writer"
+    _CONTROL = {"alarm_ack", "alarm_reset", "remote_mode", "spare"}
+
+    def plan(self) -> None:
+        plan, rng = self.plan_, self.rng
+        host = self.hosts[0]
+        target = rng.choice(plan.topology.select(self.param("targets")))
+        profile = serving_profile(plan, target.id)
+        unit = profile.unit_id
+        lo_n, hi_n = (int(v) for v in self.span(self.param("count", [2, 3])))
+        candidates = [p for p in profile.table("coils") if p.writable and p.name not in self._CONTROL]
+        if not candidates:
+            raise ScenarioError(f"{self.type} '{self.id}': '{profile.id}' has no command coils to force")
+        points = sorted(rng.sample(candidates, min(rng.randint(lo_n, hi_n), len(candidates))), key=lambda p: p.address)
+        function_mode = self.param("function", "single")
+        ack = bool(self.param("ack", False))
+        start_lo, start_hi = self.span(self.param("start", [0.3, 0.6]))
+        spread = min(float(self.param("spread", 300)), plan.duration * 0.5)
+        t0 = plan.duration * rng.uniform(start_lo, start_hi)
+        t0 = min(t0, max(plan.duration - spread - 30, plan.duration * 0.1))
+        # Status discretes that mirror a command coil (model {type: above, a: <coil>, b: 0.5}).
+        mirror: dict[str, str] = {}
+        for d in profile.table("discrete"):
+            if d.model and d.model.get("type") == "above" and isinstance(d.model.get("a"), str):
+                mirror.setdefault(d.model["a"], d.name)
+
+        writes = []
+        for point, offset in zip(points, sorted(rng.uniform(0, spread) for _ in points)):
+            to = 0 if point.nominal >= 0.5 else 1  # flip the coil away from its normal state
+            function = {"single": 5, "multiple": 15}.get(function_mode) or rng.choice((5, 15))
+            session = _SessionPlanner(self, host.id, target.id, unit, t0 + offset, rng)
+            action = session.write(function, point.address, [to])
+            session.read(2, 0, profile.size("discrete"))  # the status discretes show the forced state
+            session.close()
+            writes.append({"point": point.name, "table": "coils", "address": point.address, "function": function,
+                           "from": int(point.nominal), "to": to, "status_point": mirror.get(point.name),
+                           "request": action_ref(action)})
+            verb = "opens" if to == 0 else "closes"
+            plan.event(action, self.id, f"Force {point.name} {verb[:-1]}ed on {target.id}", ["T0855", "T0831"],
+                       point=point.name, state=to)
+
+        ack_action = None
+        if ack:
+            coil = next((p for p in profile.table("coils") if p.name in ("alarm_ack", "alarm_reset")), None)
+            if coil is not None:
+                session = _SessionPlanner(self, host.id, target.id, unit, t0 + spread + rng.uniform(1.0, 10.0), rng)
+                ack_action = session.write(5, coil.address, [1])
+                session.close()
+                plan.event(ack_action, self.id, f"Acknowledge alarms on {target.id} ({coil.name})", ["T0878"],
+                           point=coil.name)
+
+        plan.facts[self.id] = {
+            "source": host_ref(host.id),
+            "target": host_ref(target.id),
+            "unit_id": unit,
+            "write_count": len(writes),
+            "writes": writes,
+            "point_names": [w["point"] for w in writes],
+            "forced_states": {w["point"]: w["to"] for w in writes},
+            "affected_status": sorted({w["status_point"] for w in writes if w["status_point"]}),
+            "function_codes": sorted({w["function"] for w in writes}),
+            "alarm_acknowledged": ack_action is not None,
+            "ack": action_ref(ack_action) if ack_action else None,
+            "first_write": min((w["request"] for w in writes), key=lambda r: r["$action"].t),
+            "last_write": max((w["request"] for w in writes), key=lambda r: r["$action"].t),
+        }
+
+
 DEVIATION = {"extreme": (2.5, 5.0), "moderate": (0.5, 1.2), "subtle": (0.08, 0.25)}
 
 
