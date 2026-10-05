@@ -7,7 +7,11 @@
   it leaves: identical bytes, the second copy a store-and-forward delay later;
 * ``sensor_drop``: share of frames the sensor misses (SPAN oversubscription, capture buffer).
   tshark then reports "previous segment not captured" / "ACKed unseen segment";
-* ``vlan``: 802.1Q VLAN id the mirrored frames carry (a SPAN destination that keeps the tag).
+* ``vlan``: 802.1Q VLAN id the mirrored frames carry (a SPAN destination that keeps the tag);
+* ``clock_offset`` / ``clock_drift_ppm``: the sensor's clock error, a number or a ``[lo, hi]``
+  range drawn per seed. Every frame timestamp (and therefore every time in the answer key) is
+  shifted by the offset plus the drift accumulated since the first frame; payload clocks (NTP
+  timestamps, OPC UA times) keep the site's true time, so the analyst can measure the skew.
 
 Frames of actions the answer key refers to, and segments of a message that tshark has to
 reassemble, are never dropped or duplicated: question checks count them, and a missing segment
@@ -29,6 +33,15 @@ SPAN_RATE = 1e9                   # SPAN destination port: copies leave at 1 Gbi
 SWITCH_LATENCY = (1.5e-6, 6e-6)   # forwarding decision until the egress copy
 
 Frame = tuple[float, int, bytes, "Packet | None"]
+
+
+def _draw(value, rng: Rng) -> float:
+    """A knob given as a number, or as ``[lo, hi]`` drawn per seed (rounded to the microsecond)."""
+    if value is None:
+        return 0.0
+    if isinstance(value, (list, tuple)):
+        return round(rng.uniform(float(value[0]), float(value[1])), 6)
+    return float(value)
 
 
 def answer_actions(plan: Plan) -> set[int]:
@@ -56,11 +69,14 @@ class Span:
         vlan = impairments.get("vlan")
         self.tag = TPID + struct.pack("!H", int(vlan)) if vlan else None
         self.rng = rng
+        clock = rng.child("clock")
+        self.clock_offset = _draw(impairments.get("clock_offset"), clock)
+        self.clock_drift = _draw(impairments.get("clock_drift_ppm"), clock) * 1e-6
         self.protected = answer_actions(plan) if self.duplicates or self.drop else set()
 
     @property
     def active(self) -> bool:
-        return bool(self.duplicates or self.drop or self.tag)
+        return bool(self.duplicates or self.drop or self.tag or self.clock_offset or self.clock_drift)
 
     def _eligible(self, p: Packet | None) -> bool:
         return p is None or not (p.train or p.action.id in self.protected)
@@ -75,7 +91,10 @@ class Span:
         copy = self.rng.child("duplicates") if self.duplicates else None
         out: list[Frame] = []
         late: list[Frame] = []
+        t0 = frames[0][0] if frames else 0.0
         for t, index, data, p in frames:
+            if self.clock_offset or self.clock_drift:
+                t = t + self.clock_offset + (t - t0) * self.clock_drift
             if self.tag is not None:
                 data = data[:12] + self.tag + data[12:]
             eligible = self._eligible(p)

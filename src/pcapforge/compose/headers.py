@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pcapforge import ports
+from pcapforge.compose import dhcp
+from pcapforge.compose.link import mac_bytes
 from pcapforge.compose.packets import ACK, SYN, TCP, UDP, Flow, Packet
-from pcapforge.topology import Sink
+from pcapforge.topology import LIMITED_BROADCAST, Sink
 
 if TYPE_CHECKING:
     from pcapforge.plan import Plan
@@ -269,12 +271,20 @@ class Headers:
         state = self._flow(p.flow)
         self._ipid(state, p.side, p.src)
 
-    def build(self, p: Packet, hops: int) -> bytes:
+    def build(self, p: Packet, hops: int, delivery: dhcp.Delivery | None = None) -> bytes:
         flow = p.flow
         state = self._flow(flow)
         side = p.side
         src, dst = state.addrs[side], state.addrs[1 - side]
         sport, dport = state.ports[side], state.ports[1 - side]
+        ttl, df = state.ttl[side], state.df[side]
+        if delivery is not None:
+            if delivery.source is not None:
+                src = delivery.source
+            if delivery.broadcast:
+                stack = state.stacks[side]
+                dst = dhcp.BROADCAST_BYTES
+                ttl, df = stack.link_local.ttl.get(LIMITED_BROADCAST, stack.ttl), stack.link_local.df
         if flow.proto == TCP:
             l4 = self._tcp(p, state, sport, dport)
         else:
@@ -283,6 +293,10 @@ class Headers:
                 payload = rewrite_a_records(payload, lambda rdata: self._dns_address(rdata, flow))
             elif side == 0 and flow.server_port == ports.NBDGM:
                 payload = rewrite_nbdgm_source(payload, lambda ip: self._own_address(ip, flow))
+            elif dhcp.is_dhcp(p):
+                client, server = flow.hosts
+                mac = mac_bytes(self.topology.address_towards(client, server).mac)
+                payload = dhcp.rewrite(payload, lambda ip: self._dhcp_address(ip, flow), mac)
             l4 = _UDP.pack(sport, dport, 8 + len(payload), 0) + payload
         pseudo = src + dst + bytes((0, flow.proto)) + len(l4).to_bytes(2, "big")
         csum = checksum(pseudo + l4)
@@ -291,8 +305,7 @@ class Headers:
         offset = 16 if flow.proto == TCP else 6
         l4 = l4[:offset] + csum.to_bytes(2, "big") + l4[offset + 2:]
         header = _IP.pack(0x45, 0, 20 + len(l4), self._ipid(state, side, p.src),
-                          0x4000 if state.df[side] else 0, max(state.ttl[side] - hops, 1), flow.proto, 0,
-                          src, dst)
+                          0x4000 if df else 0, max(ttl - hops, 1), flow.proto, 0, src, dst)
         header = header[:10] + checksum(header).to_bytes(2, "big") + header[12:]
         return header + l4
 
@@ -326,3 +339,11 @@ class Headers:
         """Final address of the host whose loopback ``ip`` is, as the flow's server sees it."""
         host = self.loopback.get(ip)
         return None if host is None else self.address(host, flow.hosts[1])
+
+    def _dhcp_address(self, ip: bytes, flow: Flow) -> bytes | None:
+        """Final address of the host whose loopback ``ip`` is, as the DHCP client / server sees it."""
+        host = self.loopback.get(ip)
+        if host is None:
+            return None
+        client, server = flow.hosts
+        return self.address(host, server if host is client else client)

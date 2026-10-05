@@ -20,7 +20,7 @@ Status: `[ ]` open, `[~]` partly done.
   - duplicated frames (a SPAN that mirrors both directions);
   - sensor drops ("ACKed unseen segment");
   - 802.1Q VLAN tags;
-  - sensor clock offset/drift (still open).
+  - sensor clock offset/drift: `impairments.clock_offset` and `clock_drift_ppm` (number or per-seed range); answers.json records the applied values under `capture.sensor_clock`.
 - [ ] **DHCPv4** (M): leases and renewals for DHCP-managed hosts (IT side of the OT DMZ, laptops); static IPs stay on the control LAN.
 - [ ] **Windows domain baseline** (L): Kerberos/LDAP/SMB to the DC using a *synthetic* local directory, e.g. a Samba AD container. Never the machine's real credentials.
 - [ ] **Long captures** (M): 24 h and multi-million packets. Needs a streaming compose and memory profiling, and a check that recording time scales linearly.
@@ -65,7 +65,7 @@ Status: `[ ]` open, `[~]` partly done.
 
 ## 6. Platform and project
 
-- [ ] **Publish to PyPI** (S): check that the `pcapforge` name is free; add a trusted-publishing workflow on tags.
+- [~] **Publish to PyPI** (S): the wheel now ships the scenarios (`pcapforge._scenarios`), and a manual trusted-publishing workflow exists (`.github/workflows/publish.yml`). Still open: the name `pcapforge` is taken on PyPI by an unrelated project, so a distribution name has to be chosen before publishing.
 - [ ] **Docker image** (M): Wireshark, Suricata and pcapforge with rootless capture, so Windows/macOS users don't need Npcap or WSL.
 - [ ] **macOS support check** (S): loopback aliases for 127.77.0.0/16 and a CI job on `macos-latest`.
 - [ ] **Docs site** (S): MkDocs with the scenario authoring guide, the actor/profile reference generated from code, and the answers.json schema.

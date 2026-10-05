@@ -62,3 +62,20 @@ def test_vlan_tag_follows_the_mac_addresses_on_every_frame():
 def test_no_impairments_leave_the_frames_untouched():
     frames = wire(100)
     assert span(retransmit_rate=0.001, mid_session=True).apply(frames) is frames
+
+
+def test_sensor_clock_shifts_every_frame_by_offset_plus_accumulated_drift():
+    frames = wire(1000)  # 1 ms apart
+    out = span(clock_offset=2.5, clock_drift_ppm=100).apply(frames)
+    t0 = frames[0][0]
+    for (before, *_), (after, *_) in zip(frames, out):
+        assert abs(after - (before + 2.5 + (before - t0) * 100e-6)) < 1e-9
+    assert [f[2] for f in out] == [f[2] for f in frames]  # bytes untouched, order kept
+
+
+def test_sensor_clock_range_is_drawn_per_seed_within_bounds():
+    drawn = {span(clock_offset=[-90, 90]).clock_offset for _ in range(3)}
+    assert len(drawn) == 1  # same seed -> same draw
+    plan = SimpleNamespace(impairments={"clock_offset": [-90, 90]}, events=[], facts={})
+    other = Span(plan, Rng("test", "other"))
+    assert -90 <= other.clock_offset <= 90 and other.clock_offset not in drawn

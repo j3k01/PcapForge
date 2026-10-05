@@ -194,6 +194,7 @@ def build_answers(plan: Plan, result: ComposeResult) -> dict:
             "end": iso_utc(result.last_epoch),
             "duration_s": round(result.last_epoch - result.first_epoch, 6),
             "sensor_subnet": sensor_subnet(plan),
+            "sensor_clock": dict(getattr(result, "sensor_clock", {"offset_s": 0.0, "drift_ppm": 0.0})),
         },
         "topology": {
             "site_name": topo.site_name,

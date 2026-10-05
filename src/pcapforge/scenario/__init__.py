@@ -161,7 +161,8 @@ def search_paths(extra: Path | None = None) -> list[Path]:
     if env := os.environ.get("PCAPFORGE_SCENARIOS"):
         paths.extend(Path(p) for p in env.split(os.pathsep))
     paths.append(Path.cwd() / "scenarios")
-    paths.append(Path(__file__).resolve().parents[3] / "scenarios")
+    paths.append(Path(__file__).resolve().parents[3] / "scenarios")   # source checkout
+    paths.append(Path(__file__).resolve().parents[1] / "_scenarios")  # installed wheel
     seen, unique = set(), []
     for p in paths:
         key = p.resolve()

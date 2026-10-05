@@ -21,6 +21,8 @@ from pcapforge.scenario import ScenarioError, evaluate_when, resolve
 LOOPBACK_NET = "127.77"
 MARKER_SINK = f"{LOOPBACK_NET}.0.1"
 BROADCAST_MAC = "ff:ff:ff:ff:ff:ff"
+LIMITED_BROADCAST = "255.255.255.255"  # DHCP: never forwarded, Ethernet broadcast
+UNSPECIFIED = "0.0.0.0"                # source of a DHCP client that has no address yet
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,10 @@ class Topology:
                 code=self.site_code, CODE=self.site_code.upper(), index=host.index)
         self.by_id = {h.id: h for h in self.hosts}
         self.by_loopback = {h.loopback: h for h in self.hosts}
+        # DHCP (set while planning): subnet id -> (first, last) host offset of the server's pool,
+        # and the hosts that lease their address from it.
+        self.pools: dict[str, tuple[int, int]] = {}
+        self.leased: set[str] = set()
         self.addressed = False
 
     # -- references -----------------------------------------------------------------
@@ -193,11 +199,22 @@ class Topology:
             sid = members[0].subnets[0]
             net = self.subnets[sid].network
             size = net.num_addresses
-            # Engineers allocate device groups as contiguous blocks.
+            pool = self.pools.get(sid)
+            leased = {h.id in self.leased for h in members}
+            if len(leased) > 1:
+                raise ScenarioError(f"hosts of '{group}' must all lease their address via DHCP or none")
+            dynamic = pool is not None and leased == {True}
+            if dynamic:
+                lo, hi = pool[0], pool[1] - len(members) + 1
+            else:
+                lo, hi = 10, min(size - 2 - len(members), 240)
+            reserved = set(range(pool[0], pool[1] + 1)) if pool is not None and not dynamic else set()
+            # Engineers allocate device groups as contiguous blocks; static addresses stay out of
+            # the DHCP pool and leases come from it.
             for _ in range(200):
-                base = rng.randint(10, min(size - 2 - len(members), 240))
+                base = rng.randint(lo, hi)
                 block = set(range(base, base + len(members)))
-                if not block & used_ips[sid]:
+                if not block & used_ips[sid] and not block & reserved:
                     break
             else:
                 raise ScenarioError(f"cannot place {len(members)} hosts of '{group}' in {net}")

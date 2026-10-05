@@ -9,7 +9,7 @@ presentation seed, so the same plan, recording and seed always give a byte-ident
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,6 +38,8 @@ class ComposeResult:
     last_epoch: float
     action_frames: dict[int, int]   # action id -> 1-based frame number of the action's request
     action_times: dict[int, float]  # action id -> epoch timestamp of that frame
+    # Sensor clock error applied to every frame timestamp: offset (s) and drift (ppm).
+    sensor_clock: dict[str, float] = field(default_factory=lambda: {"offset_s": 0.0, "drift_ppm": 0.0})
 
 
 def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap") -> ComposeResult:
@@ -79,7 +81,8 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
     if not frames:
         raise ComposeError("no packet of the recording is visible at the sensor")
     frames.sort(key=lambda f: (f[0], f[1]))
-    frames = Span(plan, present.child("span")).apply(frames)
+    span = Span(plan, present.child("span"))
+    frames = span.apply(frames)
 
     micros = [round(f[0] * 1_000_000) for f in frames]
     out = Path(out)
@@ -104,4 +107,5 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
         last_epoch=micros[-1] / 1_000_000,
         action_frames=action_frames,
         action_times={aid: micros[n - 1] / 1_000_000 for aid, n in action_frames.items()},
+        sensor_clock={"offset_s": span.clock_offset, "drift_ppm": round(span.clock_drift * 1e6, 3)},
     )

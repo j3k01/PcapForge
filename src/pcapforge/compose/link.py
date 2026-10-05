@@ -29,8 +29,15 @@ def pad(frame: bytes) -> bytes:
     return frame + b"\x00" * (MIN_FRAME - len(frame)) if len(frame) < MIN_FRAME else frame
 
 
+def arp_request(sender_mac: bytes, sender_ip: bytes, target_ip: bytes) -> bytes:
+    """Broadcast ARP request (who-has ``target_ip``); sender 0.0.0.0 is an RFC 5227 probe,
+    sender == target an announcement."""
+    return pad(BROADCAST + sender_mac + ETHERTYPE_ARP + _ARP.pack(
+        1, 0x0800, 6, 4, 1, sender_mac, sender_ip, b"\x00" * 6, target_ip))
+
+
 class Link:
-    def __init__(self, plan: Plan, network: Network, rng: Rng) -> None:
+    def __init__(self, plan: Plan, network: Network, rng: Rng, joining: frozenset[str] = frozenset()) -> None:
         topology = plan.topology
         self.topology = topology
         self.sensor = topology.sensor
@@ -39,6 +46,8 @@ class Link:
         self.rng = rng
         self.start = plan.start_epoch
         self.mid_session = bool(plan.impairments.get("mid_session"))
+        # Hosts that join the segment during the capture: nobody has them in an ARP cache yet.
+        self.joining = joining
         # ARP cache lifetime of each host (Windows / Linux reachable-time style aging).
         self.cache_s = {h.id: rng.uniform(30.0, 120.0) for h in topology.hosts}
         self.last_contact: dict[tuple[str, str], float] = {}
@@ -66,7 +75,7 @@ class Link:
         sender, target = self._neighbour(src), self._neighbour(dst)
         key = (sender.id, target.id) if sender.id < target.id else (target.id, sender.id)
         last = self.last_contact.get(key)
-        if last is None and self.mid_session:
+        if last is None and self.mid_session and sender.id not in self.joining and target.id not in self.joining:
             last = self.start  # capture starts mid-session: caches are warm
         self.last_contact[key] = t
         if last is not None and t - last <= self.cache_s[sender.id]:
@@ -78,8 +87,7 @@ class Link:
         s_ip, t_ip = socket.inet_aton(s_if.ip), socket.inet_aton(t_if.ip)
         reply_t = t - rng.uniform(20e-6, 80e-6)
         request_t = reply_t - self.network.round_trip(target, rng) - rng.uniform(40e-6, 250e-6)
-        request = BROADCAST + s_mac + ETHERTYPE_ARP + _ARP.pack(
-            1, 0x0800, 6, 4, 1, s_mac, s_ip, b"\x00" * 6, t_ip)
+        request = arp_request(s_mac, s_ip, t_ip)
         reply = s_mac + t_mac + ETHERTYPE_ARP + _ARP.pack(
             1, 0x0800, 6, 4, 2, t_mac, t_ip, s_mac, s_ip)
-        return [(request_t, pad(request)), (reply_t, pad(reply))]
+        return [(request_t, request), (reply_t, pad(reply))]

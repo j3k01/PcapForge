@@ -24,11 +24,22 @@ s7 = ["python-snap7>=3.2,<4"]
 [project.scripts]
 pcapforge = "pcapforge.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+# Scenarios live at the repository root (CC-BY-4.0) and ship inside the wheel as pcapforge._scenarios.
+# Packages are listed explicitly because of that mapping; tests/test_packaging.py keeps the list complete.
+package-dir = {"" = "src", "pcapforge._scenarios" = "scenarios"}
+packages = [
+    "pcapforge",
+    "pcapforge.actors",
+    "pcapforge.compose",
+    "pcapforge.profiles",
+    "pcapforge.scenario",
+    "pcapforge._scenarios",
+]
 
 [tool.setuptools.package-data]
 pcapforge = ["**/*.json", "**/*.yaml"]
+"pcapforge._scenarios" = ["**/*.yaml", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

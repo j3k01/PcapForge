@@ -138,7 +138,7 @@ difficulty:
       ipv6: false
   medium:
     duration: 45m
-    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20}
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
     vars:
       plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
       process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
@@ -154,7 +154,7 @@ difficulty:
       ipv6: true
   hard:
     duration: 2h
-    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120}
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
     vars:
       plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
       process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
