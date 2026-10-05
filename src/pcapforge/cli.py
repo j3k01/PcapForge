@@ -1,4 +1,4 @@
-"""Command-line interface: `pcapforge list|show|validate|generate|verify|export|grade|package`."""
+"""Command-line interface: `pcapforge list|show|validate|generate|verify|export|grade|package|report`."""
 
 from __future__ import annotations
 
@@ -172,6 +172,19 @@ def cmd_package(args) -> int:
     return 0
 
 
+def cmd_report(args) -> int:
+    from pcapforge.report import ReportError, write_report
+
+    try:
+        path = write_report(Path(args.run_dir), Path(args.out) if args.out else None,
+                            Path(args.grades) if args.grades else None)
+    except (OSError, KeyError, ReportError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(path)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pcapforge", description=(
         "Generate realistic, labeled PCAPs with answer keys for blue-team training."))
@@ -232,6 +245,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("run_dirs", nargs="+", metavar="run_dir", help="run directory from generate")
     p.add_argument("--out", "-o", help="output directory (default: next to the run directory)")
     p.set_defaults(func=cmd_package)
+
+    p = sub.add_parser("report", help="write a self-contained HTML debrief (timeline, process charts, answers)")
+    p.add_argument("run_dir", help="run directory from generate")
+    p.add_argument("--grades", help="JSON from `pcapforge grade --json` to add class results")
+    p.add_argument("--out", "-o", help="output file (default: <run_dir>/report.html)")
+    p.set_defaults(func=cmd_report)
     return parser
 
 
