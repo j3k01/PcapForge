@@ -272,14 +272,16 @@ def write_handout(plan: Plan, answers: dict, out_dir: Path) -> Path:
         profile, hosts = profiles.setdefault(name, (ProcessProfile(name), []))
         hosts.extend(h.name for h in actor.hosts)
     for profile, hosts in profiles.values():
+        addressing = t["regmap_addr_vendor"] if profile.register_style else t["regmap_addr_zero"]
         lines += [f"## {t['register_map'].format(title=profile.titles.get(lang, profile.title))}", "",
-                  t["regmap_note"].format(unit=profile.unit_id, hosts=", ".join(hosts)), ""]
+                  t["regmap_note"].format(unit=profile.unit_id, hosts=", ".join(hosts), addressing=addressing), ""]
         rows = []
         for table in ("coils", "discrete", "holding", "input"):
             for point in profile.table(table):
                 band = f"{_number(point.normal[0])} – {_number(point.normal[1])}" if point.normal else "-"
-                rows.append([table, point.address, point.name, point.unit or "-", _number(point.scale),
-                             band, t["yes"] if point.writable else t["no"]])
+                rows.append([table, profile.register_label(point), point.name, point.desc or "-",
+                             point.unit or "-", _number(point.scale), band,
+                             t["yes"] if point.writable else t["no"]])
         lines += _table(t["regmap_cols"], rows) + [""]
 
     lines += [f"## {t['questions']}", ""]

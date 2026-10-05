@@ -4,6 +4,8 @@
 # by `scale` and stored as unsigned 16-bit integers.
 # `normal` is the operating band an operator would consider routine; values written
 # outside it are what an analyst should notice.
+# `desc` is a short human description shown in the handout register map.
+# `register_style` labels the map in the vendor (Modicon) convention; the wire stays 0-based.
 #
 # Models:
 #   const   — nominal value plus optional noise
@@ -16,50 +18,51 @@
 id: water_treatment
 title: Drinking-water treatment — clearwell and chlorination
 unit_id: 1
+register_style: {coils: 1, discrete: 10001, input: 30001, holding: 40001}
 
 holding:
-  - {address: 0, name: clearwell_level_sp, unit: cm, scale: 1, nominal: 350, normal: [320, 380], writable: true}
-  - {address: 1, name: chlorine_dose_sp, unit: mg/L, scale: 100, nominal: 1.8, normal: [1.2, 2.4], writable: true}
-  - {address: 2, name: pump1_speed_sp, unit: "%", scale: 10, nominal: 72, normal: [55, 90], writable: true}
-  - {address: 3, name: ph_sp, unit: pH, scale: 100, nominal: 7.2, normal: [6.9, 7.6], writable: true}
-  - {address: 4, name: level_high_alarm, unit: cm, scale: 1, nominal: 450, normal: [430, 470], writable: true}
-  - {address: 5, name: level_low_alarm, unit: cm, scale: 1, nominal: 120, normal: [100, 150], writable: true}
-  - {address: 6, name: chlorine_high_alarm, unit: mg/L, scale: 100, nominal: 4.0, normal: [3.5, 4.5], writable: true}
-  - {address: 7, name: pid_level_kp, unit: "", scale: 100, nominal: 1.25, normal: [0.8, 2.0], writable: true}
-  - {address: 8, name: pid_level_ti, unit: s, scale: 1, nominal: 240, normal: [120, 400], writable: true}
-  - {address: 9, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true}
+  - {address: 0, name: clearwell_level_sp, unit: cm, scale: 1, nominal: 350, normal: [320, 380], writable: true, desc: Clearwell level setpoint}
+  - {address: 1, name: chlorine_dose_sp, unit: mg/L, scale: 100, nominal: 1.8, normal: [1.2, 2.4], writable: true, desc: Chlorine dosing setpoint}
+  - {address: 2, name: pump1_speed_sp, unit: "%", scale: 10, nominal: 72, normal: [55, 90], writable: true, desc: Lead pump speed setpoint}
+  - {address: 3, name: ph_sp, unit: pH, scale: 100, nominal: 7.2, normal: [6.9, 7.6], writable: true, desc: pH correction setpoint}
+  - {address: 4, name: level_high_alarm, unit: cm, scale: 1, nominal: 450, normal: [430, 470], writable: true, desc: Clearwell high-level alarm threshold}
+  - {address: 5, name: level_low_alarm, unit: cm, scale: 1, nominal: 120, normal: [100, 150], writable: true, desc: Clearwell low-level alarm threshold}
+  - {address: 6, name: chlorine_high_alarm, unit: mg/L, scale: 100, nominal: 4.0, normal: [3.5, 4.5], writable: true, desc: Chlorine residual high alarm threshold}
+  - {address: 7, name: pid_level_kp, unit: "", scale: 100, nominal: 1.25, normal: [0.8, 2.0], writable: true, desc: Level PID proportional gain}
+  - {address: 8, name: pid_level_ti, unit: s, scale: 1, nominal: 240, normal: [120, 400], writable: true, desc: Level PID integral time}
+  - {address: 9, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: Control mode (1 manual, 2 auto)}
 
 input:
-  - {address: 0, name: clearwell_level, unit: cm, scale: 1, nominal: 350, model: {type: follow, source: clearwell_level_sp, tau: 900, noise: 1.2}}
-  - {address: 1, name: chlorine_residual, unit: mg/L, scale: 100, nominal: 1.1, model: {type: follow, source: chlorine_dose_sp, gain: 0.62, tau: 1200, noise: 0.015}}
-  - {address: 2, name: pump1_speed, unit: "%", scale: 10, nominal: 72, model: {type: follow, source: pump1_speed_sp, tau: 25, noise: 0.3}}
-  - {address: 3, name: ph, unit: pH, scale: 100, nominal: 7.2, model: {type: follow, source: ph_sp, tau: 1800, noise: 0.01}}
-  - {address: 4, name: inlet_flow, unit: m3/h, scale: 10, nominal: 118, model: {type: daily, amplitude: 22, phase_h: 13, noise: 1.5}}
-  - {address: 5, name: outlet_flow, unit: m3/h, scale: 10, nominal: 115, model: {type: daily, amplitude: 25, phase_h: 13.5, noise: 1.8}}
-  - {address: 6, name: water_temp, unit: degC, scale: 10, nominal: 11.5, normal: [10.5, 12.5], model: {type: walk, step: 0.004}}
-  - {address: 7, name: turbidity, unit: NTU, scale: 100, nominal: 0.18, normal: [0.08, 0.35], model: {type: walk, step: 0.002}}
-  - {address: 8, name: pump1_runtime_h, unit: h, scale: 1, nominal: 18214, model: {type: counter, rate: 0.000277778}}
-  - {address: 9, name: treated_volume_m3, unit: m3, scale: 1, nominal: 40321, model: {type: counter, rate: 0.032}}
+  - {address: 0, name: clearwell_level, unit: cm, scale: 1, nominal: 350, desc: Measured clearwell level, model: {type: follow, source: clearwell_level_sp, tau: 900, noise: 1.2}}
+  - {address: 1, name: chlorine_residual, unit: mg/L, scale: 100, nominal: 1.1, desc: Measured free chlorine residual, model: {type: follow, source: chlorine_dose_sp, gain: 0.62, tau: 1200, noise: 0.015}}
+  - {address: 2, name: pump1_speed, unit: "%", scale: 10, nominal: 72, desc: Lead pump speed feedback, model: {type: follow, source: pump1_speed_sp, tau: 25, noise: 0.3}}
+  - {address: 3, name: ph, unit: pH, scale: 100, nominal: 7.2, desc: Measured pH, model: {type: follow, source: ph_sp, tau: 1800, noise: 0.01}}
+  - {address: 4, name: inlet_flow, unit: m3/h, scale: 10, nominal: 118, desc: Raw-water inlet flow, model: {type: daily, amplitude: 22, phase_h: 13, noise: 1.5}}
+  - {address: 5, name: outlet_flow, unit: m3/h, scale: 10, nominal: 115, desc: Treated-water outlet flow, model: {type: daily, amplitude: 25, phase_h: 13.5, noise: 1.8}}
+  - {address: 6, name: water_temp, unit: degC, scale: 10, nominal: 11.5, normal: [10.5, 12.5], desc: Water temperature, model: {type: walk, step: 0.004}}
+  - {address: 7, name: turbidity, unit: NTU, scale: 100, nominal: 0.18, normal: [0.08, 0.35], desc: Treated-water turbidity, model: {type: walk, step: 0.002}}
+  - {address: 8, name: pump1_runtime_h, unit: h, scale: 1, nominal: 18214, desc: Lead pump run-hours counter, model: {type: counter, rate: 0.000277778}}
+  - {address: 9, name: treated_volume_m3, unit: m3, scale: 1, nominal: 40321, desc: Treated-volume totaliser, model: {type: counter, rate: 0.032}}
 
 coils:
-  - {address: 0, name: pump1_run, nominal: 1, writable: true}
-  - {address: 1, name: pump2_run, nominal: 0, writable: true}
-  - {address: 2, name: dosing_pump_run, nominal: 1, writable: true}
-  - {address: 3, name: inlet_valve_open, nominal: 1, writable: true}
-  - {address: 4, name: backwash_request, nominal: 0, writable: true}
-  - {address: 5, name: alarm_ack, nominal: 0, writable: true}
-  - {address: 6, name: remote_mode, nominal: 1, writable: true}
-  - {address: 7, name: spare, nominal: 0, writable: true}
+  - {address: 0, name: pump1_run, nominal: 1, writable: true, desc: Lead pump run command}
+  - {address: 1, name: pump2_run, nominal: 0, writable: true, desc: Standby pump run command}
+  - {address: 2, name: dosing_pump_run, nominal: 1, writable: true, desc: Chlorine dosing pump run command}
+  - {address: 3, name: inlet_valve_open, nominal: 1, writable: true, desc: Inlet valve open command}
+  - {address: 4, name: backwash_request, nominal: 0, writable: true, desc: Filter backwash request}
+  - {address: 5, name: alarm_ack, nominal: 0, writable: true, desc: Alarm acknowledge}
+  - {address: 6, name: remote_mode, nominal: 1, writable: true, desc: Remote/SCADA control enabled}
+  - {address: 7, name: spare, nominal: 0, writable: true, desc: Spare}
 
 discrete:
-  - {address: 0, name: level_high, nominal: 0, model: {type: above, a: clearwell_level, b: level_high_alarm}}
-  - {address: 1, name: level_low, nominal: 0, model: {type: below, a: clearwell_level, b: level_low_alarm}}
-  - {address: 2, name: chlorine_high, nominal: 0, model: {type: above, a: chlorine_residual, b: chlorine_high_alarm}}
-  - {address: 3, name: pump1_fault, nominal: 0}
-  - {address: 4, name: dosing_pump_fault, nominal: 0}
-  - {address: 5, name: door_open, nominal: 0}
-  - {address: 6, name: power_ok, nominal: 1}
-  - {address: 7, name: spare, nominal: 0}
+  - {address: 0, name: level_high, nominal: 0, desc: Clearwell high-level alarm, model: {type: above, a: clearwell_level, b: level_high_alarm}}
+  - {address: 1, name: level_low, nominal: 0, desc: Clearwell low-level alarm, model: {type: below, a: clearwell_level, b: level_low_alarm}}
+  - {address: 2, name: chlorine_high, nominal: 0, desc: Chlorine residual high alarm, model: {type: above, a: chlorine_residual, b: chlorine_high_alarm}}
+  - {address: 3, name: pump1_fault, nominal: 0, desc: Lead pump fault}
+  - {address: 4, name: dosing_pump_fault, nominal: 0, desc: Dosing pump fault}
+  - {address: 5, name: door_open, nominal: 0, desc: Cabinet door open}
+  - {address: 6, name: power_ok, nominal: 1, desc: Supply power healthy}
+  - {address: 7, name: spare, nominal: 0, desc: Spare}
 
 # What a SCADA/HMI reads every cycle (function code, table, start, count).
 poll_groups:

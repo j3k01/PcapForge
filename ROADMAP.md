@@ -42,7 +42,7 @@ Status: `[ ]` open, `[~]` partly done.
     setpoint it guarded out of band, in that order).
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
 - [ ] **More protocols as background actors** (M each): IEC 60870-5-104 (`c104`), BACnet/IP (`bacpypes3`), EtherNet/IP/CIP, DNP3.
-- [~] **Process-model polish** (S): translated process titles (pl: done); still open: point descriptions, more device profiles (ABB, Honeywell, Phoenix Contact), and per-vendor register-map styles (1-based addressing, 32-bit floats across two registers).
+- [~] **Process-model polish** (S): translated process titles (pl), point descriptions on every register, and a vendor register-numbering convention in the handout (`register_style`, Modicon 4xxxx/3xxxx/1xxxx; the wire stays 0-based) — all done. Device profiles for ABB, Honeywell and Phoenix Contact already ship. Still open: 32-bit floats across two registers (cross-cutting — touches the wire, answer-key filters and the SIEM decode, so a dedicated change).
 
 ## 3. IT line (benign equivalents only, see CONTRIBUTING.md)
 
