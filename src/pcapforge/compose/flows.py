@@ -40,7 +40,9 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> list[Packet]:
     """Packets that belong in the output, in recorded order, each bound to flow and action.
 
     Markers set the current action; a client packet with payload/SYN/FIN binds its flow to
-    it and every other packet inherits the flow's action. Packets before the first marker,
+    it, and so does a server packet with payload while the current action is the server
+    host's own (a server-initiated message: unsolicited / spontaneous data, notifications).
+    Every other packet inherits the flow's action. Packets before the first marker,
     of ``teardown`` actions and (with ``impairments.mid_session``) of ``setup`` actions are
     dropped. Datagrams to a sink (multicast group / subnet broadcast) get the sink as peer.
     """
@@ -111,6 +113,8 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> list[Packet]:
                 # so it would only show up as a duplicate ACK.
                 continue
         if side == 0 and (payload or proto == UDP or flags & (SYN | FIN)):
+            flow.action = current
+        elif side == 1 and payload and current.host == src_host.id:
             flow.action = current
         action = flow.action
         if action is None or action.phase == "teardown" or (action.phase == "setup" and mid_session):

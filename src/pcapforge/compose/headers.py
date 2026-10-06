@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from pcapforge import ports
 from pcapforge.compose import dhcp
+from pcapforge.compose.enip import rewrite_list_identity
 from pcapforge.compose.link import mac_bytes
 from pcapforge.compose.packets import ACK, SYN, TCP, UDP, Flow, Packet
 from pcapforge.topology import LIMITED_BROADCAST, Sink
@@ -174,6 +175,10 @@ class Headers:
         self.host_ipid: dict[str, int] = {}
         self.port_cursor: dict[str, int] = {}
         self.ports_used: dict[str, set[int]] = {}
+        # (host id, recorded port) -> final port of the host's UDP client sockets, so a datagram
+        # answering such a socket from a new flow (an EtherNet/IP ListIdentity reply to the
+        # browse broadcast) goes to the port the request came from.
+        self.udp_sockets: dict[tuple[str, int], int] = {}
         self.loopback = {socket.inet_aton(h.loopback): h for h in self.topology.hosts}
         self._addr: dict[tuple[str, str], bytes] = {}
 
@@ -207,7 +212,7 @@ class Headers:
         agreed = negotiate(cstack, sstack) if flow.proto == TCP else None
         state = self.flows[flow] = _FlowHeaders(
             addrs=(self.address(client, server), self.address(server, client)),
-            ports=(self._client_port(flow), ports.WELL_KNOWN.get(flow.server_port, flow.server_port)),
+            ports=(self._client_port(flow), self._server_port(flow)),
             stacks=(cstack, sstack),
             ttl=ttls,
             df=dfs,
@@ -225,7 +230,18 @@ class Headers:
         recorded = flow.client_port
         if recorded in ports.WELL_KNOWN:  # e.g. w32time sends from 123
             return ports.WELL_KNOWN[recorded]
-        return self.ephemeral(flow.hosts[0], self.rng)
+        port = self.ephemeral(flow.hosts[0], self.rng)
+        if flow.proto == UDP:
+            self.udp_sockets[(flow.hosts[0].id, recorded)] = port
+        return port
+
+    def _server_port(self, flow: Flow) -> int:
+        recorded = flow.server_port
+        if recorded in ports.WELL_KNOWN:
+            return ports.WELL_KNOWN[recorded]
+        if flow.proto == UDP:
+            return self.udp_sockets.get((flow.hosts[1].id, recorded), recorded)
+        return recorded
 
     def ephemeral(self, host: Host, rng: Rng) -> int:
         """Next ephemeral port of ``host`` (shared by its IPv4 and IPv6 sockets)."""
@@ -297,6 +313,8 @@ class Headers:
                 client, server = flow.hosts
                 mac = mac_bytes(self.topology.address_towards(client, server).mac)
                 payload = dhcp.rewrite(payload, lambda ip: self._dhcp_address(ip, flow), mac)
+            elif self._sender_port(p) == ports.ENIP:
+                payload = rewrite_list_identity(payload, lambda ip: self._announced_address(ip, p))
             l4 = _UDP.pack(sport, dport, 8 + len(payload), 0) + payload
         pseudo = src + dst + bytes((0, flow.proto)) + len(l4).to_bytes(2, "big")
         csum = checksum(pseudo + l4)
@@ -329,7 +347,20 @@ class Headers:
             options = struct.pack("!BBBBII", 1, 1, 8, 10, tsval, tsecr) if state.ts else b""
         header = _TCP.pack(sport, dport, seq, ack, (20 + len(options)) << 2, p.flags & 0x3F,
                            min(window, 0xFFFF), 0, 0)
-        return header + options + p.payload
+        payload = p.payload
+        if self._sender_port(p) == ports.ENIP:
+            payload = rewrite_list_identity(payload, lambda ip: self._announced_address(ip, p))
+        return header + options + payload
+
+    @staticmethod
+    def _sender_port(p: Packet) -> int:
+        """Recorded port the packet was sent from."""
+        return p.flow.client_port if p.side == 0 else p.flow.server_port
+
+    def _announced_address(self, ip: bytes, p: Packet) -> bytes | None:
+        """Final address of the host whose loopback ``ip`` is, as the packet's receiver sees it."""
+        host = self.loopback.get(ip)
+        return None if host is None else self.address(host, p.flow.hosts[1 - p.side])
 
     def _dns_address(self, rdata: bytes, flow: Flow) -> bytes | None:
         host = self.loopback.get(rdata)

@@ -52,6 +52,9 @@ class Runtime:
     clients: dict = field(default_factory=dict)
     servers: list = field(default_factory=list)
     transports: list = field(default_factory=list)
+    # Event loop of the services thread: a server actor's own actions (server-initiated
+    # messages) run their coroutines there with ``asyncio.run_coroutine_threadsafe``.
+    loop: asyncio.AbstractEventLoop | None = None
 
     def loopback(self, host_id: str) -> str:
         return self.plan.topology.by_id[host_id].loopback
@@ -171,6 +174,7 @@ def _prepare_linux_loopback() -> None:
 
 def _start_services(rt: Runtime) -> tuple[asyncio.AbstractEventLoop, threading.Thread]:
     loop = asyncio.new_event_loop()
+    rt.loop = loop
     thread = threading.Thread(target=loop.run_forever, name="pcapforge-services", daemon=True)
     thread.start()
 

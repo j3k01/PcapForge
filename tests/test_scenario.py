@@ -26,6 +26,8 @@ def test_references_keep_type_when_whole_string_and_interpolate_otherwise():
 @pytest.mark.parametrize("expr, expected", [
     ("vars.flag", True), ("not vars.flag", False), ("vars.host == 'ews'", True),
     ("vars.host != 'ews'", False), ("vars.absent", False), (None, True),
+    ("vars.flag and vars.host == 'ews'", True), ("vars.flag and vars.host == 'hmi'", False),
+    ("vars.host == 'ews' and not vars.absent", True),
 ])
 def test_conditions(expr, expected):
     assert evaluate_when(expr, {"vars": {"flag": 1, "host": "ews"}}) is expected

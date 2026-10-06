@@ -19,10 +19,12 @@ detection-engineering exercises. All traffic comes from benign services and clie
    Recording is cached by plan hash → byte-identical output for the same seed.
 3. **Compose**:
    - flow assignment: a client-sent payload/SYN/FIN packet binds its flow to the latest
-     marker; server replies and pure ACKs inherit the flow's current action;
+     marker, as does a server payload when the marker is the server host's own action
+     (server-initiated data); other server replies and pure ACKs inherit the flow's current action;
    - causal retime: packets keep recorded order; gaps replaced by
      latency-to-sensor (per host) + processing time (per profile) + jitter;
-   - rewrite: IP/MAC/ports (15020→502, 15353→53, 15123→123, 14840→4840, 10102→102), ephemeral ports per OS
+   - rewrite: IP/MAC/ports (15020→502, 15353→53, 15123→123, 14840→4840, 10102→102, 12404→2404, 20020→20000,
+     17808→47808, 14818→44818), ephemeral ports per OS
      profile, ISN per flow, TTL (−1 per routed hop), IP-ID behaviour, TCP options /
      window per OS profile, checksums recomputed;
    - L2: sensor = SPAN on one subnet; routed packets carry gateway MAC; ARP synthesized
@@ -183,6 +185,27 @@ subscription (`vars.opcua`), see below.
     per PLC; CreateMonitoredItems per tag group); the composer does not segment. Seed 42, `--siem`: medium
     198 636 packets (OPC UA on 4840: 15 115 frames; 4 044 Publish and 539 Read request/response pairs), hard
     693 656 (52 647; 14 396 Publish, 1 439 Read, 2 OpenSecureChannel Renew), both verified.
+- Telecontrol and Logix background (medium/hard, `vars.telecontrol` / `vars.enip`; conditions joined with
+  `and` pick the outstation for the drawn process). All four are hand-written with the standard library,
+  deterministic (identifiers from the behaviour seed, payload times from the scenario clock) and verified
+  against tshark 4.6 dissectors (no malformed frames, no expert errors):
+  - **IEC 60870-5-104** (`actors/iec104.py`): RTU `abb-rtu560` on a substation; GI, clock sync, TESTFR,
+    periodic (COT 1) and spontaneous (COT 3, CP56Time2a) measured values with k/w flow control.
+  - **DNP3** (`actors/dnp3.py`): RTAC `sel-rtac` at water/wastewater plants; polled profile (unsolicited
+    disabled), link CRCs, integrity and class 1/2/3 event polls, IIN restart / need-time handling.
+  - **BACnet/IP** (`actors/bacnet.py`): two `siemens-pxc` controllers in a building; Who-Is / I-Am broadcasts,
+    ReadProperty(Multiple), SubscribeCOV and unconfirmed COV notifications.
+  - **EtherNet/IP** (`actors/enip.py`): `rockwell-compactlogix`; ListIdentity browse (the composer rewrites
+    the reply's sin_addr, `compose/enip.py`, and answers the browse socket's final port), RegisterSession,
+    Forward_Open class 3, connected Multiple Service Packet Read Tag polling.
+  - Server-initiated messages (IEC 104 periodic/spontaneous data, BACnet I-Am and COV, the ENIP ListIdentity
+    reply) are actions of the *server* actor on its own host; `assign_flows` binds a server packet with
+    payload to the current action when that action belongs to the server's host, so it is timed at the
+    action's virtual time. Server actors run those sends on `Runtime.loop`.
+- FLOAT32 registers: profile points may be `type: float32` (two registers, profile `word_order` big = ABCD or
+  little = CDAB); `power_substation` and `hvac_building` use them. `Point.encode` returns the register words,
+  `ProcessProfile.decode_block` decodes whole points from a read/write block (half a float is skipped), and a
+  write covering one word of a float replaces only that word. S7 DBs lay out one REAL per point (index-based).
 Next: IT-line scenarios (README roadmap).
 
 ### Composer spec

@@ -71,13 +71,19 @@ def _to_text(value: Any) -> str:
 
 
 def evaluate_when(expr: Any, ctx: dict) -> bool:
+    """``path``, ``not path``, ``path == 'x'``, ``path != 'x'``, or several joined with ``and``."""
     if expr is None:
         return True
     if isinstance(expr, bool):
         return expr
-    match = _WHEN.match(str(expr))
+    return all(_condition(term, ctx) for term in str(expr).split(" and "))
+
+
+def _condition(term: str, ctx: dict) -> bool:
+    match = _WHEN.match(term)
     if not match:
-        raise ScenarioError(f"unsupported condition '{expr}' (use 'path', 'not path', \"path == 'x'\")")
+        raise ScenarioError(f"unsupported condition '{term}' (use 'path', 'not path', \"path == 'x'\", "
+                            "joined with 'and')")
     negate, path, op, literal = match.groups()
     try:
         value = lookup(ctx, path)

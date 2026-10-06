@@ -169,7 +169,8 @@ actors:
 - A string that is exactly one reference keeps the value's type (number, list, map); a reference inside
   a longer string is interpolated as text (booleans as `true`/`false`).
 - `when` (hosts, actors, MITRE entries, questions) accepts `path`, `not path` or
-  `"path == 'value'"` / `"path != 'value'"`. A missing path is false.
+  `"path == 'value'"` / `"path != 'value'"`, and several of these joined with `and`
+  (`"vars.iec104 and vars.process == 'power_substation'"`). A missing path is false.
 
 ### Difficulty knobs
 
@@ -303,6 +304,13 @@ Optional `register_style` (a per-table base, e.g. the Modicon convention
 `{coils: 1, discrete: 10001, input: 30001, holding: 40001}`) labels the register map in a vendor
 numbering scheme; the Modbus wire addressing stays 0-based, and filters and the answer key keep using
 the 0-based address.
+A holding or input point may set `type: float32` (default `uint16`): an IEEE 754 single-precision value
+in two consecutive registers, so the next point starts at `address + 2` and `scale` is not used. The
+profile's `word_order` says which register holds the high word: `big` (default, ABCD) or `little`
+(CDAB, the word-swapped "Modicon float"). Registers must be packed from 0 without gaps or overlaps (the
+loader rejects overlaps). A float32 is written with function 16 only; actor facts carry the written
+words in `registers` (one entry for a UINT16, two for a FLOAT32), and the generated Suricata band rules
+match a float on the bytes of a Write Multiple Registers request that starts at the point.
 Optional `translations: {pl: {title: ...}}` gives the localized process title used in handouts.
 
 ## Testing checklist

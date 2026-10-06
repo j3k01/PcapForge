@@ -5,11 +5,12 @@ Current state:
   (`ot-modbus-write-manipulation`), device discovery (`ot-modbus-discovery`), command replay
   (`ot-modbus-command-replay`), coil manipulation (`ot-modbus-coil-manipulation`) and alarm masking
   (`ot-modbus-alarm-masking`); the process, PLC count and device pool are drawn per seed;
-- protocols: Modbus/TCP, OPC UA, S7comm, DHCPv4, DNS/NTP/ARP and Windows name-resolution chatter,
-  plus an IPv6 link-local baseline;
+- protocols: Modbus/TCP, OPC UA, S7comm, IEC 60870-5-104, DNP3, BACnet/IP, EtherNet/IP (CIP), DHCPv4,
+  DNS/NTP/ARP and Windows name-resolution chatter, plus an IPv6 link-local baseline;
 - composer realism: causal retiming with TCP segmentation, SPAN artefacts (duplicates, drops, VLAN,
   sensor clock), a host-firewall model (filtered vs closed ports), and RFC-correct DHCP delivery;
-- process models: per-point descriptions and a vendor (Modicon) register-numbering convention;
+- process models: per-point descriptions, a vendor (Modicon) register-numbering convention and
+  IEEE 754 FLOAT32 points across two registers (ABCD or word-swapped CDAB per profile);
 - SIEM export, Suricata and Sigma rules, grading, student/instructor packages, CTFd export,
   debrief report, Polish handouts; CI and releases on GitHub.
 
@@ -17,11 +18,8 @@ Effort: **S** = hours, **M** = 1–3 days, **L** = a week or more.
 Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ### Next up (open items, highest value first)
-- 32-bit float registers across two words (section 1 / process-model polish) — the biggest remaining
-  realism gain; cross-cutting (wire, answer-key filters, SIEM decode), so a dedicated change.
-- More background protocols: IEC 60870-5-104, BACnet/IP, EtherNet/IP/CIP, DNP3 (section 2).
 - Long captures (24 h, multi-million packets): streaming compose and memory profiling (section 1).
-- Detection: Sigma rules per new scenario, Zeek output, validated SPL/KQL (section 5).
+- Detection: Zeek output, validated SPL/KQL (section 5).
 - IT line: benign HTTPS, DHCP and AD baselines, then IT scenarios (section 3).
 - Platform: PyPI distribution name, Docker image, docs site, macOS check (section 6).
 
@@ -57,8 +55,8 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
     `ot-modbus-alarm-masking` (`modbus.alarm_mask` actor — blinds an alarm threshold, then pushes the
     setpoint it guarded out of band, in that order).
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
-- [ ] **More protocols as background actors** (M each): IEC 60870-5-104 (`c104`), BACnet/IP (`bacpypes3`), EtherNet/IP/CIP, DNP3.
-- [~] **Process-model polish** (S): translated process titles (pl), point descriptions on every register, and a vendor register-numbering convention in the handout (`register_style`, Modicon 4xxxx/3xxxx/1xxxx; the wire stays 0-based) — all done. Device profiles for ABB, Honeywell and Phoenix Contact already ship. Still open: 32-bit floats across two registers (cross-cutting — touches the wire, answer-key filters and the SIEM decode, so a dedicated change).
+- [x] **More protocols as background actors** (M each): IEC 60870-5-104 (`iec104.*`, substation RTU), DNP3 (`dnp3.*`, polled RTAC at water/wastewater plants), BACnet/IP (`bacnet.*`, building controllers with COV) and EtherNet/IP/CIP (`enip.*`, CompactLogix tag reads). Hand-written with the standard library rather than `c104` / `bacpypes3` (deterministic, no background timers); wired into `ot-baseline-operations` and `ot-modbus-write-manipulation` on medium/hard (`vars.telecontrol` picks the outstation for the drawn process, `vars.enip`). Still open: IEC 104 control commands and counter interrogation, DNP3 unsolicited responses, BACnet WriteProperty / BBMD, EtherNet/IP implicit I/O (UDP 2222), SIEM datasets and detection rules for these protocols.
+- [x] **Process-model polish** (S): translated process titles (pl), point descriptions on every register, and a vendor register-numbering convention in the handout (`register_style`, Modicon 4xxxx/3xxxx/1xxxx; the wire stays 0-based). 32-bit floats across two registers: a point may be `type: float32` (IEEE 754 in two registers, profile `word_order` `big` = ABCD or `little` = CDAB); `power_substation` (ABCD) and `hvac_building` (CDAB) use them for their analog values. Facts carry the written words as `registers`, the SIEM export decodes per point, the handout map shows the type, and float setpoints get exact Suricata band rules (`byte_test` on the IEEE 754 bit pattern of a Write Multiple Registers request starting at the point).
 
 ## 3. IT line (benign equivalents only, see CONTRIBUTING.md)
 
@@ -85,7 +83,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 - [~] **Suricata rules.** Generated rules exist and are tested against Suricata 7 in WSL. Still to do: confirm in the CI log that the Suricata tests run rather than being skipped.
 - [ ] **Validate SPL/KQL hunting queries** (M) against real Splunk and Elastic, e.g. Docker images in a separate CI job.
 - [ ] **Zeek output** (M): when `zeek` is available (or via Docker), produce real `conn.log`/`modbus.log`/`dns.log` alongside the pcapforge JSONL.
-- [x] **Sigma rules** (S): `detections/sigma/*.yml` over the exported JSONL (`logsource: {product: pcapforge, service: <dataset>}`): unapproved writer, out-of-band write, device identification, Modbus connection from an unexpected host (the port-502 sweep, flows dataset), and new host on the control LAN (DHCP). Generated from `answers.json`; convert with sigma-cli.
+- [x] **Sigma rules** (S): `detections/sigma/*.yml` over the exported JSONL (`logsource: {product: pcapforge, service: <dataset>}`): unapproved writer, out-of-band write, device identification, Modbus connection from an unexpected host (flows dataset), new host on the control LAN (DHCP), and per scenario: reads rejected with Illegal Data Address (register enumeration, discovery), alarm acknowledge / reset coil write (coil manipulation), alarm threshold written out of band (alarm masking), plus two Sigma 2.0 correlations shipped with their base rules — a port-502 sweep (value_count of destinations per source, discovery) and the same point set to the same value by two hosts (command replay). Generated from `answers.json`; converted with sigma-cli 3.1 (splunk, esql); the tests evaluate every rule on the export of its scenario and on `ot-baseline-operations` (no hits).
 
 ## 6. Platform and project
 
@@ -106,4 +104,4 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 - Re-recording the same plan can differ by a few packets (OS stack timing). Answers are unaffected, and byte-identical output needs the cached recording.
 - Wireshark ≥ 4.4 is required for answer-key verification (older versions don't decode Write Single Register values).
-- The process title and register names in handouts are English even with `--lang pl`.
+- Register names and point descriptions in handouts stay English even with `--lang pl` (process titles are translated).

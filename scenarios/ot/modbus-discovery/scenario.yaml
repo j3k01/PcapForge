@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: ot-modbus-discovery
 title: Modbus/TCP device discovery on the control subnet
 line: ot
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [modbus, ics, discovery, recon, ot, water, wastewater, hvac, power]

@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: ot-modbus-alarm-masking
 title: Alarm-threshold masking before an out-of-band setpoint change
 line: ot
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [modbus, ics, alarm, masking, setpoint, ot, water, wastewater, hvac, power]

@@ -154,6 +154,38 @@ devices:
     link_mbps: 100
     processing_ms: {median: 8.0, sigma: 0.6}
     identity: {VendorName: Moxa, ProductCode: MGate MB3170, MajorMinorRevision: "4.3"}
+  # Telecontrol RTUs, building controllers and a Logix controller for the background protocols
+  # (iec104.*, dnp3.*, bacnet.*, enip.*). `identity` carries what each protocol reports.
+  abb-rtu560:
+    vendor: ABB
+    ouis: ["00:0C:DE"]
+    stack: vxworks
+    link_mbps: 100
+    processing_ms: {median: 5.0, sigma: 0.5}
+    identity: {VendorName: ABB, ProductCode: RTU560 560CIG10, MajorMinorRevision: "13.2"}
+  sel-rtac:
+    vendor: Schweitzer Engineering Laboratories
+    ouis: ["00:30:A7"]
+    stack: linux  # SEL-3530 RTAC, real-time Linux
+    link_mbps: 100
+    processing_ms: {median: 3.0, sigma: 0.5}
+    identity: {VendorName: Schweitzer Engineering Laboratories, ProductCode: SEL-3530 RTAC, MajorMinorRevision: "R151"}
+  siemens-pxc:
+    vendor: Siemens Building Technologies
+    ouis: ["00:05:19"]
+    stack: vxworks
+    link_mbps: 100
+    processing_ms: {median: 7.0, sigma: 0.5}
+    identity: {VendorName: Siemens Building Technologies, ProductCode: PXC5.E003, MajorMinorRevision: "V6.00.025",
+               VendorId: 7}
+  rockwell-compactlogix:
+    vendor: Rockwell Automation
+    ouis: ["00:00:BC", "00:1D:9C"]
+    stack: vxworks
+    link_mbps: 100
+    processing_ms: {median: 2.5, sigma: 0.5}
+    identity: {VendorName: Rockwell Automation, ProductCode: 1769-L33ER/A LOGIX5333ER, MajorMinorRevision: "33.011",
+               VendorId: 1, DeviceType: 14, CipProductCode: 103}
   windows-workstation:
     vendor: Dell
     ouis: ["00:14:22", "70:B5:E8", "98:90:96", "D8:9E:F3", "E4:54:E8", "F0:1F:AF"]

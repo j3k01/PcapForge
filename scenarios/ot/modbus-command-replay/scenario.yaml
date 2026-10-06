@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: ot-modbus-command-replay
 title: Replay of legitimate Modbus/TCP commands from an unapproved host
 line: ot
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [modbus, ics, replay, ot, water, wastewater, hvac, power]

@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: ot-modbus-coil-manipulation
 title: Unauthorized Modbus/TCP coil commands forcing actuator state
 line: ot
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [modbus, ics, coil, command, ot, water, wastewater, hvac, power]
