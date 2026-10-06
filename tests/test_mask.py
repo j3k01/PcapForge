@@ -9,6 +9,7 @@ from pcapforge.pipeline import generate
 from pcapforge.plan import build_plan
 from pcapforge.scenario import find
 from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
+from sigma_eval import hits, load_rules
 
 SCENARIO = "ot-modbus-alarm-masking"
 
@@ -51,3 +52,10 @@ def test_the_source_writes_the_threshold_before_the_setpoint_on_the_wire(tmp_pat
     assert writes[0]["point"].endswith("_alarm")
     assert any(w["point"] == mask["changed_setpoint"] and w["epoch"] > writes[0]["epoch"] for w in writes)
     assert mask["changed_setpoint"] not in {a for a in mask["masked_alarms"]}
+
+    # The Sigma alarm-threshold rule flags exactly the masking writes (the setpoint change is caught
+    # by the general out-of-band rule).
+    rules = load_rules(result.directory / "detections" / "sigma")
+    flagged = hits(rules["Alarm threshold written outside its normal band"], result.directory / "siem")
+    assert sorted(r["point"] for r in flagged) == sorted(mask["masked_alarms"])
+    assert {r["src"] for r in flagged} == {mask["source"]["ip"]}

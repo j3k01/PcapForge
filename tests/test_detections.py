@@ -1,10 +1,16 @@
-"""Sigma rules derived from the site model (no capture needed: built from answers.json alone)."""
+"""Sigma rules derived from the site model (built from answers.json alone), and a baseline capture
+on which none of them may fire."""
 
 import uuid
 
+import pytest
 import yaml
 
 from pcapforge.detections import sigma_rules, write_detections
+from pcapforge.pipeline import generate
+from pcapforge.scenario import find
+from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
+from sigma_eval import correlation_groups, hits, load_rules
 
 
 def answers(with_writer=True, with_dhcp=True):
@@ -49,8 +55,13 @@ def test_each_rule_is_valid_sigma_with_a_deterministic_id():
     assert "New host leased an address on the control LAN" in titles
     ids = [r["id"] for r in rules]
     assert len(set(ids)) == len(ids)
+    names = {r["name"] for r in rules if "name" in r}
     for rule in rules:
         assert uuid.UUID(rule["id"])  # valid UUID
+        if "correlation" in rule:
+            # A correlation only names base rules that exist.
+            assert set(rule["correlation"]["rules"]) <= names
+            continue
         assert rule["logsource"]["product"] == "pcapforge"
         assert "condition" in rule["detection"]
         # The condition only names selection blocks that exist in the detection.
@@ -95,11 +106,48 @@ def test_no_rules_without_a_modbus_server():
     assert sigma_rules(a) == []
 
 
-def test_write_detections_emits_parseable_sigma_files(tmp_path):
+def test_alarm_rules_name_the_alarm_points_of_the_register_map():
+    rules = by_title(sigma_rules(answers()))  # water_treatment: alarm_ack coil, three *_alarm thresholds
+    ack = rules["Modbus alarm acknowledge or reset written to a PLC"]["detection"]["selection"]
+    assert ack["point"] == ["alarm_ack"]
+    threshold = rules["Alarm threshold written outside its normal band"]["detection"]["selection"]
+    assert threshold["point"] == ["chlorine_high_alarm", "level_high_alarm", "level_low_alarm"]
+    assert threshold["in_normal_band"] is False
+
+
+def test_write_detections_emits_parseable_sigma_files_with_bases_before_their_correlation(tmp_path):
     paths = write_detections(answers(), tmp_path)
     sigma = {k: p for k, p in paths.items() if k.startswith("sigma/")}
-    assert len(sigma) == 5
+    assert len(sigma) == 10
     for path in sigma.values():
-        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert {"title", "id", "logsource", "detection", "level", "tags"} <= set(doc)
+        docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+        *bases, last = docs
+        if "correlation" in last:
+            # pySigma resolves a correlation's references in load order: its bases come first.
+            assert [b["name"] for b in bases] == last["correlation"]["rules"]
+        else:
+            assert not bases
+        for doc in bases + ([] if "correlation" in last else [last]):
+            assert {"title", "id", "logsource", "detection", "level", "tags"} <= set(doc)
     assert "## Sigma rules" in paths["hunting.md"].read_text(encoding="utf-8")
+
+
+capture_tools = (find_tool("tshark") and (find_tool("dumpcap") or find_tool("tcpdump"))
+                 and tshark_version() >= MIN_TSHARK)
+
+
+@pytest.mark.skipif(not capture_tools, reason="requires tshark >= 4.4 and dumpcap/tcpdump with loopback capture rights")
+@pytest.mark.parametrize("seed", ["fp-1", "fp-2"])
+def test_no_sigma_rule_fires_on_normal_operations(tmp_path, seed):
+    result = generate(find("ot-baseline-operations"), "easy", seed, tmp_path, duration=300.0, siem=True)
+    rules = load_rules(result.directory / "detections" / "sigma")
+    siem = result.directory / "siem"
+    bases = {n for r in rules.values() if "correlation" in r for n in r["correlation"]["rules"]}
+    fired = {}
+    for title, rule in rules.items():
+        if rule.get("name") in bases:
+            continue  # correlation building blocks, not converted on their own
+        found = correlation_groups(rule, rules, siem) if "correlation" in rule else hits(rule, siem)
+        if found:
+            fired[title] = found
+    assert not fired

@@ -26,6 +26,7 @@ from pcapforge.profiles import device
 from pcapforge.record import recording_for
 from pcapforge.scenario import find
 from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
+from sigma_eval import hits, load_rules
 
 SCENARIO = "ot-modbus-write-manipulation"
 DURATION = 600.0
@@ -76,7 +77,7 @@ def test_every_recorded_write_in_the_key_matches_the_frame_it_points_to(generate
         assert (src, dst, port) == (change["source"]["ip"], change["target"]["ip"], "502")
         assert int(func) == write["function"]
         assert int(ref) == write["address"]
-        assert int(value.split(",")[0]) == write["raw"]
+        assert [int(v) for v in value.split(",")] == write["registers"]
         assert abs(float(epoch) - write["request"]["epoch"]) < 1e-5
 
 
@@ -216,20 +217,20 @@ def test_modbus_log_flags_exactly_the_incident_writes_as_out_of_band(generated):
 
     flagged = {(r["src"], r["dest"], r["address"], tuple(r["values"]), r["request_frame"], r["point"], r["value"])
                for r in writes if r["in_normal_band"] is False}
-    assert flagged == {(change["source"]["ip"], change["target"]["ip"], w["address"], (w["raw"],),
+    assert flagged == {(change["source"]["ip"], change["target"]["ip"], w["address"], tuple(w["registers"]),
                         w["request"]["frame"], w["point"], w["value"]) for w in change["writes"]}
 
     by_frame = {r["request_frame"]: r for r in writes}
     for w in operator["writes"]:
         record = by_frame[w["request"]["frame"]]
         assert (record["src"], record["dest"], record["address"], record["values"], record["point"]) == (
-            operator["source"]["ip"], w["target"]["ip"], w["address"], [w["raw"]], w["point"])
+            operator["source"]["ip"], w["target"]["ip"], w["address"], w["registers"], w["point"])
         assert record["in_normal_band"] is True
 
     # Each annotated write carries the register-map metadata: a non-empty description and the
     # vendor (Modicon 4xxxx) register number matching the 0-based holding address.
     single = [r for r in writes if isinstance(r.get("point"), str)]
-    assert single and all(r["desc"] and r["register"] == str(40001 + r["address"]) for r in single)
+    assert single and all(r["desc"] and r["register"].split("-")[0] == str(40001 + r["address"]) for r in single)
 
 
 def test_flow_totals_account_for_every_ip_packet_and_byte(generated):
@@ -328,26 +329,20 @@ def _eve_epoch(timestamp: str) -> float:
 
 
 def test_sigma_rules_ship_and_match_the_incident_in_the_modbus_export(generated):
-    import yaml
-
     result, answers = generated
     change = answers["facts"]["change"]
-    rules = {}
-    for key, path in result.exports.items():
-        if key.startswith("detections/sigma/"):
-            rules[path.stem] = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert "modbus_write_from_an_unapproved_host" in rules
-    write = rules["modbus_write_from_an_unapproved_host"]["detection"]
-    approved = set(write.get("approved", {}).get("src", []))
+    rules = load_rules(result.directory / "detections" / "sigma")
+    siem = result.directory / "siem"
+    incident = {w["request"]["frame"] for w in change["writes"]}
     # On easy/medium the writer is an unapproved host; on hard it is the legitimate workstation
     # (there the band rule, not the source rule, catches the out-of-band writes).
-    writer_is_approved = answers["scenario"]["difficulty"] == "hard"
-    assert (change["source"]["ip"] in approved) == writer_is_approved
-    # Every incident write is out of band, so the rows the band rule selects on exist in the export.
-    oob = [r for r in jsonl(result.exports["siem/modbus.jsonl"]) if r["write"] and r["in_normal_band"] is False]
-    assert len(oob) == change["write_count"]
+    unapproved = {r["request_frame"] for r in hits(rules["Modbus write from an unapproved host"], siem)}
+    assert unapproved == (set() if answers["scenario"]["difficulty"] == "hard" else incident)
+    # Every incident write is out of band, and nothing else is.
+    oob = {r["request_frame"] for r in hits(rules["Modbus setpoint written outside its normal band"], siem)}
+    assert oob == incident
     # A DHCP client actor runs at every level (the rogue on easy, a service laptop on medium/hard).
-    assert "new_host_leased_an_address_on_the_control_lan" in rules
+    assert "New host leased an address on the control LAN" in rules
 
 
 @pytest.mark.skipif(not shutil.which("suricata"), reason="requires suricata on PATH")
@@ -362,19 +357,22 @@ def test_suricata_rules_alert_on_out_of_band_writes_and_unapproved_writers(gener
     assert run.returncode == 0, run.stderr + run.stdout
     alerts = [e for e in jsonl(tmp_path / "eve.json") if e.get("event_type") == "alert"]
 
-    band_sids = {(m["point"], m["side"]): int(m["sid"]) for m in re.finditer(
-        r'msg:"PCAPFORGE OT (?P<point>\w+) written (?P<side>above|below) normal band.*?sid:(?P<sid>\d+);',
-        rules.read_text(encoding="utf-8"))}
-    band_alerts = [a for a in alerts if a["alert"]["signature_id"] in band_sids.values()]
+    # A FLOAT32 point stored low word first (CDAB) has two rules per side; exactly one fires per write.
+    band_sids: dict[tuple[str, str], set[int]] = {}
+    for m in re.finditer(r'msg:"PCAPFORGE OT (?P<point>\w+) written (?P<side>above|below) normal band.*?sid:(?P<sid>\d+);',
+                         rules.read_text(encoding="utf-8")):
+        band_sids.setdefault((m["point"], m["side"]), set()).add(int(m["sid"]))
+    all_band = set().union(*band_sids.values())
+    band_alerts = [a for a in alerts if a["alert"]["signature_id"] in all_band]
     change = answers["facts"]["change"]
     pair = {change["source"]["ip"], change["target"]["ip"]}
     expected = []
     for w in change["writes"]:
-        sid = band_sids[(w["point"], "above" if w["value"] > w["normal"][1] else "below")]
-        expected.append(sid)
-        assert any(a["alert"]["signature_id"] == sid and {a["src_ip"], a["dest_ip"]} == pair
-                   and 0 <= _eve_epoch(a["timestamp"]) - w["request"]["epoch"] < 5 for a in band_alerts), \
-            f"no out-of-band alert for {w['point']} written in frame {w['request']['frame']}"
+        sids = band_sids[(w["point"], "above" if w["value"] > w["normal"][1] else "below")]
+        hits = [a for a in band_alerts if a["alert"]["signature_id"] in sids and {a["src_ip"], a["dest_ip"]} == pair
+                and 0 <= _eve_epoch(a["timestamp"]) - w["request"]["epoch"] < 5]
+        assert hits, f"no out-of-band alert for {w['point']} written in frame {w['request']['frame']}"
+        expected.append(hits[0]["alert"]["signature_id"])
     # One band alert per incident write and none for the in-band operator writes.
     assert sorted(a["alert"]["signature_id"] for a in band_alerts) == sorted(expected)
 

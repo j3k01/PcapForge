@@ -13,6 +13,7 @@ from pcapforge.pipeline import generate
 from pcapforge.plan import build_plan
 from pcapforge.scenario import find
 from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
+from sigma_eval import correlation_groups, hits, load_rules
 
 SCENARIO = "ot-modbus-discovery"
 
@@ -124,12 +125,16 @@ def test_discovery_capture_matches_the_key_with_distinct_per_plc_identities(tmp_
         assert rows, f"no identity response from {ip}"
         reported = rows[0][0].replace(",", " ")
         assert entry["identity"].split()[0] in reported  # vendor name on the wire matches the key
-    # The Sigma connection rule ships and excludes the approved clients, so it flags the scanner.
-    import yaml
-    conn = next(yaml.safe_load(p.read_text(encoding="utf-8"))
-                for k, p in result.exports.items() if k.endswith("modbus_connection_from_an_unexpected_host.yml"))
+    # The Sigma rules over the export: the connection rule excludes the approved clients, the sweep
+    # correlation fires for the scanner alone, and only the scanner's enumeration hits exception 2.
+    rules = load_rules(result.directory / "detections" / "sigma")
+    siem = result.directory / "siem"
+    conn = rules["Modbus connection from an unexpected host"]
     assert conn["logsource"]["service"] == "flows"
     assert source not in conn["detection"].get("approved", {}).get("src", [])
+    sweep = correlation_groups(rules["Modbus/TCP port sweep of the control network"], rules, siem)
+    assert [json.loads(key[0]) for key in sweep] == [source]
+    assert {r["src"] for r in hits(rules["Modbus read rejected with Illegal Data Address"], siem)} == {source}
 
     # The two PLCs in the easy run are different vendors, so the wire shows two distinct identities.
     seen = set()

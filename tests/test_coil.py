@@ -9,6 +9,7 @@ from pcapforge.pipeline import generate
 from pcapforge.plan import build_plan
 from pcapforge.scenario import find
 from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
+from sigma_eval import hits, load_rules
 
 SCENARIO = "ot-modbus-coil-manipulation"
 
@@ -56,3 +57,8 @@ def test_coil_commands_are_on_the_wire_and_acknowledge_the_alarm_on_medium(tmp_p
     # medium acknowledges the alarm: a write to alarm_ack / alarm_reset from the same source.
     assert force["alarm_acknowledged"]
     assert any(r["point"] in ("alarm_ack", "alarm_reset") for r in coil_writes)
+
+    # The Sigma alarm-acknowledge rule fires on that write only.
+    rules = load_rules(result.directory / "detections" / "sigma")
+    acks = hits(rules["Modbus alarm acknowledge or reset written to a PLC"], result.directory / "siem")
+    assert len(acks) == 1 and acks[0]["src"] == source and acks[0]["request_frame"] == force["ack"]["frame"]

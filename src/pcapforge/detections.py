@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import struct
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,18 +98,33 @@ def suricata_rules(answers: dict) -> list[Rule]:
             if not (point.writable and point.normal):
                 continue
             lo, hi = point.normal
+            unit = f" {point.unit}" if point.unit else ""
+            band = f"{_number(lo)}-{_number(hi)}{unit}"
+            metadata = f"mitre_ics T0836, pcapforge_point {point.name}"
+            if point.type == "float32":
+                for side, limit, matches in (("above", hi, _float_above(point, hi)),
+                                             ("below", lo, _float_below(point, lo) if lo > 0 else [])):
+                    for options in matches:
+                        rules.append(_rule(
+                            sid, f"any any -> {dest}",
+                            f"PCAPFORGE OT {point.name} written {side} normal band "
+                            f"(holding {point.address} float32 {'>' if side == 'above' else '<'} {_number(limit)}{unit})",
+                            options, metadata,
+                            f"{point.name} (holding {point.address}-{point.address + 1}, FLOAT32 "
+                            f"{'ABCD' if point.word_order == 'big' else 'CDAB'}, band {band}) set {side} "
+                            f"{_number(limit)} by a Write Multiple Registers request starting at the point."))
+                        sid += 1
+                continue
             lo_raw = math.ceil(lo * point.scale - 1e-9)
             hi_raw = math.floor(hi * point.scale + 1e-9)
-            unit = f" {point.unit}" if point.unit else ""
             # Suricata numbers Modbus addresses from 1: wire address + 1.
             where = f"modbus: access write holding, address {point.address + 1}"
-            band = f"{_number(lo)}-{_number(hi)}{unit}"
             if hi_raw < 65535:
                 rules.append(_rule(
                     sid, f"any any -> {dest}",
                     f"PCAPFORGE OT {point.name} written above normal band "
                     f"(holding {point.address} raw > {hi_raw} = {_number(hi)}{unit})",
-                    f"{where}, value >{hi_raw};", f"mitre_ics T0836, pcapforge_point {point.name}",
+                    f"{where}, value >{hi_raw};", metadata,
                     f"{point.name} (holding {point.address}, band {band}) set above {hi_raw} raw."))
             sid += 1
             if lo_raw > 0:
@@ -116,10 +132,44 @@ def suricata_rules(answers: dict) -> list[Rule]:
                     sid, f"any any -> {dest}",
                     f"PCAPFORGE OT {point.name} written below normal band "
                     f"(holding {point.address} raw < {lo_raw} = {_number(lo)}{unit})",
-                    f"{where}, value <{lo_raw};", f"mitre_ics T0836, pcapforge_point {point.name}",
+                    f"{where}, value <{lo_raw};", metadata,
                     f"{point.name} (holding {point.address}, band {band}) set below {lo_raw} raw."))
             sid += 1
     return rules
+
+
+# A float32 setpoint cannot be compared with Suricata's `modbus: ... value` (one 16-bit register),
+# and Suricata does not combine the `modbus` keyword with payload keywords. These rules test the
+# request bytes instead: a Write Multiple Registers (function 16, MBAP offset 7) of two registers
+# starting at the point, whose data (offset 13) holds the float. For non-negative IEEE 754 values
+# the bit pattern orders like the value, so an unsigned comparison against the band limit's bit
+# pattern is exact; CDAB (low word first) needs the high word compared first, then the low word.
+def _float_request(point) -> str:
+    return f'content:"|10|"; offset:7; depth:1; byte_test:2,=,{point.address},8; byte_test:2,=,2,10;'
+
+
+def _float_words(limit: float) -> tuple[int, int, int]:
+    bits = struct.unpack(">I", struct.pack(">f", limit))[0]
+    return bits, bits >> 16, bits & 0xFFFF
+
+
+def _float_above(point, limit: float) -> list[str]:
+    bits, high, low = _float_words(limit)
+    base = _float_request(point)
+    if point.word_order == "big":
+        return [f"{base} byte_test:4,>,{bits},13;"]
+    return [f"{base} byte_test:2,>,{high},15;",
+            f"{base} byte_test:2,=,{high},15; byte_test:2,>,{low},13;"]
+
+
+def _float_below(point, limit: float) -> list[str]:
+    # Negative values have the sign bit set and compare as large unsigned numbers: not matched.
+    bits, high, low = _float_words(limit)
+    base = _float_request(point)
+    if point.word_order == "big":
+        return [f"{base} byte_test:4,<,{bits},13;"]
+    return [f"{base} byte_test:2,<,{high},15;",
+            f"{base} byte_test:2,=,{high},15; byte_test:2,<,{low},13;"]
 
 
 # --- Sigma --------------------------------------------------------------------------
@@ -138,7 +188,35 @@ def _sigma_id(answers: dict, key: str) -> str:
 
 
 def _sigma(answers: dict, *, key: str, title: str, description: str, service: str, level: str,
-           detection: dict, tags: list[str], falsepositives: list[str], fields: list[str]) -> dict:
+           detection: dict, tags: list[str], falsepositives: list[str], fields: list[str] | None,
+           name: str | None = None) -> dict:
+    """A Sigma detection rule. Base rules of a correlation carry a ``name`` and no ``fields``
+    (pySigma's Splunk backend cannot append a field table to a correlation query)."""
+    return {
+        "title": title,
+        "id": _sigma_id(answers, key),
+        **({"name": name} if name else {}),
+        "status": "experimental",
+        "description": description,
+        "references": ["https://github.com/j3k01/PcapForge"],
+        "author": "pcapforge",
+        "date": answers.get("capture", {}).get("start", "1970-01-01T00:00:00Z")[:10],
+        "logsource": {"product": "pcapforge", "service": service},
+        "detection": detection,
+        **({"fields": fields} if fields else {}),
+        "falsepositives": falsepositives,
+        "level": level,
+        "tags": tags,
+    }
+
+
+def _correlation(answers: dict, *, key: str, title: str, description: str, level: str, kind: str,
+                 rules: list[str], group_by: list[str], timespan: str, condition: dict, generate: bool,
+                 tags: list[str], falsepositives: list[str], field: str | None = None) -> dict:
+    """A Sigma correlation rule (Sigma 2.0) over the named base rules. ``generate`` says whether
+    the base rules are also converted on their own (true for detections that stand alone)."""
+    correlation = {"type": kind, "rules": rules, "group-by": group_by, "timespan": timespan,
+                   "generate": generate, "condition": {**({"field": field} if field else {}), **condition}}
     return {
         "title": title,
         "id": _sigma_id(answers, key),
@@ -147,13 +225,20 @@ def _sigma(answers: dict, *, key: str, title: str, description: str, service: st
         "references": ["https://github.com/j3k01/PcapForge"],
         "author": "pcapforge",
         "date": answers.get("capture", {}).get("start", "1970-01-01T00:00:00Z")[:10],
-        "logsource": {"product": "pcapforge", "service": service},
-        "detection": detection,
-        "fields": fields,
+        "correlation": correlation,
         "falsepositives": falsepositives,
         "level": level,
         "tags": tags,
     }
+
+
+def _profile_points(answers: dict, servers: list[dict], table: str, predicate) -> list[str]:
+    """Sorted names of the points of ``table`` in every PLC's register map that satisfy ``predicate``."""
+    names = set()
+    for actor in servers:
+        profile = ProcessProfile(answers["facts"][actor["id"]]["process"])
+        names.update(p.name for p in profile.table(table) if predicate(p))
+    return sorted(names)
 
 
 def sigma_rules(answers: dict) -> list[dict]:
@@ -228,6 +313,93 @@ def sigma_rules(answers: dict) -> list[dict]:
         falsepositives=["A new or reconfigured SCADA client, or an OT-team asset scan."],
         fields=["ts", "src", "dest", "dest_port", "state", "packets_out"]))
 
+    # Port sweep (ot-modbus-discovery): one source trying 502 on several hosts, PLC or not. The swept
+    # hosts answer with a RST (closed) or nothing (host firewall), so the flows carry any state.
+    sweep = {"selection": {"dest_port": MODBUS_PORT}, "condition": "selection"}
+    if clients:
+        sweep = {"selection": {"dest_port": MODBUS_PORT}, "approved": {"src": clients},
+                 "condition": "selection and not approved"}
+    rules.append(_sigma(
+        answers, key="modbus-port-502-attempt", title="Modbus port 502 connection attempt by a non-SCADA host",
+        description="Any TCP flow to port 502 from a host other than the SCADA clients, PLC or not (base rule of "
+                    "the Modbus port-sweep correlation).",
+        service="flows", level="low", detection=sweep, tags=["attack.t0846"],
+        falsepositives=["See the port-sweep correlation."], fields=None,
+        name="pcapforge_modbus_port_attempt"))
+    rules.append(_correlation(
+        answers, key="modbus-port-sweep", title="Modbus/TCP port sweep of the control network",
+        description="One host outside the SCADA clients opened (or tried) port 502 on at least three different "
+                    "hosts within ten minutes: a Modbus service sweep (remote system discovery).",
+        level="high", kind="value_count", rules=["pcapforge_modbus_port_attempt"], group_by=["src"],
+        timespan="10m", condition={"gte": 3}, field="dest", generate=False, tags=["attack.t0846"],
+        falsepositives=["An asset-inventory or vulnerability scan run by the OT team."]))
+
+    # Register-map enumeration (discovery, and the writer's reconnaissance): oversized reads are
+    # rejected with exception 2 before the real table sizes are found. SCADA polls never hit it.
+    rules.append(_sigma(
+        answers, key="modbus-illegal-data-address", title="Modbus read rejected with Illegal Data Address",
+        description="A PLC answered a request with exception 2 (Illegal Data Address): the client asked for "
+                    "registers outside the configured map, typical of register-map enumeration (point and tag "
+                    "identification). The site's SCADA polls only read the configured map.",
+        service="modbus", level="medium",
+        detection={"selection": {"dest": plcs, "exception_code": 2}, "condition": "selection"},
+        tags=["attack.t0861", "attack.t0888"],
+        falsepositives=["A misconfigured new HMI or historian tag list."],
+        fields=["ts", "src", "dest", "function_code", "address", "quantity", "request_frame"]))
+
+    # Alarm suppression (ot-modbus-coil-manipulation): acknowledging or resetting alarms by writing
+    # the PLC's alarm coil over the network instead of on the HMI.
+    alarm_coils = _profile_points(answers, servers, "coils", lambda p: p.writable and "alarm" in p.name.split("_"))
+    if alarm_coils:
+        rules.append(_sigma(
+            answers, key="modbus-alarm-acknowledge", title="Modbus alarm acknowledge or reset written to a PLC",
+            description=f"A Modbus coil write to the PLC's alarm acknowledge / reset coil ({', '.join(alarm_coils)}). "
+                        "Operators acknowledge alarms on the HMI; a network write clears the alarm state that "
+                        "would otherwise show the effect of a forced actuator.",
+            service="modbus", level="high",
+            detection={"selection": {"write": True, "dest": plcs, "point": alarm_coils}, "condition": "selection"},
+            tags=["attack.t0878"],
+            falsepositives=["A SCADA system that acknowledges alarms through Modbus by design."],
+            fields=["ts", "src", "dest", "function_code", "point", "request_frame"]))
+
+    # Alarm masking (ot-modbus-alarm-masking): an alarm threshold written outside its band so the
+    # alarm can no longer trip.
+    thresholds = _profile_points(answers, servers, "holding",
+                                 lambda p: p.writable and p.normal and "alarm" in p.name.split("_"))
+    if thresholds:
+        rules.append(_sigma(
+            answers, key="modbus-alarm-threshold-out-of-band", title="Alarm threshold written outside its normal band",
+            description="A Modbus write moved an alarm threshold of the PLC register map outside its normal band, "
+                        "so the alarm it drives can no longer trip (alarm suppression); look for an out-of-band "
+                        "setpoint change by the same source shortly after.",
+            service="modbus", level="high",
+            detection={"selection": {"write": True, "dest": plcs, "point": thresholds, "in_normal_band": False},
+                       "condition": "selection"},
+            tags=["attack.t0878", "attack.t0836"],
+            falsepositives=["A threshold retuned during commissioning, recorded in a change ticket."],
+            fields=["ts", "src", "dest", "point", "value", "unit", "request_frame"]))
+
+    # Command replay (ot-modbus-command-replay): the same point set to the same value by more than
+    # one host. Values stay in band; what differs is the source.
+    rules.append(_sigma(
+        answers, key="modbus-register-write", title="Modbus register write to a mapped point",
+        description="Any Modbus holding-register write annotated with a register-map point (base rule of the "
+                    "repeated-write correlation).",
+        service="modbus", level="informational",
+        detection={"selection": {"write": True, "dest": plcs, "function_code": [6, 16, 23], "point|exists": True},
+                   "condition": "selection"},
+        tags=["attack.t0855"], falsepositives=["See the repeated-write correlation."],
+        fields=None, name="pcapforge_modbus_register_write"))
+    rules.append(_correlation(
+        answers, key="modbus-write-replayed", title="Same Modbus setpoint value written by more than one host",
+        description="A PLC point was set to the same value by at least two different hosts within four hours. "
+                    "Legitimate changes come from the engineering workstation; an identical command from a "
+                    "second host is a replay of captured traffic (values stay in band, so band rules miss it).",
+        level="high", kind="value_count", rules=["pcapforge_modbus_register_write"],
+        group_by=["dest", "point", "value"], timespan="4h", condition={"gte": 2}, field="src", generate=False,
+        tags=["attack.t0855", "attack.t0831"],
+        falsepositives=["Two engineering workstations applying the same recipe value."]))
+
     if any(a["type"] == "dhcp.client" for a in answers["actors"]):
         rules.append(_sigma(
             answers, key="dhcp-new-host-on-control-lan", title="New host leased an address on the control LAN",
@@ -243,12 +415,19 @@ def sigma_rules(answers: dict) -> list[dict]:
 
 
 def _sigma_files(answers: dict, rules: list[dict]) -> dict[str, str]:
-    """File name -> YAML text for each Sigma rule."""
+    """File name -> YAML text for each Sigma rule. A correlation rule shares its file with the
+    base rules it names, base rules first (multi-document YAML, as pySigma resolves references
+    in load order)."""
+    by_name = {r["name"]: r for r in rules if "name" in r}
+    bundled = {n for r in rules if "correlation" in r for n in r["correlation"]["rules"]}
     out = {}
     for rule in rules:
+        if rule.get("name") in bundled:
+            continue
+        docs = [by_name[n] for n in rule["correlation"]["rules"]] + [rule] if "correlation" in rule else [rule]
         name = rule["title"].lower().replace(" ", "_")
         name = "".join(c for c in name if c.isalnum() or c in "_-")
-        out[f"{name}.yml"] = yaml.dump(rule, sort_keys=False, allow_unicode=True, default_flow_style=False)
+        out[f"{name}.yml"] = yaml.dump_all(docs, sort_keys=False, allow_unicode=True, default_flow_style=False)
     return out
 
 
@@ -270,6 +449,8 @@ def _rules_file(answers: dict, rules: list[Rule]) -> str:
         "#   suricata -r capture.pcap -S suricata.rules -k none -l <log dir> \\",
         "#            --set app-layer.protocols.modbus.enabled=true",
         "# Modbus addresses in `modbus: access` are 1-based (wire address + 1); values are raw registers.",
+        "# FLOAT32 setpoints are matched on the request bytes (byte_test on the IEEE 754 bit pattern of a",
+        "# Write Multiple Registers that starts at the point; byte offsets count from the MBAP header).",
         "#",
         f"# PLCs:                     {', '.join(f'{names[h]} {ips[h]}' for h in plcs) or 'none'}",
         f"# Approved writers:         {listing(WRITER_TYPES)}",
