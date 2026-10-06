@@ -61,6 +61,8 @@ APPS = {
     "nbns": "nbns", "ssdp": "ssdp", "browser": "browser", "nbdgm": "nbdgm", "ntp": "ntp",
     "dhcp": "dhcp", "dhcpv6": "dhcpv6", "http": "http", "tls": "tls", "smb": "smb", "smb2": "smb", "ssh": "ssh",
     "icmp": "icmp", "icmpv6": "icmpv6", "snmp": "snmp", "syslog": "syslog", "opcua": "opcua", "s7comm": "s7comm",
+    "iec60870_104": "iec104", "iec60870_asdu": "iec104", "dnp3": "dnp3", "bvlc": "bacnet", "bacnet": "bacnet",
+    "bacapp": "bacnet", "enip": "enip", "cip": "enip", "cipcm": "enip", "cipcls": "enip",
 }
 NAME_RESOLUTION = ("llmnr", "nbns", "mdns", "ssdp", "browser")
 TRANSPORTS = {"1": "icmp", "6": "tcp", "17": "udp", "58": "icmpv6"}
@@ -414,26 +416,20 @@ class _Exporter:
         profile = self.maps.get(record["dest"])
         if profile is None or record["address"] is None or not record["values"]:
             return
-        points = []
-        for offset, raw in enumerate(record["values"]):
-            point = profile.by_address.get((record["table"], record["address"] + offset))
-            if point is None:
-                points.append(None)
-                continue
-            value = point.decode(raw)
-            points.append({"point": point.name, "register": profile.register_label(point),
-                           "desc": point.desc or None, "unit": point.unit,
-                           "value": round(value, 6),
-                           "in_normal_band": point.in_normal(value) if point.normal else None})
-        known = [p for p in points if p is not None]
-        if not known:
+        # One entry per register-map point the write covers completely (a float32 spans two registers).
+        points = [{"point": point.name, "register": profile.register_label(point),
+                   "desc": point.desc or None, "unit": point.unit,
+                   "value": round(value, 6),
+                   "in_normal_band": point.in_normal(value) if point.normal else None}
+                  for point, value in profile.decode_block(record["table"], record["address"], record["values"])]
+        if not points:
             return
         if len(points) == 1:
-            record.update(known[0])
+            record.update(points[0])
             return
         for field_ in ("point", "register", "desc", "unit", "value"):
-            record[field_] = [p[field_] if p else None for p in points]
-        bands = [p["in_normal_band"] for p in known if p["in_normal_band"] is not None]
+            record[field_] = [p[field_] for p in points]
+        bands = [p["in_normal_band"] for p in points if p["in_normal_band"] is not None]
         record["in_normal_band"] = all(bands) if bands else None
 
     def _modbus_response(self, row, key, number, epoch, conn, pdu, single) -> None:

@@ -20,7 +20,7 @@ from functools import cache
 from pcapforge import ports
 from pcapforge.actors import register
 from pcapforge.actors.base import Actor, optional_import
-from pcapforge.actors.modbus import serving_profile
+from pcapforge.actors.modbus import host_process, host_sim
 from pcapforge.plan import host_ref
 from pcapforge.process import BIT_TABLES, ProcessProfile, ProcessSim
 from pcapforge.scenario import ScenarioError
@@ -61,11 +61,12 @@ class Block:
 
 
 def blocks(profile: ProcessProfile) -> list[Block]:
-    """DB layout of a process: measurements and setpoints as REAL, status bits packed."""
+    """DB layout of a process: measurements and setpoints as REAL (one per point, in register
+    order), status bits packed."""
     out = []
     for db, name, table in ((1, "ProcessValues", "input"), (2, "Setpoints", "holding")):
         if profile.size(table):
-            out.append(Block(db, name, (table,), 4 * profile.size(table)))
+            out.append(Block(db, name, (table,), 4 * len(profile.table(table))))
     bit_tables = tuple(t for t in BIT_TABLES if profile.size(t))
     if bit_tables:
         size = sum(-(-profile.size(t) // 8) for t in bit_tables)
@@ -77,13 +78,13 @@ def block_points(profile: ProcessProfile, block: Block) -> list[dict]:
     """Symbol table of a block (absolute S7 addresses)."""
     points, base = [], 0
     for table in block.tables:
-        for p in profile.table(table):
+        for index, p in enumerate(profile.table(table)):
             if block.bits:
                 offset = base + p.address // 8
                 points.append({"name": p.name, "address": f"DB{block.db}.DBX{offset}.{p.address % 8}",
                                "type": "BOOL"})
             else:
-                points.append({"name": p.name, "address": f"DB{block.db}.DBD{4 * p.address}",
+                points.append({"name": p.name, "address": f"DB{block.db}.DBD{4 * index}",
                                "type": "REAL", "unit": p.unit})
         base += -(-profile.size(table) // 8)
     return points
@@ -101,8 +102,9 @@ def fill(block: Block, profile: ProcessProfile, sim: ProcessSim, data: bytearray
             base += -(-profile.size(table) // 8)
         return
     table = block.tables[0]
-    for address, raw in sim.read(table).items():
-        struct.pack_into(">f", data, 4 * address, profile.by_address[(table, address)].decode(raw))
+    values = sim.values(table)
+    for index, p in enumerate(profile.table(table)):
+        struct.pack_into(">f", data, 4 * index, values[p.name])
 
 
 # --- SZL records -----------------------------------------------------------------------
@@ -226,11 +228,10 @@ class S7Server(Actor):
     def plan(self) -> None:
         plan = self.plan_
         self.profiles: dict[str, ProcessProfile] = {}
-        self.shared: set[str] = set()   # hosts whose process sim belongs to a modbus.server
         self.identities: dict[str, dict] = {}
         facts = []
         for host in self.hosts:
-            profile = self._profile(host)
+            profile = host_process(self, host)
             self.profiles[host.id] = profile
             self.identities[host.id] = identity = self._identity(host)
             facts.append({"host": host_ref(host.id), "process": profile.id,
@@ -239,22 +240,6 @@ class S7Server(Actor):
                           "blocks": [{"db": b.db, "name": b.name, "size": b.size,
                                       "points": block_points(profile, b)} for b in blocks(profile)]})
         plan.facts[self.id] = {"hosts": [host_ref(h.id) for h in self.hosts], "plcs": facts}
-
-    def _profile(self, host) -> ProcessProfile:
-        name = self.param("process")
-        try:
-            modbus = serving_profile(self.plan_, host.id)
-        except ValueError:
-            modbus = None
-        if modbus is not None:
-            if name is not None and name != modbus.id:
-                raise ScenarioError(f"{self.id}: host '{host.id}' runs process '{modbus.id}' for "
-                                    f"modbus.server, not '{name}'")
-            self.shared.add(host.id)
-            return modbus
-        if name is None:
-            raise ScenarioError(f"{self.id}: host '{host.id}' needs params.process (no modbus.server runs there)")
-        return ProcessProfile(name)
 
     def _identity(self, host) -> dict:
         ident = host.device.identity or {}
@@ -278,8 +263,7 @@ class S7Server(Actor):
         logging.getLogger("snap7").setLevel(logging.CRITICAL)
         for host in self.hosts:
             profile = self.profiles[host.id]
-            if host.id not in self.shared:
-                rt.sims[host.id] = ProcessSim(profile, self.rng.child(host.id), self.plan_.start_hour)
+            host_sim(rt, self, host, profile)
             server = server_class(rt, host.id, profile, blocks(profile), self.identities[host.id])
             server.start_to(host.loopback, ports.S7)
             rt.servers.append(_Running(server))

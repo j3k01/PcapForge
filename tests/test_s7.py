@@ -59,7 +59,7 @@ def test_server_on_a_modbus_plc_serves_its_process_and_rejects_another():
     modbus = {"id": "plc_mb", "type": "modbus.server", "hosts": "plc", "params": {"process": "water_treatment"}}
     plan = build_plan(scenario([modbus, {**S7_ACTORS[0], "params": {}}, S7_ACTORS[1]]), "easy", "shared")
     server = next(a for a in plan.actors if a.type == "s7.server")
-    assert server.profiles["plc"].id == "water_treatment" and server.shared == {"plc"}
+    assert server.profiles["plc"].id == "water_treatment"
     conflicting = {**S7_ACTORS[0], "params": {"process": "wastewater_treatment"}}
     with pytest.raises(ScenarioError, match="water_treatment"):
         build_plan(scenario([modbus, conflicting, S7_ACTORS[1]]), "easy", "shared")

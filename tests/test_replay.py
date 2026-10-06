@@ -9,6 +9,7 @@ from pcapforge.pipeline import generate
 from pcapforge.plan import build_plan
 from pcapforge.scenario import find
 from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
+from sigma_eval import correlation_groups, load_rules
 
 SCENARIO = "ot-modbus-command-replay"
 
@@ -16,13 +17,13 @@ SCENARIO = "ot-modbus-command-replay"
 @pytest.mark.parametrize("difficulty", ["easy", "medium", "hard"])
 def test_every_replayed_write_is_an_exact_copy_of_an_operator_write(difficulty):
     plan = build_plan(find(SCENARIO), difficulty, "42")
-    operator = {(w["point"], w["address"], w["raw"], w["function"], w["target"]["$host"])
+    operator = {(w["point"], w["address"], tuple(w["registers"]), w["function"], w["target"]["$host"])
                 for w in plan.facts["operator_changes"]["writes"]}
     replay = plan.facts["replay"]
     assert replay["write_count"] >= 1
     assert replay["source"]["$host"] != plan.facts["operator_changes"]["source"]["$host"]
     for w in replay["writes"]:
-        key = (w["point"], w["address"], w["raw"], w["function"], w["target"]["$host"])
+        key = (w["point"], w["address"], tuple(w["registers"]), w["function"], w["target"]["$host"])
         assert key in operator, f"replayed write {key} is not a copy of any operator write"
 
 
@@ -57,3 +58,11 @@ def test_replayed_writes_are_in_band_and_echo_an_earlier_operator_write(tmp_path
                              if x["src"] == operator["source"]["ip"] and x["point"] == r["point"]
                              and tuple(x["values"]) == tuple(r["values"]))
         assert r["epoch"] > first_operator, "the replay comes after the genuine change it copies"
+
+    # The Sigma repeated-write correlation fires on each replayed (PLC, point, value), naming the
+    # operator and the replay host, and on nothing else.
+    rules = load_rules(result.directory / "detections" / "sigma")
+    fired = correlation_groups(rules["Same Modbus setpoint value written by more than one host"], rules,
+                               result.directory / "siem")
+    assert {tuple(json.loads(k) for k in key) for key in fired} == {(r["dest"], r["point"], r["value"]) for r in replayed}
+    assert all(sources == {operator["source"]["ip"], replay["source"]["ip"]} for sources in fired.values())

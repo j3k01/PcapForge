@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from pcapforge import __version__
 from pcapforge.plan import Action, Plan
-from pcapforge.process import ProcessProfile
+from pcapforge.process import BIT_TABLES, ProcessProfile
 from pcapforge.i18n import scenario_text, ui
 from pcapforge.scenario import ScenarioError, evaluate_when, lookup, resolve
 from pcapforge.topology import Host
@@ -273,14 +273,18 @@ def write_handout(plan: Plan, answers: dict, out_dir: Path) -> Path:
         hosts.extend(h.name for h in actor.hosts)
     for profile, hosts in profiles.values():
         addressing = t["regmap_addr_vendor"] if profile.register_style else t["regmap_addr_zero"]
-        lines += [f"## {t['register_map'].format(title=profile.titles.get(lang, profile.title))}", "",
-                  t["regmap_note"].format(unit=profile.unit_id, hosts=", ".join(hosts), addressing=addressing), ""]
+        note = t["regmap_note"].format(unit=profile.unit_id, hosts=", ".join(hosts), addressing=addressing)
+        if any(p.type == "float32" for p in profile.points):
+            note += " " + t["regmap_float_" + profile.word_order]
+        lines += [f"## {t['register_map'].format(title=profile.titles.get(lang, profile.title))}", "", note, ""]
         rows = []
         for table in ("coils", "discrete", "holding", "input"):
             for point in profile.table(table):
                 band = f"{_number(point.normal[0])} – {_number(point.normal[1])}" if point.normal else "-"
+                kind = "BOOL" if table in BIT_TABLES else point.type.upper()
+                scale = _number(point.scale) if kind == "UINT16" else "-"
                 rows.append([table, profile.register_label(point), point.name, point.desc or "-",
-                             point.unit or "-", _number(point.scale), band,
+                             point.unit or "-", kind, scale, band,
                              t["yes"] if point.writable else t["no"]])
         lines += _table(t["regmap_cols"], rows) + [""]
 

@@ -1,8 +1,10 @@
 # Physical process model for a distribution-substation bay controller (CC-BY-4.0):
 # one 33/11 kV transformer with on-load tap changer feeding four 11 kV feeders.
 #
-# Tables follow the Modbus data model. Register values are engineering values multiplied
-# by `scale` and stored as unsigned 16-bit integers.
+# Tables follow the Modbus data model. Like most protection relays and power meters, the bay
+# controller keeps analog values as IEEE 754 FLOAT32 in two registers, high word first
+# (`word_order: big`, ABCD); tap positions, the control mode and the totaliser are UINT16
+# (engineering value multiplied by `scale`).
 # `normal` is the operating band an operator would consider routine; values written
 # outside it are what an analyst should notice.
 #
@@ -25,30 +27,31 @@ id: power_substation
 title: Distribution substation — 33/11 kV transformer and feeder bays
 unit_id: 1
 register_style: {coils: 1, discrete: 10001, input: 30001, holding: 40001}
+word_order: big
 
 holding:
   - {address: 0, name: tap_position_sp, unit: "", scale: 1, nominal: 9, normal: [5, 13], writable: true, desc: OLTC tap-position setpoint}
-  - {address: 1, name: voltage_high_alarm, unit: kV, scale: 100, nominal: 11.6, normal: [11.4, 11.8], writable: true, desc: Busbar overvoltage alarm threshold}
-  - {address: 2, name: voltage_low_alarm, unit: kV, scale: 100, nominal: 10.4, normal: [10.2, 10.6], writable: true, desc: Busbar undervoltage alarm threshold}
-  - {address: 3, name: oil_temp_alarm, unit: degC, scale: 10, nominal: 90, normal: [85, 95], writable: true, desc: Transformer oil high-temperature alarm threshold}
-  - {address: 4, name: overcurrent_pickup, unit: A, scale: 1, nominal: 600, normal: [500, 700], writable: true, desc: Feeder overcurrent pickup}
-  - {address: 5, name: frequency_low_alarm, unit: Hz, scale: 1000, nominal: 49.8, normal: [49.7, 49.9], writable: true, desc: Underfrequency alarm threshold}
-  - {address: 6, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: Control mode (1 manual, 2 auto)}
+  - {address: 1, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: Control mode (1 manual, 2 auto)}
+  - {address: 2, name: voltage_high_alarm, type: float32, unit: kV, nominal: 11.6, normal: [11.4, 11.8], writable: true, desc: Busbar overvoltage alarm threshold}
+  - {address: 4, name: voltage_low_alarm, type: float32, unit: kV, nominal: 10.4, normal: [10.2, 10.6], writable: true, desc: Busbar undervoltage alarm threshold}
+  - {address: 6, name: oil_temp_alarm, type: float32, unit: degC, nominal: 90, normal: [85, 95], writable: true, desc: Transformer oil high-temperature alarm threshold}
+  - {address: 8, name: overcurrent_pickup, type: float32, unit: A, nominal: 600, normal: [500, 700], writable: true, desc: Feeder overcurrent pickup}
+  - {address: 10, name: frequency_low_alarm, type: float32, unit: Hz, nominal: 49.8, normal: [49.7, 49.9], writable: true, desc: Underfrequency alarm threshold}
 
 input:
-  - {address: 0, name: load_mw, unit: MW, scale: 100, nominal: 14, normal: [8, 20], model: {type: daily, amplitude: 4, phase_h: 12.5, noise: 0.1}, desc: Transformer load}
-  - {address: 1, name: tap_position, unit: "", scale: 1, nominal: 9, normal: [1, 17], model: {type: follow, source: tap_position_sp, limits: [1, 17], tau: 20}, desc: OLTC tap position feedback}
-  - {address: 2, name: bus_voltage, unit: kV, scale: 100, nominal: 11.0, normal: [10.7, 11.3], model: {type: follow, source: tap_position, gain: 0.1375, offset: 9.9725, inputs: [{source: load_mw, gain: -0.015}], tau: 30, noise: 0.01}, desc: 11 kV busbar voltage}
-  - {address: 3, name: frequency, unit: Hz, scale: 1000, nominal: 50.0, normal: [49.95, 50.05], model: {type: walk, step: 0.0005}, desc: System frequency}
-  - {address: 4, name: power_factor, unit: "", scale: 1000, nominal: 0.948, normal: [0.92, 0.98], model: {type: follow, source: load_mw, gain: -0.003, offset: 0.99, tau: 60, noise: 0.002}, desc: Power factor}
-  - {address: 5, name: reactive_mvar, unit: Mvar, scale: 100, nominal: 4.6, normal: [2, 8], model: {type: follow, source: load_mw, gain: 0.33, tau: 60, noise: 0.03}, desc: Reactive power}
-  - {address: 6, name: feeder1_current, unit: A, scale: 10, nominal: 232, normal: [100, 380], model: {type: follow, source: load_mw, gain: 16.6, tau: 5, noise: 1.5}, desc: Feeder 1 current}
-  - {address: 7, name: feeder2_current, unit: A, scale: 10, nominal: 193, normal: [80, 320], model: {type: follow, source: load_mw, gain: 13.8, tau: 5, noise: 1.5}, desc: Feeder 2 current}
-  - {address: 8, name: feeder3_current, unit: A, scale: 10, nominal: 193, normal: [80, 320], model: {type: follow, source: load_mw, gain: 13.8, tau: 5, noise: 1.5}, desc: Feeder 3 current}
-  - {address: 9, name: feeder4_current, unit: A, scale: 10, nominal: 154, normal: [60, 260], model: {type: follow, source: load_mw, gain: 11.0, tau: 5, noise: 1.5}, desc: Feeder 4 current}
-  - {address: 10, name: oil_temp, unit: degC, scale: 10, nominal: 50, normal: [35, 75], model: {type: follow, source: load_mw, gain: 2.0, offset: 22, tau: 5400, noise: 0.1}, desc: Transformer oil temperature}
-  - {address: 11, name: winding_temp, unit: degC, scale: 10, nominal: 66.8, normal: [45, 95], model: {type: follow, source: oil_temp, inputs: [{source: load_mw, gain: 1.2}], tau: 600, noise: 0.1}, desc: Transformer winding temperature}
-  - {address: 12, name: energy_import_mwh, unit: MWh, scale: 1, nominal: 21873, model: {type: counter, rate: 0.00389}, desc: Imported-energy totaliser}
+  - {address: 0, name: tap_position, unit: "", scale: 1, nominal: 9, normal: [1, 17], model: {type: follow, source: tap_position_sp, limits: [1, 17], tau: 20}, desc: OLTC tap position feedback}
+  - {address: 1, name: energy_import_mwh, unit: MWh, scale: 1, nominal: 21873, model: {type: counter, rate: 0.00389}, desc: Imported-energy totaliser}
+  - {address: 2, name: load_mw, type: float32, unit: MW, nominal: 14, normal: [8, 20], model: {type: daily, amplitude: 4, phase_h: 12.5, noise: 0.1}, desc: Transformer load}
+  - {address: 4, name: bus_voltage, type: float32, unit: kV, nominal: 11.0, normal: [10.7, 11.3], model: {type: follow, source: tap_position, gain: 0.1375, offset: 9.9725, inputs: [{source: load_mw, gain: -0.015}], tau: 30, noise: 0.01}, desc: 11 kV busbar voltage}
+  - {address: 6, name: frequency, type: float32, unit: Hz, nominal: 50.0, normal: [49.95, 50.05], model: {type: walk, step: 0.0005}, desc: System frequency}
+  - {address: 8, name: power_factor, type: float32, unit: "", nominal: 0.948, normal: [0.92, 0.98], model: {type: follow, source: load_mw, gain: -0.003, offset: 0.99, tau: 60, noise: 0.002}, desc: Power factor}
+  - {address: 10, name: reactive_mvar, type: float32, unit: Mvar, nominal: 4.6, normal: [2, 8], model: {type: follow, source: load_mw, gain: 0.33, tau: 60, noise: 0.03}, desc: Reactive power}
+  - {address: 12, name: feeder1_current, type: float32, unit: A, nominal: 232, normal: [100, 380], model: {type: follow, source: load_mw, gain: 16.6, tau: 5, noise: 1.5}, desc: Feeder 1 current}
+  - {address: 14, name: feeder2_current, type: float32, unit: A, nominal: 193, normal: [80, 320], model: {type: follow, source: load_mw, gain: 13.8, tau: 5, noise: 1.5}, desc: Feeder 2 current}
+  - {address: 16, name: feeder3_current, type: float32, unit: A, nominal: 193, normal: [80, 320], model: {type: follow, source: load_mw, gain: 13.8, tau: 5, noise: 1.5}, desc: Feeder 3 current}
+  - {address: 18, name: feeder4_current, type: float32, unit: A, nominal: 154, normal: [60, 260], model: {type: follow, source: load_mw, gain: 11.0, tau: 5, noise: 1.5}, desc: Feeder 4 current}
+  - {address: 20, name: oil_temp, type: float32, unit: degC, nominal: 50, normal: [35, 75], model: {type: follow, source: load_mw, gain: 2.0, offset: 22, tau: 5400, noise: 0.1}, desc: Transformer oil temperature}
+  - {address: 22, name: winding_temp, type: float32, unit: degC, nominal: 66.8, normal: [45, 95], model: {type: follow, source: oil_temp, inputs: [{source: load_mw, gain: 1.2}], tau: 600, noise: 0.1}, desc: Transformer winding temperature}
 
 coils:
   - {address: 0, name: feeder1_cb_close, nominal: 1, writable: true, desc: Feeder 1 breaker close command}
@@ -78,8 +81,8 @@ discrete:
 
 # What a SCADA/RTU master reads every cycle (function code, table, start, count).
 poll_groups:
-  - {function: 4, start: 0, count: 13}
-  - {function: 3, start: 0, count: 7}
+  - {function: 4, start: 0, count: 24}
+  - {function: 3, start: 0, count: 12}
   - {function: 1, start: 0, count: 8}
   - {function: 2, start: 0, count: 14}
 

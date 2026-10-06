@@ -219,17 +219,17 @@ class _ServerContext:
             sim = self.rt.sims[device.host_id]  # the source's modbus.server (checked when planning)
             sim.advance(t)
             for group in device.groups:
-                raw = sim.read(group.table)
+                values = sim.values(group.table)
                 for tag in group.tags:
-                    variant = _variant(ua, tag.point, raw[tag.point.address])
+                    variant = _variant(ua, tag.point, values[tag.point.name])
                     value = ua.DataValue(variant, SourceTimestamp=self.now, ServerTimestamp=self.now)
                     await self.server.write_attribute_value(ua.NodeId(tag.node, NAMESPACE_INDEX), value)
 
 
-def _variant(ua, point: Point, raw: int):
+def _variant(ua, point: Point, value: float):
     if point.table in BIT_TABLES:
-        return ua.Variant(bool(raw), ua.VariantType.Boolean)
-    return ua.Variant(point.decode(raw), ua.VariantType.Double)
+        return ua.Variant(bool(value), ua.VariantType.Boolean)
+    return ua.Variant(value, ua.VariantType.Double)
 
 
 async def _start_server(actor: OpcUaServer, host, rt):
@@ -353,7 +353,7 @@ async def _start_server(actor: OpcUaServer, host, rt):
         for group in device.groups:
             node = await folder.add_folder(ua.NodeId(group.node, namespace), ua.QualifiedName(group.name, namespace))
             for tag in group.tags:
-                variant = _variant(ua, tag.point, tag.point.encode(tag.point.nominal))
+                variant = _variant(ua, tag.point, tag.point.quantize(tag.point.nominal))
                 await node.add_variable(ua.NodeId(tag.node, namespace), ua.QualifiedName(tag.name, namespace),
                                         variant.Value, variant.VariantType)
     await server.start()

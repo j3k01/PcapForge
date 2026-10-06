@@ -23,11 +23,16 @@ UI = {
         "no": "no",
         "register_map": "Register map: {title}",
         "regmap_note": "Modbus unit id {unit}; served by {hosts}. {addressing}; "
-                       "engineering value = raw register value / scale.",
+                       "engineering value of a UINT16 = raw register value / scale.",
+        "regmap_float_big": "A FLOAT32 is an IEEE 754 single-precision value in two consecutive registers, "
+                            "high word first (ABCD).",
+        "regmap_float_little": "A FLOAT32 is an IEEE 754 single-precision value in two consecutive registers, "
+                               "low word first (CDAB, word-swapped).",
         "regmap_addr_zero": "Addresses are 0-based",
         "regmap_addr_vendor": "Register numbers follow the vendor convention (e.g. 40001 = holding "
                               "register 0 on the wire); filters and the answer key use the 0-based wire address",
-        "regmap_cols": ["Table", "Register", "Name", "Description", "Unit", "Scale", "Normal band", "Writable"],
+        "regmap_cols": ["Table", "Register", "Name", "Description", "Unit", "Type", "Scale", "Normal band",
+                        "Writable"],
         "questions": "Questions",
         "points": "points",
         "tmpl_title": "# pcapforge submission: {title}",
@@ -58,11 +63,16 @@ UI = {
         "no": "nie",
         "register_map": "Mapa rejestrów: {title}",
         "regmap_note": "Modbus unit id {unit}; obsługiwane przez {hosts}. {addressing}; "
-                       "wartość inżynierska = surowa wartość rejestru / skala.",
+                       "wartość inżynierska UINT16 = surowa wartość rejestru / skala.",
+        "regmap_float_big": "FLOAT32 to wartość IEEE 754 pojedynczej precyzji w dwóch kolejnych rejestrach, "
+                            "najpierw słowo starsze (ABCD).",
+        "regmap_float_little": "FLOAT32 to wartość IEEE 754 pojedynczej precyzji w dwóch kolejnych rejestrach, "
+                               "najpierw słowo młodsze (CDAB, zamienione słowa).",
         "regmap_addr_zero": "Adresy liczone od 0",
         "regmap_addr_vendor": "Numery rejestrów według konwencji producenta (np. 40001 = rejestr holding 0 "
                               "na łączu); filtry i klucz odpowiedzi używają adresu 0-based z łącza",
-        "regmap_cols": ["Tabela", "Rejestr", "Nazwa", "Opis", "Jednostka", "Skala", "Zakres normalny", "Zapisywalny"],
+        "regmap_cols": ["Tabela", "Rejestr", "Nazwa", "Opis", "Jednostka", "Typ", "Skala", "Zakres normalny",
+                        "Zapisywalny"],
         "questions": "Pytania",
         "points": "pkt",
         "tmpl_title": "# Odpowiedzi pcapforge: {title}",

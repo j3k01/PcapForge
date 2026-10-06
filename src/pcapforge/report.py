@@ -99,10 +99,8 @@ def load_samples(path: Path, maps: dict[str, ProcessProfile]) -> dict[tuple[str,
             profile = maps.get(record["dest"])
             if profile is None:
                 continue
-            for offset, raw in enumerate(record["values"]):
-                point = profile.by_address.get((table, record["address"] + offset))
-                if point is not None:
-                    samples[(record["dest"], point.name)].append((float(record["epoch"]), point.decode(raw)))
+            for point, value in profile.decode_block(table, record["address"], record["values"]):
+                samples[(record["dest"], point.name)].append((float(record["epoch"]), value))
     for series in samples.values():
         series.sort(key=lambda s: s[0])
     return samples

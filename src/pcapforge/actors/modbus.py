@@ -77,7 +77,7 @@ class ModbusServer(Actor):
 
         identity = None
         if host.device.identity:
-            identity = ModbusDeviceIdentification(info_name=dict(host.device.identity))
+            identity = ModbusDeviceIdentification(info_name=modbus_identity(host.device.identity))
         return SimDevice(
             id=profile.unit_id,
             identity=identity,
@@ -86,12 +86,48 @@ class ModbusServer(Actor):
         )
 
 
+# Read Device Identification objects pymodbus knows; device identities also carry other
+# protocols' fields (BACnet vendor id, CIP device type) that Modbus does not report.
+MODBUS_IDENTITY_KEYS = ("VendorName", "ProductCode", "MajorMinorRevision", "VendorUrl", "ProductName",
+                        "ModelName", "UserApplicationName")
+
+
+def modbus_identity(identity: dict) -> dict:
+    return {k: v for k, v in identity.items() if k in MODBUS_IDENTITY_KEYS}
+
+
 def serving_profile(plan, host_id: str) -> ProcessProfile:
     """Process profile of the modbus.server actor running on ``host_id``."""
     for actor in plan.actors:
         if isinstance(actor, ModbusServer) and any(h.id == host_id for h in actor.hosts):
             return ProcessProfile(actor.param("process"))
     raise ValueError(f"no modbus.server runs on host '{host_id}'")
+
+
+def host_process(actor: Actor, host) -> ProcessProfile:
+    """Process another protocol's server serves on ``host``: the modbus.server's on the same
+    host (both then report the same plant), else the actor's own ``params.process``."""
+    name = actor.param("process")
+    try:
+        modbus = serving_profile(actor.plan_, host.id)
+    except ValueError:
+        modbus = None
+    if modbus is not None:
+        if name is not None and name != modbus.id:
+            raise ScenarioError(f"{actor.id}: host '{host.id}' runs process '{modbus.id}' for "
+                                f"modbus.server, not '{name}'")
+        return modbus
+    if name is None:
+        raise ScenarioError(f"{actor.id}: host '{host.id}' needs params.process (no modbus.server runs there)")
+    return ProcessProfile(name)
+
+
+def host_sim(rt, actor: Actor, host, profile: ProcessProfile) -> ProcessSim:
+    """The process simulation of ``host``: shared with whichever server started it first."""
+    sim = rt.sims.get(host.id)
+    if sim is None:
+        sim = rt.sims[host.id] = ProcessSim(profile, actor.rng.child(host.id), actor.plan_.start_hour)
+    return sim
 
 
 READERS = {1: "read_coils", 2: "read_discrete_inputs", 3: "read_holding_registers",
@@ -133,7 +169,7 @@ class ModbusClientActor(Actor):
             # Device identification is only ever requested here, one exchange at a time, so set the
             # global to the target PLC's identity for the duration of this blocking read.
             identity = rt.plan.topology.by_id[a["target"]].device.identity
-            ModbusControlBlock().Identity.update(ModbusDeviceIdentification(info_name=dict(identity or {})))
+            ModbusControlBlock().Identity.update(ModbusDeviceIdentification(info_name=modbus_identity(identity or {})))
             client = self._client(rt, action.host, a["target"])
             client.read_device_information(read_code=1, object_id=0, device_id=a["unit"])
         elif action.op == "modbus.probe":
@@ -255,18 +291,18 @@ class ModbusOperator(ModbusClientActor):
             lo, hi = point.normal
             step = self.rng.uniform(*choice["step"]) * self.rng.choice((-1, 1))
             value = min(max(point.nominal + step, lo), hi)
-            raw = point.encode(value)
+            registers = point.encode(point.typed(value))
             session = _SessionPlanner(self, host.id, target.id, profile.unit_id, t, self.rng)
             group = _holding_group(profile)
             session.read(3, group["start"], group["count"])
-            action = session.write(16, point.address, [raw])
+            action = session.write(16, point.address, registers)
             session.read(3, group["start"], group["count"])
             session.close()
             writes.append({"target": host_ref(target.id), "point": point.name, "address": point.address,
-                           "raw": raw, "value": point.decode(raw), "unit": point.unit,
+                           "registers": registers, "value": point.decode(registers), "unit": point.unit,
                            "function": 16, "request": {"$action": action}})
             plan.event(action, self.id, f"Operator adjusts {point.name} on {target.id}", [],
-                       point=point.name, value=point.decode(raw), legitimate=True)
+                       point=point.name, value=point.decode(registers), legitimate=True)
         plan.facts[self.id] = {"source": host_ref(host.id), "write_count": len(writes), "writes": writes}
 
 
@@ -301,16 +337,16 @@ class ModbusReplay(ModbusClientActor):
         for original in picks:
             target_id = original["target"]["$host"]
             profile = serving_profile(plan, target_id)
-            function, address, raw = original["function"], original["address"], original["raw"]
+            function, address, registers = original["function"], original["address"], original["registers"]
             captured_at = original["request"]["$action"].t
             at = min(captured_at + rng.uniform(30.0, spread), plan.duration - 10.0)
             at = max(at, captured_at + 5.0)
             session = _SessionPlanner(self, host.id, target_id, profile.unit_id, at, rng)
-            action = session.write(function, address, [raw], gap=(0.1, 0.6))
-            session.read(3, address, 1)
+            action = session.write(function, address, registers, gap=(0.1, 0.6))
+            session.read(3, address, len(registers))
             session.close()
             replays.append({"target": host_ref(target_id), "point": original["point"], "address": address,
-                            "raw": raw, "value": original["value"], "unit": original["unit"],
+                            "registers": registers, "value": original["value"], "unit": original["unit"],
                             "function": function, "replayed_from": original["point"],
                             "request": action_ref(action)})
             label = f"Replay of {original['point']} = {original['value']} {original['unit']}".rstrip()
@@ -473,21 +509,24 @@ class ModbusWriter(ModbusClientActor):
             else:
                 down = False
                 value = hi + distance
-            raw = point.encode(value)
+            registers = point.encode(point.typed(value))
             function = {"single": 6, "multiple": 16}.get(function_mode) or rng.choice((6, 16))
+            if point.words > 1:
+                function = 16  # Write Single Register cannot carry a two-register float
             if not one_session:
                 session = _SessionPlanner(self, host.id, target.id, unit, t0 + 20 + offset, rng)
-            action = session.write(function, point.address, [raw])
-            session.read(3, point.address, 1)
+            action = session.write(function, point.address, registers)
+            session.read(3, point.address, point.words)
             if not one_session:
                 session.close()
+            value = point.decode(registers)
             writes.append({"point": point.name, "table": "holding", "address": point.address,
-                           "function": function, "raw": raw, "value": point.decode(raw), "unit": point.unit,
+                           "function": function, "registers": registers, "value": value, "unit": point.unit,
                            "normal": list(point.normal), "nominal": point.nominal,
                            "direction": "below" if down else "above",
                            "request": {"$action": action}})
-            plan.event(action, self.id, f"Write {point.name} = {point.decode(raw)} {point.unit}".rstrip(),
-                       ["T0855", "T0836"], function=function, address=point.address, raw=raw,
+            plan.event(action, self.id, f"Write {point.name} = {value} {point.unit}".rstrip(),
+                       ["T0855", "T0836"], function=function, address=point.address, registers=registers,
                        normal=list(point.normal))
         if one_session:
             session.close()
@@ -555,34 +594,35 @@ class ModbusAlarmMask(ModbusClientActor):
                 value = max(lo - (hi - lo) * rng.uniform(factor_lo, factor_hi), 0.0)
             else:
                 value = hi + (hi - lo) * rng.uniform(factor_lo, factor_hi)
-            raw = point.encode(value)
-            action = session.write(16, point.address, [raw])
-            session.read(3, point.address, 1)
+            registers = point.encode(point.typed(value))
+            action = session.write(16, point.address, registers)
+            session.read(3, point.address, point.words)
             guard = guards.get(point.name, {})
             writes.append({"point": point.name, "stage": "mask", "table": "holding", "address": point.address,
-                           "function": 16, "raw": raw, "value": point.decode(raw), "unit": point.unit,
-                           "normal": list(point.normal), "guards_alarm": guard.get("alarm"),
+                           "function": 16, "registers": registers, "value": point.decode(registers),
+                           "unit": point.unit, "normal": list(point.normal), "guards_alarm": guard.get("alarm"),
                            "request": action_ref(action)})
             masked.append(point.name)
             plan.event(action, self.id, f"Mask {point.name} on {target.id} (alarm {guard.get('alarm', '?')})",
-                       ["T0878"], point=point.name, value=point.decode(raw))
+                       ["T0878"], point=point.name, value=point.decode(registers))
 
         # stage 2: push the governed setpoint out of band, now that the alarm cannot fire.
         lo, hi = setpoint.normal
         distance = (hi - lo) * rng.uniform(factor_lo, factor_hi)
         down = _push_down(setpoint.name, rng.child("change"))
         value = max(lo - distance, 0.0) if down and lo > 0 else hi + distance
-        raw = setpoint.encode(value)
+        registers = setpoint.encode(setpoint.typed(value))
         at = session.t + rng.uniform(5.0, max(6.0, spread))
         session2 = _SessionPlanner(self, host.id, target.id, unit, at, rng)
-        change = session2.write(16, setpoint.address, [raw])
-        session2.read(3, setpoint.address, 1)
+        change = session2.write(16, setpoint.address, registers)
+        session2.read(3, setpoint.address, setpoint.words)
         session2.close()
         writes.append({"point": setpoint.name, "stage": "change", "table": "holding", "address": setpoint.address,
-                       "function": 16, "raw": raw, "value": setpoint.decode(raw), "unit": setpoint.unit,
-                       "normal": list(setpoint.normal), "guards_alarm": None, "request": action_ref(change)})
+                       "function": 16, "registers": registers, "value": setpoint.decode(registers),
+                       "unit": setpoint.unit, "normal": list(setpoint.normal), "guards_alarm": None,
+                       "request": action_ref(change)})
         plan.event(change, self.id, f"Move {setpoint.name} out of band on {target.id}", ["T0836"],
-                   point=setpoint.name, value=setpoint.decode(raw))
+                   point=setpoint.name, value=setpoint.decode(registers))
 
         plan.facts[self.id] = {
             "source": host_ref(host.id),

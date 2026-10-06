@@ -21,7 +21,7 @@ def test_setpoint_write_drives_measurement_and_alarm_over_time():
     before = sim.read("input")[residual.address]
     assert sim.read("discrete")[alarm.address] == 0
 
-    sim.write("holding", dose.address, [dose.encode(9.0)])
+    sim.write("holding", dose.address, dose.encode(9.0))
     sim.advance(60)
     early = sim.read("input")[residual.address]
     sim.advance(3600)
@@ -40,7 +40,44 @@ def test_writes_to_read_only_points_are_ignored():
 
 def test_counters_wrap_like_16_bit_registers():
     point = ProcessProfile("water_treatment").by_name["treated_volume_m3"]
-    assert point.encode(65536 + 5) == 5
+    assert point.encode(65536 + 5) == [5]
+
+
+@pytest.mark.parametrize("name,word_order", [("power_substation", "big"), ("hvac_building", "little")])
+def test_float32_points_carry_ieee754_in_the_profile_word_order(name, word_order):
+    profile = ProcessProfile(name)
+    point = next(p for p in profile.table("holding") if p.type == "float32")
+    assert profile.word_order == word_order and point.words == 2
+    # 12.5 = 0x41480000: high word 0x4148, low word 0x0000.
+    assert point.encode(12.5) == ([0x4148, 0x0000] if word_order == "big" else [0x0000, 0x4148])
+    assert point.decode(point.encode(11.6)) == 11.6
+    label = profile.register_label(point)
+    assert label == f"{40001 + point.address}-{40002 + point.address}"
+
+
+def test_block_decoding_keeps_whole_floats_and_skips_cut_off_halves():
+    profile = ProcessProfile("power_substation")
+    sim = ProcessSim(profile, Rng("block"), start_hour=10.0)
+    raw = sim.read("holding")
+    words = [raw[a] for a in range(profile.size("holding"))]
+    names = [p.name for p, _ in profile.decode_block("holding", 0, words)]
+    assert names == [p.name for p in profile.table("holding")]
+    # A read starting in the middle of a float drops that float but keeps the next one whole.
+    first = profile.by_name["voltage_high_alarm"]
+    decoded = profile.decode_block("holding", first.address + 1, words[first.address + 1:first.address + 5])
+    assert [p.name for p, _ in decoded] == ["voltage_low_alarm"]
+    assert decoded[0][1] == pytest.approx(sim.value("voltage_low_alarm"), abs=1e-5)
+
+
+def test_a_single_register_write_replaces_half_of_a_float():
+    profile = ProcessProfile("hvac_building")  # CDAB: the high word is the second register
+    sim = ProcessSim(profile, Rng("half"), start_hour=10.0)
+    point = profile.by_name["zone1_temp_sp"]
+    sim.write("holding", point.address, point.encode(30.0))
+    assert sim.value(point.name) == 30.0
+    high_of_16 = point.encode(16.0)[1]
+    sim.write("holding", point.address + 1, [high_of_16])  # Write Single Register to the high word
+    assert sim.value(point.name) == point.decode([point.encode(30.0)[0], high_of_16])
 
 
 def _sources(model: dict) -> list[str]:
@@ -58,8 +95,9 @@ def test_profile_references_resolve(name):
     # sources or its initial value and every update would lag one step behind.
     order = {p.name: i for i, p in enumerate(profile.points)}
     for table in TABLES:
-        addresses = [p.address for p in profile.table(table)]
-        assert addresses == list(range(len(addresses))), table
+        # Registers are packed from 0 without gaps; a float32 takes two.
+        points = profile.table(table)
+        assert [p.address for p in points] == [sum(q.words for q in points[:i]) for i in range(len(points))], table
     for point in profile.points:
         if not point.model:
             continue
@@ -85,14 +123,14 @@ def test_every_point_has_a_description_and_a_vendor_register_label(name):
     style = profile.register_style
     assert style == {"coils": 1, "discrete": 10001, "input": 30001, "holding": 40001}
     for point in profile.points:
-        assert profile.register_label(point) == str(style[point.table] + point.address)
+        assert profile.register_label(point).split("-")[0] == str(style[point.table] + point.address)
 
 
 def test_register_label_falls_back_to_the_wire_address_without_a_style():
-    profile = ProcessProfile(PROFILES[0])
+    profile = ProcessProfile("power_substation")
     profile.register_style = {}  # a profile that defines no vendor numbering
     for point in profile.points:
-        assert profile.register_label(point) == str(point.address)
+        assert profile.register_label(point) == "-".join(str(a) for a in point.addresses)
 
 
 @pytest.mark.parametrize("start_hour", [0.0, 7.0, 13.0, 19.0])
@@ -104,9 +142,8 @@ def test_background_process_stays_in_band_for_two_hours(name, start_hour):
         for t in range(0, 7201, 20):
             sim.advance(t)
             for table in TABLES:
-                for address, raw in sim.read(table).items():
-                    point = profile.by_address[(table, address)]
-                    value = point.decode(raw)
+                for name, value in sim.values(table).items():
+                    point = profile.by_name[name]
                     where = f"{point.name} = {value} at t={t}s"
                     if table in ("coils", "discrete"):
                         # No alarm or status change without an operator or attacker write.
@@ -116,7 +153,8 @@ def test_background_process_stays_in_band_for_two_hours(name, start_hour):
                         continue
                     assert point.normal, f"{point.name} has no normal band"
                     assert point.in_normal(value), where
-                    assert 0 < raw < 65535, where
+                    if point.type == "uint16":
+                        assert 0 < point.encode(value)[0] < 65535, where  # not clipped by the register
                     if point.unit == "%":
                         assert 0 <= value <= 100, where
 
@@ -141,7 +179,7 @@ def test_out_of_band_setpoint_moves_dependent_measurement(name, setpoint, value,
     assert not point.in_normal(value)
     baseline = ProcessSim(profile, Rng("response"), start_hour=10.0)
     sim = ProcessSim(profile, Rng("response"), start_hour=10.0)
-    sim.write("holding", point.address, [point.encode(value)])
+    sim.write("holding", point.address, point.encode(value))
     for t in range(0, 1801, 10):
         baseline.advance(t)
         sim.advance(t)

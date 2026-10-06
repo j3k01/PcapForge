@@ -170,8 +170,10 @@ def test_modbus_read_records_carry_the_values_the_plc_returned(run):
         readback = next(r for r in reads
                         if r["request_frame"] > frame and r["dest"] == change["target"]["ip"]
                         and FUNCTION_TABLE[r["function_code"]] == write["table"] and r["values"]
-                        and r["address"] <= write["address"] < r["address"] + r["quantity"])
-        assert readback["values"][write["address"] - readback["address"]] == write["raw"]
+                        and r["address"] <= write["address"]
+                        and write["address"] + len(write["registers"]) <= r["address"] + r["quantity"])
+        offset = write["address"] - readback["address"]
+        assert readback["values"][offset:offset + len(write["registers"])] == write["registers"]
 
 
 def test_downsampling_is_bounded_ordered_and_keeps_extremes():
