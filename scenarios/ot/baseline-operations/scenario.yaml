@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: ot-baseline-operations
 title: Baseline of normal OT operations (no incident)
 line: ot
-version: 2
+version: 3
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [baseline, modbus, opcua, s7comm, ics, ot, water, wastewater, hvac, power]
@@ -48,7 +48,11 @@ topology:
     - {id: rtu104, device: abb-rtu560, subnet: control, name: "rtu-{code}-01", when: "vars.telecontrol and vars.process == 'power_substation'"}
     - {id: rtac, device: sel-rtac, subnet: control, name: "rtac-{code}-01", when: "vars.telecontrol and vars.process != 'power_substation' and vars.process != 'hvac_building'"}
     - {id: ddc, count: 2, device: siemens-pxc, subnet: control, name: "pxc-{code}-{index:02d}", when: "vars.telecontrol and vars.process == 'hvac_building'"}
+    # Building-management server in the plant IT network: reaches the BACnet controllers as a foreign device of pxc-01 (BBMD).
+    - {id: bmssrv, device: windows-server-vm, subnet: plant_it, name: "BMS-{CODE}-01", when: "vars.telecontrol and vars.process == 'hvac_building'"}
     - {id: logix, device: rockwell-compactlogix, subnet: control, name: "plc-{code}-pk1", when: vars.enip}
+    # Packaging-line drive scanned by the CompactLogix over EtherNet/IP class 1 I/O (UDP 2222).
+    - {id: vfd, device: rockwell-powerflex525, subnet: control, name: "vfd-{code}-pk1", when: vars.enip}
 
 actors:
   - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
@@ -140,12 +144,13 @@ actors:
     type: dnp3.server
     hosts: rtac
     when: "vars.telecontrol and vars.process != 'power_substation' and vars.process != 'hvac_building'"
-    params: {process: "${vars.process}"}
+    params: {process: "${vars.process}", unsolicited: true}
   - id: scada_dnp3
     type: dnp3.client
     hosts: hmi
     when: "vars.telecontrol and vars.process != 'power_substation' and vars.process != 'hvac_building'"
-    params: {targets: rtac}
+    # Unsolicited event reporting enabled at startup; slow backstop polls (events 5 min, integrity 30 min).
+    params: {targets: rtac, unsolicited: true, integrity_s: 1800}
   - id: ddc_bacnet
     type: bacnet.server
     hosts: ddc
@@ -155,7 +160,14 @@ actors:
     type: bacnet.client
     hosts: hmi
     when: "vars.telecontrol and vars.process == 'hvac_building'"
-    params: {targets: ddc, poll_s: 30}
+    # Approved operator overrides of setpoints (WriteProperty at priority 8, relinquished later).
+    params: {targets: ddc, poll_s: 30, writes: 3}
+  - id: bmssrv_bacnet
+    type: bacnet.client
+    hosts: bmssrv
+    when: "vars.telecontrol and vars.process == 'hvac_building'"
+    # Foreign device registered with the BBMD on pxc-01; trend collection every 5 min.
+    params: {targets: ddc, bbmd: ddc1, poll_s: 300, cov: 0, whois_s: 900}
   # Packaging line on a CompactLogix: FactoryTalk HMI tag reads and a slower historian collector.
   - id: logix_service
     type: enip.server
@@ -172,6 +184,17 @@ actors:
     hosts: historian
     when: vars.enip
     params: {targets: logix, interval: 10, list_identity: false, list_services: false}
+  # The CompactLogix scans the line's PowerFlex 525 (unicast class 1 I/O, 100 ms RPI): the
+  # connection is opened during the shift, then O->T / T->O run cyclically on UDP 2222.
+  - id: drive_adapter
+    type: enip.adapter
+    hosts: vfd
+    when: vars.enip
+  - id: logix_io
+    type: enip.scanner
+    hosts: logix
+    when: vars.enip
+    params: {targets: vfd, rpi_ms: 100}
 
 difficulty:
   easy:

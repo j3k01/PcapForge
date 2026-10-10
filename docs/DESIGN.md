@@ -125,7 +125,10 @@ background protocols on medium/hard: S7comm (`vars.s7`) and a SCADA OPC UA serve
 subscription (`vars.opcua`), see below.
 - SIEM export + detection content (`generate --siem`, `pcapforge export <run>`):
   - `export.py` — one tshark pass (`-T fields`, ~70 fields, occurrence aggregator `\x1f`), streamed and
-    aggregated in Python into `siem/{flows,modbus,dns,ntp,name_resolution,arp,dhcp}.jsonl`. Modbus pairs
+    aggregated in Python into `siem/{flows,modbus,dns,ntp,name_resolution,arp,dhcp,iec104,dnp3,bacnet,enip}.jsonl`.
+    IEC 104 gives one record per APDU (several share a TCP segment), DNP3 one per reassembled fragment,
+    BACnet one per BVLC message (WriteProperty values and priority decoded from the payload), EtherNet/IP one
+    per encapsulation message plus a per-minute, per-direction summary of class 0/1 I/O. Modbus pairs
     request/response by (TCP stream, transaction id) because exception responses carry no
     `modbus.request_frame`; TCP retransmissions are skipped. Writes are annotated from the register map
     of the PLC's process profile.
@@ -190,18 +193,41 @@ subscription (`vars.opcua`), see below.
   deterministic (identifiers from the behaviour seed, payload times from the scenario clock) and verified
   against tshark 4.6 dissectors (no malformed frames, no expert errors):
   - **IEC 60870-5-104** (`actors/iec104.py`): RTU `abb-rtu560` on a substation; GI, clock sync, TESTFR,
-    periodic (COT 1) and spontaneous (COT 3, CP56Time2a) measured values with k/w flow control.
-  - **DNP3** (`actors/dnp3.py`): RTAC `sel-rtac` at water/wastewater plants; polled profile (unsolicited
-    disabled), link CRCs, integrity and class 1/2/3 event polls, IIN restart / need-time handling.
+    periodic (COT 1) and spontaneous (COT 3, CP56Time2a) measured values with k/w flow control; counter
+    interrogation (freeze, then read integrated totals with sequence numbers); single commands
+    (select-before-operate) and short-float setpoint commands from the master, executed on the process and
+    returned as return information (COT 11).
+  - **DNP3** (`actors/dnp3.py`): RTAC `sel-rtac` at water/wastewater plants; link CRCs, integrity and
+    class 1/2/3 event polls, IIN restart / need-time handling. Polled by default; the shipped scenarios run
+    the unsolicited profile (null unsolicited response at session start, ENABLE_UNSOLICITED after the
+    startup, event reports from the outstation's own `dnp3.scan` actions with their own sequence numbers,
+    confirmed by the master inside the same action). One scan samples the process once: the reports that
+    drain its events do not sample again, since a second sample at the same virtual time would draw fresh
+    measurement noise and invent events.
   - **BACnet/IP** (`actors/bacnet.py`): two `siemens-pxc` controllers in a building; Who-Is / I-Am broadcasts,
-    ReadProperty(Multiple), SubscribeCOV and unconfirmed COV notifications.
+    ReadProperty(Multiple), SubscribeCOV and unconfirmed COV notifications; WriteProperty on commandable
+    values (priority array, relinquish). A BMS server on the plant IT subnet is a foreign device of pxc-01
+    (BBMD: foreign-device table, Distribute-Broadcast-To-Network, Forwarded-NPDUs); the composer rewrites the
+    originating B/IP address inside Forwarded-NPDUs to the announced address (`compose/bacnet.py`).
   - **EtherNet/IP** (`actors/enip.py`): `rockwell-compactlogix`; ListIdentity browse (the composer rewrites
     the reply's sin_addr, `compose/enip.py`, and answers the browse socket's final port), RegisterSession,
-    Forward_Open class 3, connected Multiple Service Packet Read Tag polling.
-  - Server-initiated messages (IEC 104 periodic/spontaneous data, BACnet I-Am and COV, the ENIP ListIdentity
-    reply) are actions of the *server* actor on its own host; `assign_flows` binds a server packet with
-    payload to the current action when that action belongs to the server's host, so it is timed at the
-    action's virtual time. Server actors run those sends on `Runtime.loop`.
+    Forward_Open class 3, connected Multiple Service Packet Read Tag polling. Class 1 implicit I/O: the
+    Logix (`enip.scanner`) opens a connection to a `rockwell-powerflex525` (`enip.adapter`) and the first
+    O->T / T->O pair is recorded on UDP 12222 (mapped to 2222); `compose/enip.cyclic_io` continues the
+    stream every RPI for the rest of the capture from the same line program and drive model.
+  - Server-initiated messages (IEC 104 periodic/spontaneous data, DNP3 unsolicited responses, BACnet I-Am
+    and COV, the ENIP ListIdentity reply) are actions of the *server* actor on its own host; `assign_flows`
+    binds a server packet with payload to the current action when that action belongs to the server's host,
+    so it is timed at the action's virtual time. Server actors run those sends on `Runtime.loop`.
+  - Detections (`detections.py`, sids 9101000+ and Sigma over the new datasets): commands, interrogations,
+    polls, writes and connection set-up of these protocols from hosts other than the approved masters /
+    originators, BACnet foreign-device registration and BBMD table changes. Suricata needs its DNP3 and
+    ENIP parsers enabled (`SURICATA_PARSERS`).
+- IPv6 (`compose/ipv6.py`, `vars.ipv6`): besides the Windows link-local baseline, the sensor segment's
+  firewall (`fortigate`, `ipv6_router` in devices.yaml with FortiOS defaults) sends Router Advertisements
+  with a seeded ULA /64; Windows hosts form SLAAC stable and temporary addresses (MLDv2 joins, DAD) and run
+  unicast Neighbor Discovery with the router (address resolution, NUD probes after ReachableTime). Hosts
+  never send from the SLAAC addresses: only ND is modelled.
 - FLOAT32 registers: profile points may be `type: float32` (two registers, profile `word_order` big = ABCD or
   little = CDAB); `power_substation` and `hvac_building` use them. `Point.encode` returns the register words,
   `ProcessProfile.decode_block` decodes whole points from a read/write block (half a float is skipped), and a

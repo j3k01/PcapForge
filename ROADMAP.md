@@ -6,7 +6,8 @@ Current state:
   (`ot-modbus-command-replay`), coil manipulation (`ot-modbus-coil-manipulation`) and alarm masking
   (`ot-modbus-alarm-masking`); the process, PLC count and device pool are drawn per seed;
 - protocols: Modbus/TCP, OPC UA, S7comm, IEC 60870-5-104, DNP3, BACnet/IP, EtherNet/IP (CIP), DHCPv4,
-  DNS/NTP/ARP and Windows name-resolution chatter, plus an IPv6 link-local baseline;
+  DNS/NTP/ARP and Windows name-resolution chatter, plus an IPv6 baseline (link-local, Router Advertisements,
+  SLAAC, unicast Neighbor Discovery);
 - composer realism: causal retiming with TCP segmentation, SPAN artefacts (duplicates, drops, VLAN,
   sensor clock), a host-firewall model (filtered vs closed ports), and RFC-correct DHCP delivery;
 - process models: per-point descriptions, a vendor (Modicon) register-numbering convention and
@@ -25,7 +26,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ## 1. Realism of the traffic (highest value, fully defensive)
 
-- [x] **IPv6 baseline on Windows hosts** (L), behind the scenario var `ipv6` (medium/hard). Windows hosts on the sensor segment get a link-local address with DAD, Router Solicitations and MLDv2 reports, synthesized like ARP. They also send LLMNR/mDNS over IPv6 (copies of the recorded datagrams) and recorded DHCPv6 Solicits. Still open: unicast IPv6 conversations and Router Advertisements (there is no IPv6 router in the model). Original notes on what real Windows machines show:
+- [x] **IPv6 baseline on Windows hosts** (L), behind the scenario var `ipv6` (medium/hard). Windows hosts on the sensor segment get a link-local address with DAD, Router Solicitations and MLDv2 reports, synthesized like ARP. They also send LLMNR/mDNS over IPv6 (copies of the recorded datagrams) and recorded DHCPv6 Solicits. The sensor segment's firewall (FortiGate, FortiOS defaults) sends Router Advertisements with a seeded ULA prefix; hosts form SLAAC stable and temporary addresses and run unicast Neighbor Discovery with the router. Still open: IPv6 traffic from the SLAAC addresses (only ND is modelled). Original notes on what real Windows machines show:
   - link-local addresses;
   - Router/Neighbor Solicitation and MLD reports;
   - DHCPv6 Solicit, and LLMNR/mDNS over IPv6.
@@ -55,7 +56,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
     `ot-modbus-alarm-masking` (`modbus.alarm_mask` actor — blinds an alarm threshold, then pushes the
     setpoint it guarded out of band, in that order).
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
-- [x] **More protocols as background actors** (M each): IEC 60870-5-104 (`iec104.*`, substation RTU), DNP3 (`dnp3.*`, polled RTAC at water/wastewater plants), BACnet/IP (`bacnet.*`, building controllers with COV) and EtherNet/IP/CIP (`enip.*`, CompactLogix tag reads). Hand-written with the standard library rather than `c104` / `bacpypes3` (deterministic, no background timers); wired into `ot-baseline-operations` and `ot-modbus-write-manipulation` on medium/hard (`vars.telecontrol` picks the outstation for the drawn process, `vars.enip`). Still open: IEC 104 control commands and counter interrogation, DNP3 unsolicited responses, BACnet WriteProperty / BBMD, EtherNet/IP implicit I/O (UDP 2222), SIEM datasets and detection rules for these protocols.
+- [x] **More protocols as background actors** (M each): IEC 60870-5-104 (`iec104.*`, substation RTU), DNP3 (`dnp3.*`, RTAC at water/wastewater plants), BACnet/IP (`bacnet.*`, building controllers with COV) and EtherNet/IP/CIP (`enip.*`, CompactLogix tag reads). Hand-written with the standard library rather than `c104` / `bacpypes3` (deterministic, no background timers); wired into `ot-baseline-operations` and `ot-modbus-write-manipulation` on medium/hard (`vars.telecontrol` picks the outstation for the drawn process, `vars.enip`). Also done: IEC 104 setpoint / switching commands and counter interrogation, DNP3 unsolicited responses (used in the shipped scenarios), BACnet WriteProperty with priority array and a BBMD with a foreign-device BMS server, EtherNet/IP class 1 implicit I/O to a PowerFlex 525 (UDP 2222), SIEM datasets (`iec104`, `dnp3`, `bacnet`, `enip`) and Suricata / Sigma rules for these protocols. Still open: incident scenarios over these protocols.
 - [x] **Process-model polish** (S): translated process titles (pl), point descriptions on every register, and a vendor register-numbering convention in the handout (`register_style`, Modicon 4xxxx/3xxxx/1xxxx; the wire stays 0-based). 32-bit floats across two registers: a point may be `type: float32` (IEEE 754 in two registers, profile `word_order` `big` = ABCD or `little` = CDAB); `power_substation` (ABCD) and `hvac_building` (CDAB) use them for their analog values. Facts carry the written words as `registers`, the SIEM export decodes per point, the handout map shows the type, and float setpoints get exact Suricata band rules (`byte_test` on the IEEE 754 bit pattern of a Write Multiple Registers request starting at the point).
 
 ## 3. IT line (benign equivalents only, see CONTRIBUTING.md)

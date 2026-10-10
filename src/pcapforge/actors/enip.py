@@ -1,4 +1,5 @@
-"""EtherNet/IP explicit messaging actors: a Rockwell Logix controller and an HMI driver.
+"""EtherNet/IP actors: a Rockwell Logix controller, an HMI driver, and class 1 I/O between the
+Logix (scanner) and a PowerFlex 525 drive (adapter).
 
 The controller side is a hand-written encapsulation / CIP target bound to the host's loopback
 address on TCP and UDP port 14818 (mapped to 44818). It answers ListIdentity (UDP and TCP),
@@ -11,6 +12,14 @@ The client is a FactoryTalk Linx / RSLinx Enterprise style driver: one ListIdent
 broadcast at startup, then per controller a session (ListServices, RegisterSession, Identity
 Get_Attribute_All, Forward_Open of a Class 3 connection through the backplane to slot 0) and
 cyclic Multiple Service Packet tag reads sized to the connection.
+
+Implicit I/O: the scanner (on the Logix host) opens a class 1 connection to the drive's
+embedded adapter like a Generic Ethernet Module (RegisterSession, Forward_Open to the Assembly
+object: configuration instance 6, O->T point 2, T->O point 1, point-to-point both ways) and
+exchanges the first O->T / T->O pair on UDP 12222 (mapped to 2222). The composer continues the
+cyclic stream at the API for the rest of the capture (``compose/enip.py``) with the same
+``LineProgram`` (Logic Command + speed reference from the controller's process) and ``Drive``
+(PowerFlex 525 velocity mode: ramp, Logic Status, feedback, Datalinks) as the recording.
 """
 
 from __future__ import annotations
@@ -27,8 +36,8 @@ from pcapforge import ports
 from pcapforge.actors import register
 from pcapforge.actors.base import Actor
 from pcapforge.actors.modbus import host_process, host_sim
-from pcapforge.plan import host_ref
-from pcapforge.process import BIT_TABLES, ProcessProfile
+from pcapforge.plan import action_ref, host_ref
+from pcapforge.process import BIT_TABLES, Point, ProcessProfile, ProcessSim
 from pcapforge.rng import Rng
 from pcapforge.scenario import ScenarioError
 from pcapforge.topology import SINKS
@@ -111,6 +120,52 @@ FORWARD_CLOSE_REPLY = struct.Struct("<HHIBB")
 # Logix status word (owned, I/O connection in run mode, keyswitch remote) and Identity state.
 LOGIX_STATUS = 0x3060
 LOGIX_STATE = 0x03
+
+# --- implicit (class 1) I/O ----------------------------------------------------------------
+
+ITEM_SEQUENCED_ADDRESS = 0x8002       # CPF item of every class 0/1 packet: connection id, sequence number
+IO_PORT = ports.WELL_KNOWN[ports.ENIP_IO]   # 2222
+ASSEMBLY_CLASS = 0x04
+
+# A Logix Generic Ethernet Module connection (RSLogix 5000 v18+ "unicast"): point-to-point both
+# ways, scheduled priority, fixed size; client transport, cyclic trigger, class 1; timeout x4.
+POINT_TO_POINT = 0x4000
+SCHEDULED = 0x0800
+TRANSPORT_CLASS1 = 0x01
+IO_TIMEOUT_MULTIPLIER = 0             # x4
+RUN = 0x00000001                      # O->T 32-bit run/idle header, bit 0: run mode
+SEQUENCE_COUNT, RUN_IDLE = 2, 4       # bytes before the I/O data of a class 1 packet
+
+EXT_CONNECTION_IN_USE = 0x0100
+EXT_TRANSPORT_NOT_SUPPORTED = 0x0103
+EXT_OWNERSHIP_CONFLICT = 0x0106
+EXT_RPI_NOT_SUPPORTED = 0x0111
+EXT_INVALID_OT_SIZE = 0x0127
+EXT_INVALID_TO_SIZE = 0x0128
+
+# PowerFlex 525 embedded EtherNet/IP adapter through the Generic profile, Comm Format Data - INT
+# (520COM-UM001, chapters 4-5 and appendix D). Output (O->T, assembly 2): Logic Command, Reference
+# (0.01 Hz). Input (T->O, assembly 1): two pad words of the Generic profile, Logic Status, Feedback
+# (0.01 Hz), Datalink Out 1 = b003 Output Current (0.01 A), Datalink Out 2 = b005 DC Bus Voltage (V).
+DRIVE_INPUT_ASSEMBLY, DRIVE_OUTPUT_ASSEMBLY, DRIVE_CONFIG_ASSEMBLY = 1, 2, 6
+DRIVE_OUTPUT = struct.Struct("<Hh")
+DRIVE_INPUT = struct.Struct("<HHHhHH")
+OT_SIZE = SEQUENCE_COUNT + RUN_IDLE + DRIVE_OUTPUT.size      # 10
+TO_SIZE = SEQUENCE_COUNT + DRIVE_INPUT.size                  # 14
+DRIVE_MIN_RPI_US = 5_000
+OUTPUT_IMAGE = ["Logic Command", "Reference (0.01 Hz)"]
+INPUT_IMAGE = ["Pad", "Pad", "Logic Status", "Feedback (0.01 Hz)",
+               "Datalink Out 1: b003 Output Current (0.01 A)", "Datalink Out 2: b005 DC Bus Voltage (V)"]
+# Logic Command (velocity): bit 1 Start, bits 4-5 = 01 Forward. Logic Status: 0 Ready, 1 Active,
+# 2 Command Forward, 3 Rotating Forward, 4 Accelerating, 5 Decelerating, 8 At Reference,
+# 9 / 10 frequency / run command from the active comm port.
+CMD_STOP, CMD_START, CMD_FORWARD = 0x0001, 0x0002, 0x0010
+ST_READY, ST_ACTIVE, ST_CMD_FORWARD, ST_FORWARD = 0x0001, 0x0002, 0x0004, 0x0008
+ST_ACCEL, ST_DECEL, ST_AT_SPEED, ST_COMM_FREQ, ST_COMM_RUN = 0x0010, 0x0020, 0x0100, 0x0200, 0x0400
+MAX_HZ = 60.0                         # P044 [Maximum Freq]
+RAMP_HZ_S = MAX_HZ / 10.0             # P041 / P042 [Accel / Decel Time 1] = 10.00 s
+RATED_A, MAGNETIZING_A, FULL_LOAD_A, ACCEL_A = 10.5, 3.6, 8.4, 1.2   # 25B-D010N104 on a pump / fan load
+DC_BUS_V = 662.0                      # 480 V AC line, rectified
 
 
 def encap(command: int, data: bytes = b"", session: int = 0, context: bytes = bytes(8), status: int = 0) -> bytes:
@@ -200,19 +255,54 @@ def connection_path(slot: int = CONTROLLER_SLOT) -> bytes:
     return bytes([BACKPLANE_PORT, slot]) + ROUTER_PATH
 
 
-def forward_open_request(ot_id: int, to_id: int, serial: int, originator_serial: int) -> bytes:
-    path = connection_path()
+def forward_open_request(ot_id: int, to_id: int, serial: int, originator_serial: int, *,
+                         rpi_us: int = RPI_US, ot_params: int = NETWORK_PARAMS, to_params: int = NETWORK_PARAMS,
+                         transport: int = TRANSPORT_CLASS3, multiplier: int = TIMEOUT_MULTIPLIER,
+                         path: bytes | None = None) -> bytes:
+    """Forward_Open; the defaults are the HMI driver's class 3 connection to the controller."""
+    path = connection_path() if path is None else path
     data = FORWARD_OPEN.pack(PRIORITY_TICK, TIMEOUT_TICKS, ot_id, to_id, serial, ORIGINATOR_VENDOR,
-                             originator_serial, TIMEOUT_MULTIPLIER, RPI_US, NETWORK_PARAMS, RPI_US,
-                             NETWORK_PARAMS, TRANSPORT_CLASS3, len(path) // 2)
+                             originator_serial, multiplier, rpi_us, ot_params, rpi_us, to_params, transport,
+                             len(path) // 2)
     return cip_request(SVC_FORWARD_OPEN, CONNECTION_MANAGER_PATH, data + path)
 
 
-def forward_close_request(serial: int, originator_serial: int) -> bytes:
-    path = connection_path()
+def forward_close_request(serial: int, originator_serial: int, path: bytes | None = None) -> bytes:
+    path = connection_path() if path is None else path
     data = FORWARD_CLOSE.pack(PRIORITY_TICK, TIMEOUT_TICKS, serial, ORIGINATOR_VENDOR, originator_serial,
                               len(path) // 2, 0)
     return cip_request(SVC_FORWARD_CLOSE, CONNECTION_MANAGER_PATH, data + path)
+
+
+def io_path(config: int = DRIVE_CONFIG_ASSEMBLY, ot_point: int = DRIVE_OUTPUT_ASSEMBLY,
+            to_point: int = DRIVE_INPUT_ASSEMBLY) -> bytes:
+    """Application path of an I/O connection: Assembly class, configuration instance, then the
+    O->T (consumed) and T->O (produced) connection points."""
+    return bytes([0x20, ASSEMBLY_CLASS, 0x24, config, 0x2C, ot_point, 0x2C, to_point])
+
+
+def io_forward_open_request(ot_id: int, to_id: int, serial: int, originator_serial: int, rpi_us: int) -> bytes:
+    """The scanner's Forward_Open of the drive's class 1 connection (the target assigns the
+    point-to-point O->T id; the originator's T->O id is the one the drive produces with)."""
+    return forward_open_request(ot_id, to_id, serial, originator_serial, rpi_us=rpi_us,
+                                ot_params=POINT_TO_POINT | SCHEDULED | OT_SIZE,
+                                to_params=POINT_TO_POINT | SCHEDULED | TO_SIZE,
+                                transport=TRANSPORT_CLASS1, multiplier=IO_TIMEOUT_MULTIPLIER, path=io_path())
+
+
+def io_packet(connection_id: int, sequence: int, count: int, data: bytes) -> bytes:
+    """One class 1 datagram: Sequenced Address item (connection id, encapsulation sequence
+    number) and Connected Data item (16-bit CIP sequence count, then the I/O data)."""
+    return cpf((ITEM_SEQUENCED_ADDRESS, struct.pack("<II", connection_id, sequence)),
+               (ITEM_CONNECTED_DATA, struct.pack("<H", count) + data))
+
+
+def parse_io_packet(datagram: bytes) -> tuple[int, int, int, bytes]:
+    """(connection id, sequence number, sequence count, I/O data) of a class 1 datagram."""
+    items = parse_cpf(datagram)
+    connection_id, sequence = struct.unpack("<II", items[ITEM_SEQUENCED_ADDRESS])
+    data = items[ITEM_CONNECTED_DATA]
+    return connection_id, sequence, struct.unpack_from("<H", data)[0], data[SEQUENCE_COUNT:]
 
 
 # --- identity and tags -------------------------------------------------------------------
@@ -332,29 +422,25 @@ class _Connection:
     triplet: tuple[int, int, int]         # connection serial, originator vendor, originator serial
 
 
-class LogixTarget:
-    """Encapsulation / CIP target of one controller, independent of sockets: ``handle`` turns one
-    encapsulation message into its reply (None: no reply). ``values(table)`` returns the
-    process values ({point: value}) at the current virtual time."""
+class EncapTarget:
+    """Encapsulation layer of an EtherNet/IP target, independent of sockets: ``handle`` turns one
+    encapsulation message into its reply (None: no reply). Subclasses answer unconnected CIP
+    requests (``unconnected``) and, if they accept class 3 connections, ``unit_data``."""
 
-    def __init__(self, controller: Controller, address: str, values: Callable[[str], dict[str, float]]) -> None:
-        self.controller = controller
+    def __init__(self, identity: Identity, session_base: int, address: str) -> None:
+        self.identity = identity
         self.address = address
-        self.values = values
-        self.by_name = {t.name: t for t in controller.tags}
         self.sessions: set[int] = set()
-        self.next_session = controller.session_base
-        self.connections: dict[int, _Connection] = {}
-        self._snapshot: dict[str, dict[str, float]] = {}
+        self.next_session = session_base
+        self.connections: dict[int, _Connection | _IoConnection] = {}   # by O->T connection id
 
     def handle(self, message: bytes, udp: bool = False) -> bytes | None:
         command, length, session, _, context, _ = ENCAP.unpack_from(message)
         data = message[ENCAP.size:ENCAP.size + length]
-        self._snapshot = {}
         if udp and command not in UDP_COMMANDS:
             return None
         if command == CMD_LIST_IDENTITY:
-            return encap(command, self.controller.identity.list_identity(self.address), session, context)
+            return encap(command, self.identity.list_identity(self.address), session, context)
         if command == CMD_LIST_SERVICES:
             return encap(command, cpf((ITEM_SERVICES, SERVICES_ITEM)), session, context)
         if command == CMD_REGISTER_SESSION:
@@ -376,17 +462,54 @@ class LogixTarget:
                 cip = parse_cpf(data[6:])[ITEM_UNCONNECTED_DATA]
                 return encap(command, rr_data(self.unconnected(cip), 0), session, context)
             if command == CMD_SEND_UNIT_DATA:
-                items = parse_cpf(data[6:])
-                connection = self.connections.get(struct.unpack("<I", items[ITEM_CONNECTED_ADDRESS])[0])
-                if connection is None:
-                    return None  # unknown connection: the controller drops the packet
-                payload = items[ITEM_CONNECTED_DATA]
-                reply = self.route(payload[2:])
-                return encap(command, unit_data(connection.to_id, struct.unpack_from("<H", payload)[0], reply),
-                             session, context)
+                reply = self.unit_data(parse_cpf(data[6:]))
+                return None if reply is None else encap(command, reply, session, context)
         except (KeyError, IndexError, struct.error):
             return encap(command, b"", session, context, STATUS_INVALID_LENGTH)
         return encap(command, b"", session, context, STATUS_INVALID_COMMAND)
+
+    def unconnected(self, message: bytes) -> bytes:
+        raise NotImplementedError
+
+    def unit_data(self, items: dict[int, bytes]) -> bytes | None:
+        """SendUnitData body answering a connected message (None: drop it, no such connection)."""
+        return None
+
+    def forward_close(self, data: bytes) -> bytes:
+        if len(data) < FORWARD_CLOSE.size:
+            return cip_reply(SVC_FORWARD_CLOSE, NOT_ENOUGH_DATA)
+        _, _, serial, vendor, originator_serial, _, _ = FORWARD_CLOSE.unpack_from(data)
+        triplet = (serial, vendor, originator_serial)
+        for ot_id, connection in self.connections.items():
+            if connection.triplet == triplet:
+                del self.connections[ot_id]
+                return cip_reply(SVC_FORWARD_CLOSE, OK, FORWARD_CLOSE_REPLY.pack(*triplet, 0, 0))
+        return cip_reply(SVC_FORWARD_CLOSE, CONNECTION_FAILURE, FORWARD_CLOSE_REPLY.pack(*triplet, 0, 0),
+                         (EXT_CONNECTION_NOT_FOUND,))
+
+
+class LogixTarget(EncapTarget):
+    """Encapsulation / CIP target of one controller. ``values(table)`` returns the process
+    values ({point: value}) at the current virtual time."""
+
+    def __init__(self, controller: Controller, address: str, values: Callable[[str], dict[str, float]]) -> None:
+        super().__init__(controller.identity, controller.session_base, address)
+        self.controller = controller
+        self.values = values
+        self.by_name = {t.name: t for t in controller.tags}
+        self._snapshot: dict[str, dict[str, float]] = {}
+
+    def handle(self, message: bytes, udp: bool = False) -> bytes | None:
+        self._snapshot = {}
+        return super().handle(message, udp)
+
+    def unit_data(self, items: dict[int, bytes]) -> bytes | None:
+        connection = self.connections.get(struct.unpack("<I", items[ITEM_CONNECTED_ADDRESS])[0])
+        if connection is None:
+            return None  # unknown connection: the controller drops the packet
+        payload = items[ITEM_CONNECTED_DATA]
+        reply = self.route(payload[2:])
+        return unit_data(connection.to_id, struct.unpack_from("<H", payload)[0], reply)
 
     # -- CIP -------------------------------------------------------------------------------
     def unconnected(self, message: bytes) -> bytes:
@@ -450,23 +573,11 @@ class LogixTarget:
         return cip_reply(SVC_FORWARD_OPEN, OK,
                          FORWARD_OPEN_REPLY.pack(ot_id, to_id, *triplet, ot_rpi, to_rpi, 0, 0))
 
-    def forward_close(self, data: bytes) -> bytes:
-        if len(data) < FORWARD_CLOSE.size:
-            return cip_reply(SVC_FORWARD_CLOSE, NOT_ENOUGH_DATA)
-        _, _, serial, vendor, originator_serial, _, _ = FORWARD_CLOSE.unpack_from(data)
-        triplet = (serial, vendor, originator_serial)
-        for ot_id, connection in self.connections.items():
-            if connection.triplet == triplet:
-                del self.connections[ot_id]
-                return cip_reply(SVC_FORWARD_CLOSE, OK, FORWARD_CLOSE_REPLY.pack(*triplet, 0, 0))
-        return cip_reply(SVC_FORWARD_CLOSE, CONNECTION_FAILURE, FORWARD_CLOSE_REPLY.pack(*triplet, 0, 0),
-                         (EXT_CONNECTION_NOT_FOUND,))
-
 
 # --- server ----------------------------------------------------------------------------
 
 class _Datagrams(asyncio.DatagramProtocol):
-    def __init__(self, target: LogixTarget) -> None:
+    def __init__(self, target: EncapTarget) -> None:
         self.target = target
         self.transport: asyncio.DatagramTransport | None = None
 
@@ -484,9 +595,9 @@ class _Datagrams(asyncio.DatagramProtocol):
 
 
 class _Endpoint:
-    """One controller's listeners (TCP and UDP 14818); ``Runtime.servers`` awaits ``shutdown()``."""
+    """One target's listeners (TCP and UDP 14818); ``Runtime.servers`` awaits ``shutdown()``."""
 
-    def __init__(self, target: LogixTarget) -> None:
+    def __init__(self, target: EncapTarget) -> None:
         self.target = target
         self.server: asyncio.Server | None = None
         self.udp: _Datagrams | None = None
@@ -533,6 +644,32 @@ def _revision(text: str) -> tuple[int, int]:
     return int(match[1]), int(match[2])
 
 
+def device_identity(actor: Actor, host, serial, rng: Rng, status: int = LOGIX_STATUS) -> Identity:
+    """CIP Identity of ``host``'s device; ``serial`` (params) or one drawn from ``rng``."""
+    ident = host.device.identity or {}
+    missing = [k for k in ("VendorId", "DeviceType", "CipProductCode", "ProductCode", "MajorMinorRevision")
+               if k not in ident]
+    if missing:
+        raise ScenarioError(f"{actor.id}: device '{host.device.name}' of host '{host.id}' is not an "
+                            f"EtherNet/IP device (identity lacks {', '.join(missing)})")
+    drawn = rng.randrange(0x00400000, 0x01000000)
+    if serial is None:
+        serial = drawn
+    elif isinstance(serial, str):
+        try:
+            serial = int(serial, 0)
+        except ValueError:
+            raise ScenarioError(f"{actor.id}: params.serial '{serial}' is not a number") from None
+    if not isinstance(serial, int) or not 0 < serial <= 0xFFFFFFFF:
+        raise ScenarioError(f"{actor.id}: params.serial must be a 32-bit serial number")
+    try:
+        revision = _revision(ident["MajorMinorRevision"])
+    except ValueError as exc:
+        raise ScenarioError(f"{actor.id}: device '{host.device.name}': {exc}") from None
+    return Identity(int(ident["VendorId"]), int(ident["DeviceType"]), int(ident["CipProductCode"]),
+                    revision, serial, str(ident["ProductCode"])[:32], status)
+
+
 @register
 class EnipServer(Actor):
     """Rockwell Logix controller: identity from the device, tags mirror the process model."""
@@ -550,7 +687,7 @@ class EnipServer(Actor):
         for host in self.hosts:
             profile = host_process(self, host)
             rng = self.rng.child(f"controller:{host.id}")
-            identity = self._identity(host, serial, rng)
+            identity = device_identity(self, host, serial, rng)
             controller = self.controllers[host.id] = Controller(
                 host.id, profile, identity, logix_tags(profile),
                 session_base=rng.randrange(0x00010000, 0x7FFF0000),
@@ -561,30 +698,6 @@ class EnipServer(Actor):
                                    for t in controller.tags]})
         self.plan_.facts[self.id] = {"hosts": [host_ref(h.id) for h in self.hosts], "port": ENCAP_PORT,
                                      "controllers": facts}
-
-    def _identity(self, host, serial, rng) -> Identity:
-        ident = host.device.identity or {}
-        missing = [k for k in ("VendorId", "DeviceType", "CipProductCode", "ProductCode", "MajorMinorRevision")
-                   if k not in ident]
-        if missing:
-            raise ScenarioError(f"{self.id}: device '{host.device.name}' of host '{host.id}' is not an "
-                                f"EtherNet/IP device (identity lacks {', '.join(missing)})")
-        drawn = rng.randrange(0x00400000, 0x01000000)
-        if serial is None:
-            serial = drawn
-        elif isinstance(serial, str):
-            try:
-                serial = int(serial, 0)
-            except ValueError:
-                raise ScenarioError(f"{self.id}: params.serial '{serial}' is not a number") from None
-        if not isinstance(serial, int) or not 0 < serial <= 0xFFFFFFFF:
-            raise ScenarioError(f"{self.id}: params.serial must be a 32-bit serial number")
-        try:
-            revision = _revision(ident["MajorMinorRevision"])
-        except ValueError as exc:
-            raise ScenarioError(f"{self.id}: device '{host.device.name}': {exc}") from None
-        return Identity(int(ident["VendorId"]), int(ident["DeviceType"]), int(ident["CipProductCode"]),
-                        revision, serial, str(ident["ProductCode"])[:32])
 
     async def serve(self, rt) -> None:
         self.endpoints: dict[str, _Endpoint] = {}
@@ -833,3 +946,413 @@ class EnipClient(Actor):
                 client.close(graceful=False)
             else:
                 client.close()
+
+
+# --- implicit I/O: the drive's adapter ---------------------------------------------------------
+
+DRIVE_STATUS = 0x0034                 # Identity status: configured, no I/O connection established
+
+
+@dataclass
+class Adapter:
+    """Plan-time description of one drive's embedded EtherNet/IP adapter."""
+    host_id: str
+    identity: Identity
+    session_base: int
+    key: str                              # rng key of the O->T connection ids the adapter assigns
+
+    def connection_id(self, serial: int, vendor: int, originator_serial: int) -> int:
+        """O->T network connection id the adapter assigns to a Forward_Open (deterministic)."""
+        return Rng(self.key, serial, vendor, originator_serial).getrandbits(32) or 1
+
+
+class Drive:
+    """A PowerFlex 525 in velocity mode as its T->O image shows it: while Start is latched the
+    output frequency ramps to the latest Reference at the accel / decel rate (to 0 Hz after a
+    Stop); Logic Status, Feedback and the Datalinks (output current, DC bus voltage) follow.
+    ``rng`` adds the measurement noise of the two Datalinks."""
+
+    def __init__(self, rng: Rng) -> None:
+        self.rng = rng
+        self.t: float | None = None
+        self.hz = 0.0
+        self.reference = 0.0
+        self.running = False
+
+    @property
+    def target(self) -> float:
+        return self.reference if self.running else 0.0
+
+    def advance(self, t: float) -> None:
+        """Ramp the output frequency to virtual time ``t``."""
+        if self.t is not None and t > self.t:
+            step = RAMP_HZ_S * (t - self.t)
+            gap = self.target - self.hz
+            self.hz = self.target if abs(gap) <= step else self.hz + math.copysign(step, gap)
+        if self.t is None or t > self.t:
+            self.t = t
+
+    def consume(self, t: float, data: bytes) -> None:
+        """O->T data after the run/idle header: Logic Command and Reference."""
+        self.advance(t)
+        command, reference = DRIVE_OUTPUT.unpack_from(data)
+        if command & CMD_STOP:
+            self.running = False
+        elif command & CMD_START:
+            self.running = True
+        self.reference = min(max(reference / 100.0, 0.0), MAX_HZ)
+
+    def produce(self, t: float) -> bytes:
+        """T->O data: the Generic profile's two pad words, Logic Status, Feedback, Datalinks."""
+        self.advance(t)
+        status = ST_READY | ST_CMD_FORWARD | ST_FORWARD | ST_COMM_FREQ | ST_COMM_RUN
+        if self.running:
+            status |= ST_ACTIVE
+        if self.hz < self.target:
+            status |= ST_ACCEL
+        elif self.hz > self.target:
+            status |= ST_DECEL
+        elif self.running:
+            status |= ST_AT_SPEED
+        amps = 0.0
+        if self.running or self.hz > 0:
+            amps = (MAGNETIZING_A + (FULL_LOAD_A - MAGNETIZING_A) * (self.hz / MAX_HZ) ** 2
+                    + (ACCEL_A if status & ST_ACCEL else 0.0) + self.rng.gauss(0.0, 0.04))
+        volts = DC_BUS_V - 6.0 * amps / RATED_A + self.rng.gauss(0.0, 0.8)
+        return DRIVE_INPUT.pack(0, 0, status, round(self.hz * 100), max(round(amps * 100), 0), round(volts))
+
+
+@dataclass
+class _IoConnection:
+    to_id: int
+    triplet: tuple[int, int, int]         # connection serial, originator vendor, originator serial
+    drive: Drive
+    sequence: int = 0                     # encapsulation sequence number of the last T->O packet
+    count: int = 0                        # CIP sequence count of the last T->O packet
+
+
+class AdapterTarget(EncapTarget):
+    """The drive's encapsulation / CIP target: Identity, one exclusive-owner class 1 connection
+    to its assemblies (Forward_Open / Forward_Close), and the I/O datagrams of that connection."""
+
+    def __init__(self, adapter: Adapter, address: str) -> None:
+        super().__init__(adapter.identity, adapter.session_base, address)
+        self.adapter = adapter
+
+    def unconnected(self, message: bytes) -> bytes:
+        try:
+            service, path, data = parse_request(message)
+        except ValueError:
+            return cip_reply(message[0] if message else 0, NOT_ENOUGH_DATA)
+        if path == CONNECTION_MANAGER_PATH and service == SVC_FORWARD_OPEN:
+            return self.forward_open(data)
+        if path == CONNECTION_MANAGER_PATH and service == SVC_FORWARD_CLOSE:
+            return self.forward_close(data)
+        if path == IDENTITY_PATH and service == SVC_GET_ATTRIBUTE_ALL:
+            return cip_reply(service, OK, self.identity.attributes())
+        if path in (IDENTITY_PATH, CONNECTION_MANAGER_PATH):
+            return cip_reply(service, SERVICE_NOT_SUPPORTED)
+        return cip_reply(service, PATH_UNKNOWN)
+
+    def forward_open(self, data: bytes) -> bytes:
+        if len(data) < FORWARD_OPEN.size:
+            return cip_reply(SVC_FORWARD_OPEN, NOT_ENOUGH_DATA)
+        (_, _, _, to_id, serial, vendor, originator_serial, _, ot_rpi, ot_params, to_rpi, to_params, transport,
+         path_words) = FORWARD_OPEN.unpack_from(data)
+        triplet = (serial, vendor, originator_serial)
+        path = data[FORWARD_OPEN.size:FORWARD_OPEN.size + 2 * path_words]
+        error = None
+        if any(c.triplet == triplet for c in self.connections.values()):
+            error = EXT_CONNECTION_IN_USE
+        elif self.connections:
+            error = EXT_OWNERSHIP_CONFLICT
+        elif transport != TRANSPORT_CLASS1:
+            error = EXT_TRANSPORT_NOT_SUPPORTED
+        elif path != io_path():
+            error = EXT_INVALID_PATH
+        elif ot_params & 0x01FF != OT_SIZE:
+            error = EXT_INVALID_OT_SIZE
+        elif to_params & 0x01FF != TO_SIZE:
+            error = EXT_INVALID_TO_SIZE
+        elif min(ot_rpi, to_rpi) < DRIVE_MIN_RPI_US:
+            error = EXT_RPI_NOT_SUPPORTED
+        if error is not None:
+            return cip_reply(SVC_FORWARD_OPEN, CONNECTION_FAILURE, FORWARD_CLOSE_REPLY.pack(*triplet, 0, 0), (error,))
+        ot_id = self.adapter.connection_id(*triplet)
+        self.connections[ot_id] = _IoConnection(to_id, triplet, Drive(Rng(self.adapter.key, "drive", *triplet)))
+        return cip_reply(SVC_FORWARD_OPEN, OK,
+                         FORWARD_OPEN_REPLY.pack(ot_id, to_id, *triplet, ot_rpi, to_rpi, 0, 0))
+
+    def io(self, datagram: bytes, t: float) -> bytes | None:
+        """Consume an O->T datagram at virtual time ``t`` and return the next T->O datagram (the
+        recording's first exchange; the composer continues the stream). None: not a datagram
+        of an open connection."""
+        try:
+            connection_id, _, _, data = parse_io_packet(datagram)
+        except (KeyError, struct.error):
+            return None
+        connection = self.connections.get(connection_id)
+        if connection is None or len(data) != OT_SIZE - SEQUENCE_COUNT:
+            return None
+        if struct.unpack_from("<I", data)[0] & RUN:
+            connection.drive.consume(t, data[RUN_IDLE:])
+        connection.sequence = (connection.sequence + 1) & 0xFFFFFFFF
+        connection.count = (connection.count + 1) & 0xFFFF
+        return io_packet(connection.to_id, connection.sequence, connection.count, connection.drive.produce(t))
+
+
+class _IoDatagrams(asyncio.DatagramProtocol):
+    """UDP 2222 (recording port 12222) of an adapter: T->O goes to the originator's port 2222."""
+
+    def __init__(self, target: AdapterTarget, clock: Callable[[], float]) -> None:
+        self.target = target
+        self.clock = clock
+        self.transport: asyncio.DatagramTransport | None = None
+
+    def connection_made(self, transport) -> None:
+        self.transport = transport
+
+    def datagram_received(self, data: bytes, addr) -> None:
+        reply = self.target.io(data, self.clock())
+        if reply is not None:
+            self.transport.sendto(reply, (addr[0], ports.ENIP_IO))
+
+    def error_received(self, exc) -> None:
+        pass
+
+
+class _AdapterEndpoint(_Endpoint):
+    """An adapter's listeners: encapsulation on TCP / UDP 14818 plus class 1 I/O on UDP 12222."""
+
+    def __init__(self, target: AdapterTarget, clock: Callable[[], float]) -> None:
+        super().__init__(target)
+        self.clock = clock
+        self.io: _IoDatagrams | None = None
+
+    async def start(self, address: str) -> None:
+        await super().start(address)
+        _, self.io = await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: _IoDatagrams(self.target, self.clock), local_addr=(address, ports.ENIP_IO))
+
+    async def shutdown(self) -> None:
+        self.io.transport.close()
+        await super().shutdown()
+
+
+@register
+class EnipAdapter(Actor):
+    """EtherNet/IP adapter of a PowerFlex 525 drive (Generic profile I/O, one exclusive owner)."""
+
+    type = "enip.adapter"
+    is_server = True
+
+    def plan(self) -> None:
+        serial = self.param("serial")
+        if serial is not None and len(self.hosts) > 1:
+            raise ScenarioError(f"{self.id}: params.serial names one drive, but the actor runs on "
+                                f"{len(self.hosts)} hosts")
+        self.adapters: dict[str, Adapter] = {}
+        facts = []
+        for host in self.hosts:
+            rng = self.rng.child(f"adapter:{host.id}")
+            identity = device_identity(self, host, serial, rng, DRIVE_STATUS)
+            self.adapters[host.id] = Adapter(host.id, identity, rng.randrange(0x00010000, 0x7FFF0000),
+                                             rng.child("connections").key)
+            facts.append({"host": host_ref(host.id), "identity": identity.facts(),
+                          "assemblies": {"input": DRIVE_INPUT_ASSEMBLY, "output": DRIVE_OUTPUT_ASSEMBLY,
+                                         "configuration": DRIVE_CONFIG_ASSEMBLY},
+                          "output_image": OUTPUT_IMAGE, "input_image": INPUT_IMAGE,
+                          "min_rpi_ms": DRIVE_MIN_RPI_US / 1000})
+        self.plan_.facts[self.id] = {"hosts": [host_ref(h.id) for h in self.hosts], "port": ENCAP_PORT,
+                                     "io_port": IO_PORT, "drives": facts}
+
+    async def serve(self, rt) -> None:
+        for host in self.hosts:
+            endpoint = _AdapterEndpoint(AdapterTarget(self.adapters[host.id], host.loopback), lambda: rt.clock.t)
+            await endpoint.start(host.loopback)
+            rt.servers.append(endpoint)
+
+
+def serving_adapter(plan, host_id: str) -> tuple[EnipAdapter, Adapter]:
+    """The enip.adapter actor running on ``host_id`` and its adapter."""
+    for actor in plan.actors:
+        if isinstance(actor, EnipAdapter) and host_id in actor.adapters:
+            return actor, actor.adapters[host_id]
+    raise ScenarioError(f"no enip.adapter runs on host '{host_id}'")
+
+
+# --- implicit I/O: the Logix scanner -------------------------------------------------------------
+
+MIN_REFERENCE_HZ = 20.0               # P043 [Minimum Freq] of a pump / fan drive
+
+
+def reference_point(profile: ProcessProfile) -> Point:
+    """The process input a drive's speed reference follows: a speed in % (pump, blower, fan),
+    else the first daily-cycle measurement, else the first measurement with a normal band."""
+    inputs = [p for p in profile.table("input") if p.model and p.model["type"] != "counter"]
+    rules = (lambda p: p.unit == "%" and p.name.endswith("_speed"),
+             lambda p: p.normal is not None and p.model["type"] == "daily",
+             lambda p: p.normal is not None)
+    for rule in rules:
+        for p in inputs:
+            if rule(p):
+                return p
+    raise ScenarioError(f"process '{profile.id}' has no measurement a drive reference can follow")
+
+
+def reference_hz(point: Point, value: float) -> float:
+    """Speed reference for ``value`` of ``point``: a % of maximum frequency, or the normal band
+    mapped onto half to full speed."""
+    if point.unit == "%":
+        hz = MAX_HZ * value / 100.0
+    else:
+        lo, hi = point.normal
+        hz = MAX_HZ / 2 * (1.0 + (value - lo) / (hi - lo))
+    return min(max(hz, MIN_REFERENCE_HZ), MAX_HZ)
+
+
+class LineProgram:
+    """The Logix program side of a drive connection: Logic Command Start + Forward and a speed
+    Reference (0.1 Hz steps) that follows one process point, sampled once per virtual second."""
+
+    def __init__(self, point: Point, reference: list[int]) -> None:
+        self.point = point
+        self.reference = reference        # 0.01 Hz, index = virtual second
+
+    @classmethod
+    def follow(cls, sim: ProcessSim, seconds: float) -> LineProgram:
+        point = reference_point(sim.profile)
+        reference = []
+        for second in range(int(math.ceil(seconds)) + 2):
+            sim.advance(float(second))
+            reference.append(10 * round(10 * reference_hz(point, sim.values(point.table)[point.name])))
+        return cls(point, reference)
+
+    def output(self, t: float) -> bytes:
+        """O->T data at virtual time ``t``: 32-bit run/idle header (run), Logic Command, Reference."""
+        second = min(max(int(t), 0), len(self.reference) - 1)
+        return struct.pack("<I", RUN) + DRIVE_OUTPUT.pack(CMD_START | CMD_FORWARD, self.reference[second])
+
+
+class _IoScan:
+    """The scanner's side of one class 1 connection: the encapsulation session it was opened
+    on (kept open, as Logix does) and the UDP socket its O->T packets leave from."""
+
+    def __init__(self, session: EnipSession, source: str, target: str) -> None:
+        self.session = session
+        self.source, self.target = source, target
+        self.udp: socket.socket | None = None
+        self.ids: tuple[int, int] | None = None            # O->T, T->O connection id
+        self.triplet: tuple[int, int] | None = None        # connection serial, originator serial
+        self.sequence = self.count = 0
+
+    def open(self, ot_id: int, to_id: int, serial: int, originator_serial: int, rpi_us: int) -> None:
+        reply = self.session.unconnected(io_forward_open_request(ot_id, to_id, serial, originator_serial, rpi_us))
+        ot_id, echoed, *_ = FORWARD_OPEN_REPLY.unpack_from(reply)
+        if echoed != to_id:
+            raise RuntimeError("Forward_Open reply does not carry the requested T->O connection id")
+        self.ids, self.triplet = (ot_id, to_id), (serial, originator_serial)
+
+    def produce(self, data: bytes) -> None:
+        """Send one O->T packet; the adapter answers with its T->O packet."""
+        if self.udp is None:
+            self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp.settimeout(3.0)
+            self.udp.bind((self.source, ports.ENIP_IO))
+        self.sequence = (self.sequence + 1) & 0xFFFFFFFF
+        self.count = (self.count + 1) & 0xFFFF
+        self.udp.sendto(io_packet(self.ids[0], self.sequence, self.count, data), (self.target, ports.ENIP_IO))
+        reply, _ = self.udp.recvfrom(2048)
+        if parse_io_packet(reply)[0] != self.ids[1]:
+            raise RuntimeError("T->O packet does not carry the connection's T->O id")
+
+    def close(self, graceful: bool) -> None:
+        try:
+            if graceful and self.triplet is not None:
+                self.session.unconnected(forward_close_request(*self.triplet, io_path()))
+        finally:
+            if self.udp is not None:
+                self.udp.close()
+            self.session.close(graceful)
+
+
+@register
+class EnipScanner(Actor):
+    """Logix I/O scanner: one class 1 connection per drive in ``targets``, opened during the
+    capture (``open_at`` seconds in) at ``rpi_ms``; its Reference follows the controller's process."""
+
+    type = "enip.scanner"
+
+    def plan(self) -> None:
+        plan = self.plan_
+        targets = plan.topology.select(self.param("targets"))
+        rpi_ms = float(self.param("rpi_ms", 100))
+        lo, hi = self.span(self.param("open_at", [20, 90]))
+        if len(self.hosts) != 1:
+            raise ScenarioError(f"{self.id}: a scanner runs on one controller (drives accept one owner)")
+        if not targets:
+            raise ScenarioError(f"{self.id}: no targets")
+        if not DRIVE_MIN_RPI_US <= rpi_ms * 1000 <= 3_200_000:
+            raise ScenarioError(f"{self.id}: rpi_ms must be between {DRIVE_MIN_RPI_US / 1000:g} and 3200")
+        if not 0 <= lo <= hi < plan.duration:
+            raise ScenarioError(f"{self.id}: open_at must lie inside the capture")
+        rpi_us = round(rpi_ms * 1000)
+        adapters = {t.id: serving_adapter(plan, t.id)[1] for t in targets}
+        host = self.hosts[0]
+        rng = self.rng.child(host.id)
+        try:
+            # The controller's own tags run on this simulation (same seed), so the Reference
+            # follows the values the HMI reads from it.
+            server, controller = serving_controller(plan, host.id)
+            sim = ProcessSim(controller.profile, server.rng.child(host.id), plan.start_hour)
+            originator_serial = controller.identity.serial
+        except ScenarioError:
+            profile = host_process(self, host)
+            sim = ProcessSim(profile, rng.child("process"), plan.start_hour)
+            originator_serial = rng.getrandbits(32)
+        self.program = LineProgram.follow(sim, plan.duration)
+        connections = []
+        for target in targets:
+            t = rng.uniform(lo, hi)
+            conn = {"ot_id": rng.getrandbits(32), "to_id": rng.getrandbits(32), "serial": rng.randrange(1, 0x10000),
+                    "originator_serial": originator_serial, "rpi_us": rpi_us}
+            opened = plan.add(t, self.id, host.id, "enip.io_open", target=target.id, context=rng.getrandbits(32),
+                              **conn)
+            plan.add(t + rng.uniform(0.04, 0.08), self.id, host.id, "enip.io_start", target=target.id,
+                     rpi_us=rpi_us)
+            plan.add(plan.duration + 1.0, self.id, host.id, "enip.io_close", phase="teardown", target=target.id)
+            ot_id = adapters[target.id].connection_id(conn["serial"], ORIGINATOR_VENDOR, originator_serial)
+            connections.append({
+                "originator": host_ref(host.id), "target": host_ref(target.id), "opened": action_ref(opened),
+                "transport_class": 1, "trigger": "cyclic", "rpi_ms": rpi_ms, "api_ms": rpi_ms,
+                "timeout_multiplier": 4 << IO_TIMEOUT_MULTIPLIER, "udp_port": IO_PORT,
+                "connection_serial": f"0x{conn['serial']:04x}", "originator_vendor_id": ORIGINATOR_VENDOR,
+                "originator_serial": f"0x{originator_serial:08x}",
+                "ot_connection_id": f"0x{ot_id:08x}", "to_connection_id": f"0x{conn['to_id']:08x}",
+                "configuration_instance": DRIVE_CONFIG_ASSEMBLY,
+                "ot": {"connection_type": "point-to-point", "connection_point": DRIVE_OUTPUT_ASSEMBLY,
+                       "size_bytes": OT_SIZE, "run_idle_header": True},
+                "to": {"connection_type": "point-to-point", "connection_point": DRIVE_INPUT_ASSEMBLY,
+                       "size_bytes": TO_SIZE, "run_idle_header": False}})
+        plan.facts[self.id] = {"hosts": [host_ref(host.id)], "targets": [host_ref(t.id) for t in targets],
+                               "rpi_ms": rpi_ms, "reference_point": self.program.point.name,
+                               "connections": connections}
+
+    def execute(self, action, rt) -> None:
+        a = action.args
+        key = (self.id, action.host, a["target"])
+        if action.op == "enip.io_open":
+            source, target = rt.loopback(action.host), rt.loopback(a["target"])
+            scan = rt.clients[key] = _IoScan(EnipSession(source, target, a["context"]), source, target)
+            scan.session.register()
+            scan.open(a["ot_id"], a["to_id"], a["serial"], a["originator_serial"], a["rpi_us"])
+        elif action.op == "enip.io_start":
+            rt.clients[key].produce(self.program.output(rt.clock.t))
+        elif action.op == "enip.io_close":
+            rt.clients.pop(key).close(graceful=True)
+        else:
+            raise ValueError(f"unknown op {action.op}")
+
+    def close(self, rt) -> None:
+        for key in [k for k in rt.clients if k[0] == self.id]:
+            rt.clients.pop(key).close(graceful=False)

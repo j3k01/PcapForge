@@ -195,8 +195,9 @@ difficulty:
 - `impairments.clock_offset` (s) and `impairments.clock_drift_ppm`: sensor clock error, a number or a
   `[lo, hi]` range drawn per seed. Frame times and every time in the answer key carry it; payload clocks
   (NTP, OPC UA) keep the true site time, so analysts can measure the skew.
-- `vars.ipv6` (passed to `windows.chatter` as `ipv6`): IPv6 link-local baseline of the Windows hosts on
-  the sensor segment (DAD, Router Solicitation, MLDv2, LLMNR/mDNS over IPv6, DHCPv6 Solicit).
+- `vars.ipv6` (passed to `windows.chatter` as `ipv6`): IPv6 baseline of the Windows hosts on the sensor
+  segment (link-local DAD, Router Solicitation, MLDv2, LLMNR/mDNS over IPv6, DHCPv6 Solicit) and, when the
+  segment's router device has `ipv6_router`, its Router Advertisements, SLAAC addresses and unicast ND.
 - `vars`: everything else, consumed through `${vars.*}` and `when`. Good knobs make the incident harder
   to *find*, not just bigger: a source that blends in (approved host, routed host behind a gateway MAC),
   values just outside the normal band, events spread over a longer window, legitimate look-alike activity,

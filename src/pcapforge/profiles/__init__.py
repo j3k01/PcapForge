@@ -35,12 +35,33 @@ class LinkLocal:
 
 @dataclass(frozen=True)
 class Ipv6:
-    """Link-local IPv6 of a stack that has it enabled (randomized interface identifier)."""
+    """IPv6 of a stack that has it enabled (randomized interface identifiers, SLAAC)."""
 
     multicast_hop_limit: dict[str, int]  # per link-local group the host sends to
     groups: tuple[str, ...]              # groups joined besides the solicited-node group (MLDv2)
     router_solicitations: int            # Router Solicitations when the interface comes up
     rs_interval_s: float
+    router_use_mean_s: float             # mean time between uses of the default router (ND model)
+
+
+@dataclass(frozen=True)
+class Ipv6Router:
+    """Router Advertisement configuration of a device that routes IPv6 (RFC 4861 section 6.2.1)."""
+
+    min_rtr_adv_interval: float
+    max_rtr_adv_interval: float
+    router_lifetime: int
+    cur_hop_limit: int        # 0: unspecified
+    reachable_time_ms: int    # 0: unspecified
+    retrans_timer_ms: int     # 0: unspecified
+    mtu: int | None           # MTU option; None: not advertised
+    managed: bool             # M flag
+    other_config: bool        # O flag
+    valid_lifetime: int       # Prefix Information option
+    preferred_lifetime: int
+    on_link: bool             # L flag
+    autonomous: bool          # A flag
+
 
 @dataclass(frozen=True)
 class Stack:
@@ -90,6 +111,7 @@ class Device:
     identity: dict[str, str] = field(default_factory=dict)
     browser: Browser | None = None  # None: the device sends no browser announcements
     link_mbps: int = 100            # NIC speed: spacing of back-to-back segments on the wire
+    ipv6_router: Ipv6Router | None = None  # None: the device does not advertise itself as IPv6 router
 
 
 @cache
@@ -120,7 +142,8 @@ def stack(name: str) -> Stack:
         initial_window=raw["initial_window"],
         ipv6=Ipv6(multicast_hop_limit=dict(raw["ipv6"]["multicast_hop_limit"]), groups=tuple(raw["ipv6"]["groups"]),
                   router_solicitations=raw["ipv6"]["router_solicitations"],
-                  rs_interval_s=raw["ipv6"]["rs_interval_s"]) if "ipv6" in raw else None,
+                  rs_interval_s=raw["ipv6"]["rs_interval_s"],
+                  router_use_mean_s=raw["ipv6"]["router_use_mean_s"]) if "ipv6" in raw else None,
         syn_rto_s=float(raw.get("syn_rto_s", 1.0)),
         drops_unsolicited=bool(raw.get("drops_unsolicited", False)),
     )
@@ -143,6 +166,26 @@ def device(name: str) -> Device:
         browser=Browser(tuple(raw["browser"]["os_version"]), raw["browser"]["server_type"])
         if "browser" in raw else None,
         link_mbps=raw["link_mbps"],
+        ipv6_router=_ipv6_router(raw["ipv6_router"]) if "ipv6_router" in raw else None,
+    )
+
+
+def _ipv6_router(raw: dict) -> Ipv6Router:
+    prefix = raw["prefix"]
+    return Ipv6Router(
+        min_rtr_adv_interval=float(raw["min_rtr_adv_interval"]),
+        max_rtr_adv_interval=float(raw["max_rtr_adv_interval"]),
+        router_lifetime=raw["router_lifetime"],
+        cur_hop_limit=raw["cur_hop_limit"],
+        reachable_time_ms=raw["reachable_time_ms"],
+        retrans_timer_ms=raw["retrans_timer_ms"],
+        mtu=raw.get("mtu"),
+        managed=bool(raw["managed"]),
+        other_config=bool(raw["other_config"]),
+        valid_lifetime=prefix["valid_lifetime"],
+        preferred_lifetime=prefix["preferred_lifetime"],
+        on_link=bool(prefix["on_link"]),
+        autonomous=bool(prefix["autonomous"]),
     )
 
 

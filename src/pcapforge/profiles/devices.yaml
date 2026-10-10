@@ -17,6 +17,9 @@
 # instead of answering with RST (Windows Defender Firewall default). The composer then shows a probe
 # of such a host as filtered (no reply, the client retransmits its SYN at `syn_rto_s`) rather than
 # closed (RST); see `compose/_apply_host_firewall`.
+# `ipv6_router` (devices): the device advertises itself as IPv6 router on the sensor segment when
+# the scenario turns IPv6 on (`compose/ipv6.py`): Router Advertisement timers and fields, MTU option
+# (omit `mtu` to leave it out) and the Prefix Information option of the segment's ULA /64.
 
 stacks:
   windows:
@@ -42,14 +45,18 @@ stacks:
     link_local:
       df: false
       ttl: {224.0.0.252: 1, 239.255.255.250: 4, 224.0.0.251: 255}
-    # IPv6 is on by default with a randomized link-local interface identifier. LLMNR and
-    # DHCPv6 use hop limit 1, mDNS 255 (RFC 6762); ND (255) and MLD (1) are fixed by their RFCs.
-    # Groups: LLMNR, mDNS, SSDP (besides the solicited-node group). RS: RFC 4861 defaults.
+    # IPv6 is on by default with randomized interface identifiers (link-local and SLAAC stable
+    # address, plus an RFC 8981 temporary address). LLMNR and DHCPv6 use hop limit 1, mDNS 255
+    # (RFC 6762); ND (255) and MLD (1) are fixed by their RFCs. Groups: LLMNR, mDNS, SSDP
+    # (besides the solicited-node groups). RS: RFC 4861 defaults. `router_use_mean_s`: mean time
+    # between the host's uses of its default router (off-link IPv6 the model does not show), each
+    # one after ReachableTime ran out triggering Neighbor Unreachability Detection.
     ipv6:
       multicast_hop_limit: {ff02::1:3: 1, ff02::fb: 255, ff02::1:2: 1}
       groups: [ff02::1:3, ff02::fb, ff02::c]
       router_solicitations: 3
       rs_interval_s: 4
+      router_use_mean_s: 900
   linux:
     ttl: 64
     df: true
@@ -186,6 +193,17 @@ devices:
     processing_ms: {median: 2.5, sigma: 0.5}
     identity: {VendorName: Rockwell Automation, ProductCode: 1769-L33ER/A LOGIX5333ER, MajorMinorRevision: "33.011",
                VendorId: 1, DeviceType: 14, CipProductCode: 103}
+  # PowerFlex 525 AC drive (25B-D010N104: 480 V, 5 HP, 10.5 A) with its embedded EtherNet/IP adapter
+  # (520COM-UM001): Identity device type 150, firmware 7.001. The CIP product code depends on the
+  # drive rating; the value here is not taken from a capture.
+  rockwell-powerflex525:
+    vendor: Rockwell Automation
+    ouis: ["00:00:BC", "00:1D:9C"]
+    stack: vxworks
+    link_mbps: 100
+    processing_ms: {median: 3.0, sigma: 0.5}
+    identity: {VendorName: Rockwell Automation, ProductCode: PowerFlex 525 480V 5HP, MajorMinorRevision: "7.001",
+               VendorId: 1, DeviceType: 150, CipProductCode: 66}
   windows-workstation:
     vendor: Dell
     ouis: ["00:14:22", "70:B5:E8", "98:90:96", "D8:9E:F3", "E4:54:E8", "F0:1F:AF"]
@@ -238,3 +256,19 @@ devices:
     link_mbps: 1000
     processing_ms: {median: 0.2, sigma: 0.4}
     forwarding_ms: {median: 0.25, sigma: 0.4}
+    # FortiOS `config ipv6` defaults of an interface with ip6-send-adv enable: ip6-max-interval 600,
+    # ip6-min-interval 198, ip6-default-life 1800, ip6-hop-limit / ip6-reachable-time /
+    # ip6-retrans-time 0 (unspecified), ra-send-mtu enable (interface MTU 1500), M and O flags off;
+    # ip6-prefix-list entry with onlink-flag and autonomous-flag enable, valid-life-time 2592000,
+    # preferred-life-time 604800. Link-local address: modified EUI-64 of the interface MAC.
+    ipv6_router:
+      min_rtr_adv_interval: 198
+      max_rtr_adv_interval: 600
+      router_lifetime: 1800
+      cur_hop_limit: 0
+      reachable_time_ms: 0
+      retrans_timer_ms: 0
+      mtu: 1500
+      managed: false
+      other_config: false
+      prefix: {valid_lifetime: 2592000, preferred_lifetime: 604800, on_link: true, autonomous: true}

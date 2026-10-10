@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from pcapforge import ports
 from pcapforge.compose import dhcp
+from pcapforge.compose.bacnet import rewrite_forwarded_npdu
 from pcapforge.compose.enip import rewrite_list_identity
 from pcapforge.compose.link import mac_bytes
 from pcapforge.compose.packets import ACK, SYN, TCP, UDP, Flow, Packet
@@ -315,6 +316,8 @@ class Headers:
                 payload = dhcp.rewrite(payload, lambda ip: self._dhcp_address(ip, flow), mac)
             elif self._sender_port(p) == ports.ENIP:
                 payload = rewrite_list_identity(payload, lambda ip: self._announced_address(ip, p))
+            elif self._sender_port(p) == ports.BACNET:
+                payload = rewrite_forwarded_npdu(payload, lambda ip: self._announced_address(ip, p))
             l4 = _UDP.pack(sport, dport, 8 + len(payload), 0) + payload
         pseudo = src + dst + bytes((0, flow.proto)) + len(l4).to_bytes(2, "big")
         csum = checksum(pseudo + l4)

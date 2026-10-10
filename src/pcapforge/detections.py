@@ -4,7 +4,10 @@ and an instructor hunting guide (Wireshark / Splunk SPL / Kibana KQL per questio
 Everything is derived from ``answers.json`` so ``pcapforge export`` can rebuild it for an
 existing run: the ``actors`` section says which hosts are PLCs (``modbus.server``),
 approved writers (``modbus.operator``) and SCADA clients (``modbus.poller``); the process
-profile named in the PLC facts supplies the register map and normal bands.
+profile named in the PLC facts supplies the register map and normal bands. For the
+telecontrol / building / packaging protocols the outstations are the ``*.server`` (and
+``enip.adapter``) hosts and the approved masters the non-incident ``iec104.client``,
+``dnp3.client``, ``bacnet.client`` and ``enip.client`` / ``enip.scanner`` hosts.
 """
 
 from __future__ import annotations
@@ -24,10 +27,25 @@ from pcapforge.process import ProcessProfile
 
 SID_BASE = 9100000          # local sid range reserved for pcapforge (9100000-9199999)
 SID_BAND_BASE = SID_BASE + 100
+SID_OT_BASE = SID_BASE + 1000   # IEC 104 +0.., DNP3 +10.., BACnet +20.., EtherNet/IP +30..
 MODBUS_PORT = 502
 WRITER_TYPES = ("modbus.operator",)
 CLIENT_TYPES = ("modbus.poller", "modbus.operator")
-DATASETS = ("flows", "modbus", "dns", "ntp", "name_resolution", "arp", "dhcp")
+DATASETS = ("flows", "modbus", "dns", "ntp", "name_resolution", "arp", "dhcp", "iec104", "dnp3", "bacnet", "enip")
+
+IEC104_PORT, DNP3_PORT, BACNET_PORT, ENIP_PORT = 2404, 20000, 47808, 44818
+IEC104_MASTER_TYPES, IEC104_SERVER_TYPES = ("iec104.client",), ("iec104.server",)
+DNP3_MASTER_TYPES, DNP3_SERVER_TYPES = ("dnp3.client",), ("dnp3.server",)
+BACNET_CLIENT_TYPES, BACNET_SERVER_TYPES = ("bacnet.client",), ("bacnet.server",)
+ENIP_ORIGINATOR_TYPES, ENIP_TARGET_TYPES = ("enip.client", "enip.scanner"), ("enip.server", "enip.adapter")
+# DNP3 requests that change the outstation (controls, writes, restarts, application / unsolicited /
+# class configuration, time set) and the ones that only collect data (polls, counter freezes).
+DNP3_CONTROL_FUNCTIONS = [2, 3, 4, 5, 6, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 31]
+DNP3_POLL_FUNCTIONS = [1, 7, 8, 9, 10, 11, 12]
+BACNET_WRITE_SERVICES = [8, 9, 10, 11, 15, 16, 17, 20]   # list / object / property writes, DCC, reinitialize
+SURICATA_PARSERS = {"modbus": "app-layer.protocols.modbus.enabled=true",
+                    "dnp3": "app-layer.protocols.dnp3.enabled=yes",
+                    "enip": "app-layer.protocols.enip.enabled=yes"}
 
 
 @dataclass(frozen=True)
@@ -52,12 +70,16 @@ def _number(value: float) -> str:
     return f"{value:g}"
 
 
-def _rule(sid: int, header: str, msg: str, options: str, metadata: str, purpose: str) -> Rule:
-    text = f'alert modbus {header} (msg:"{msg}"; {options} metadata: {metadata}; sid:{sid}; rev:1;)'
+def _rule(sid: int, header: str, msg: str, options: str, metadata: str, purpose: str, proto: str = "modbus") -> Rule:
+    text = f'alert {proto} {header} (msg:"{msg}"; {options} metadata: {metadata}; sid:{sid}; rev:1;)'
     return Rule(sid, msg, text, purpose)
 
 
 def suricata_rules(answers: dict) -> list[Rule]:
+    return _modbus_rules(answers) + _ot_rules(answers)
+
+
+def _modbus_rules(answers: dict) -> list[Rule]:
     ips = host_ips(answers)
     names = {h["id"]: h["name"] for h in answers["topology"]["hosts"]}
     servers = [a for a in answers["actors"] if a["type"] == "modbus.server"]
@@ -172,6 +194,111 @@ def _float_below(point, limit: float) -> list[str]:
             f"{base} byte_test:2,=,{high},15; byte_test:2,<,{low},13;"]
 
 
+# --- telecontrol / building / packaging protocols ---------------------------------------
+# DNP3 and EtherNet/IP use Suricata's parsers (dnp3_func, cip_service; both parsers are
+# disabled in the stock suricata.yaml). Suricata has no IEC 104 or BACnet parser, so those rules
+# test the payload: an IEC 104 I-frame (start 0x68, control octet 1 bit 0 clear) has its type id
+# at offset 6; a BACnet/IP Original-Unicast/Broadcast-NPDU without network-layer addressing has
+# the APDU at offset 6 and a confirmed request's service choice at offset 9.
+
+def _source(approved: list[str]) -> str:
+    return f"!{_addresses(approved)}" if approved else "any"
+
+
+def _who(names: list[str], role: str) -> str:
+    return f"a host other than the {role} ({', '.join(names)})" if names else f"any host (the site has no {role})"
+
+
+def _ot_rules(answers: dict) -> list[Rule]:
+    ips = host_ips(answers)
+    names = {h["id"]: h["name"] for h in answers["topology"]["hosts"]}
+    rules: list[Rule] = []
+
+    def role(types: tuple[str, ...]) -> tuple[list[str], list[str]]:
+        hosts = _hosts(answers, types)
+        return [ips[h] for h in hosts], [names[h] for h in hosts]
+
+    rtus, _ = role(IEC104_SERVER_TYPES)
+    if rtus:
+        masters, who = role(IEC104_MASTER_TYPES)
+        head = f"{_source(masters)} any -> {_addresses(rtus)} {IEC104_PORT}"
+        i_frame = 'content:"|68|"; depth:1; byte_test:1,!&,1,2;'
+        for offset, (low, high, what, msg, tag) in enumerate((
+                (45, 64, "process command (type 45-64: single / double / regulating step, setpoint, bitstring)",
+                 "IEC 104 control command", "T0855"),
+                (100, 101, "interrogation (C_IC_NA_1 100) or counter interrogation (C_CI_NA_1 101)",
+                 "IEC 104 interrogation", "T0861"),
+                (105, 105, "reset process command (C_RP_NA_1 105)", "IEC 104 reset process command", "T0816"))):
+            test = (f"byte_test:1,=,{low},6;" if low == high
+                    else f"byte_test:1,>=,{low},6; byte_test:1,<=,{high},6;")
+            rules.append(_rule(
+                SID_OT_BASE + offset, head, f"PCAPFORGE OT {msg} from a host other than the SCADA master",
+                f"{i_frame} {test}", f"mitre_ics {tag}",
+                f"IEC 104 {what} sent to an RTU by {_who(who, 'SCADA master')}; only the first APDU of a "
+                "TCP segment is tested.", proto="tcp"))
+
+    outstations, _ = role(DNP3_SERVER_TYPES)
+    if outstations:
+        masters, who = role(DNP3_MASTER_TYPES)
+        head = f"{_source(masters)} any -> {_addresses(outstations)} {DNP3_PORT}"
+        for offset, (function, label, tag) in enumerate((
+                ("select", "SELECT (3)", "T0855"), ("operate", "OPERATE (4)", "T0855"),
+                ("direct_operate", "DIRECT_OPERATE (5)", "T0855"),
+                ("direct_operate_nr", "DIRECT_OPERATE_NR (6)", "T0855"), ("write", "WRITE (2)", "T0836"),
+                ("cold_restart", "COLD_RESTART (13)", "T0816"), ("warm_restart", "WARM_RESTART (14)", "T0816"),
+                ("disable_unsolicited", "DISABLE_UNSOLICITED (21)", "T0815"))):
+            rules.append(_rule(
+                SID_OT_BASE + 10 + offset, head, f"PCAPFORGE OT DNP3 {label} from a host other than the master",
+                f"dnp3_func:{function};", f"mitre_ics {tag}",
+                f"DNP3 {label} request to an outstation from {_who(who, 'DNP3 master')}.", proto="dnp3"))
+
+    controllers, _ = role(BACNET_SERVER_TYPES)
+    if controllers:
+        clients, who = role(BACNET_CLIENT_TYPES)
+        head = f"{_source(clients)} any -> any {BACNET_PORT}"
+        apdu = ('content:"|81|"; depth:1; byte_test:1,>=,10,1; byte_test:1,<=,11,1; byte_test:1,=,1,4; '
+                "byte_test:1,!&,0xA8,5; byte_test:1,<,16,6; byte_test:1,!&,8,6;")
+        for offset, (test, label, tag) in enumerate((
+                ("byte_test:1,>=,15,9; byte_test:1,<=,16,9;", "WriteProperty / WritePropertyMultiple", "T0855"),
+                ("byte_test:1,=,17,9;", "DeviceCommunicationControl", "T0815"),
+                ("byte_test:1,=,20,9;", "ReinitializeDevice", "T0816"))):
+            rules.append(_rule(
+                SID_OT_BASE + 20 + offset, head, f"PCAPFORGE OT BACnet {label} from an unapproved host",
+                f"{apdu} {test}", f"mitre_ics {tag}",
+                f"BACnet {label} request from {_who(who, 'BMS workstations')} (local BACnet/IP NPDUs without "
+                "network-layer addressing).", proto="udp"))
+        rules.append(_rule(
+            SID_OT_BASE + 23, head, "PCAPFORGE OT BACnet Register-Foreign-Device from an unapproved host",
+            'content:"|81 05|"; depth:2;', "mitre_ics T0886",
+            f"BVLC Register-Foreign-Device from {_who(who, 'BMS workstations')}: a foreign device receives "
+            "every broadcast of the BACnet network through the BBMD.", proto="udp"))
+        for offset, (code, label) in enumerate(((1, "Write-Broadcast-Distribution-Table"),
+                                                (8, "Delete-Foreign-Device-Table-Entry"))):
+            rules.append(_rule(
+                SID_OT_BASE + 24 + offset, f"any any -> any {BACNET_PORT}",
+                f"PCAPFORGE OT BACnet {label} (BBMD table change)",
+                f'content:"|81 {code:02X}|"; depth:2;', "mitre_ics T0814",
+                f"BVLC {label} from any host: changes how the BBMDs forward broadcasts. Never sent in "
+                "normal operation of this site.", proto="udp"))
+
+    targets, _ = role(ENIP_TARGET_TYPES)
+    if targets:
+        originators, who = role(ENIP_ORIGINATOR_TYPES)
+        head = f"{_source(originators)} any -> {_addresses(targets)} {ENIP_PORT}"
+        for offset, (service, label, tag) in enumerate((
+                (0x4D, "Write_Tag", "T0855"), (0x53, "Write_Tag_Fragmented", "T0855"),
+                (0x10, "Set_Attribute_Single", "T0836"), (0x02, "Set_Attributes_All", "T0836"),
+                (0x04, "Set_Attribute_List", "T0836"), (0x05, "Reset", "T0816"),
+                (0x54, "Forward_Open", "T0886"), (0x5B, "Large_Forward_Open", "T0886"))):
+            option = f"cip_service:{service},6;" if service in (0x54, 0x5B) else f"cip_service:{service};"
+            rules.append(_rule(
+                SID_OT_BASE + 30 + offset, head, f"PCAPFORGE OT CIP {label} from an unapproved host",
+                option, f"mitre_ics {tag}",
+                f"CIP {label} (service 0x{service:02X}) to an EtherNet/IP device from "
+                f"{_who(who, 'HMI / historian / scanner originators')}.", proto="enip"))
+    return rules
+
+
 # --- Sigma --------------------------------------------------------------------------
 # SIEM-agnostic detections over the exported JSON-lines logs (one rule file per detection,
 # https://sigmahq.io). The log source is the pcapforge SIEM export: `product: pcapforge`,
@@ -243,8 +370,136 @@ def _profile_points(answers: dict, servers: list[dict], table: str, predicate) -
 
 def sigma_rules(answers: dict) -> list[dict]:
     """Sigma detections derived from the site model, one dict per rule (same roles as the
-    Suricata rules: PLCs = modbus.server, approved writers = modbus.operator, SCADA clients
-    = modbus.poller + operators)."""
+    Suricata rules)."""
+    return _modbus_sigma_rules(answers) + _ot_sigma_rules(answers)
+
+
+def _ot_sigma_rules(answers: dict) -> list[dict]:
+    """Commands, polls and connection set-up of the telecontrol / building / packaging protocols
+    from hosts other than the approved masters (non-incident clients of the protocol)."""
+    ips = host_ips(answers)
+    names = {h["id"]: h["name"] for h in answers["topology"]["hosts"]}
+    rules: list[dict] = []
+
+    def role(types: tuple[str, ...]) -> tuple[list[str], str]:
+        hosts = _hosts(answers, types)
+        return [ips[h] for h in hosts], ", ".join(names[h] for h in hosts)
+
+    def unexpected(*, key: str, title: str, what: str, service: str, level: str, selection: dict,
+                   approved: list[str], who: str, label: str, tags: list[str], falsepositives: list[str],
+                   fields: list[str]) -> None:
+        if approved:
+            detection = {"selection": selection, "approved": {"src": approved},
+                         "condition": "selection and not approved"}
+            description = f"{what} from a host other than the {label}: {who}."
+        else:
+            detection = {"selection": selection, "condition": "selection"}
+            description = f"{what}. This site has no {label}, so every one is notable."
+        rules.append(_sigma(answers, key=key, title=title, description=description, service=service,
+                            level=level, detection=detection, tags=tags, falsepositives=falsepositives,
+                            fields=fields))
+
+    if _hosts(answers, IEC104_SERVER_TYPES):
+        masters, who = role(IEC104_MASTER_TYPES)
+        fields = ["ts", "src", "dest", "type", "cause", "ioa", "select", "frame"]
+        unexpected(key="iec104-command-from-unexpected-host",
+                   title="IEC 104 control command from a host other than the SCADA master",
+                   what="An IEC 60870-5-104 process command (type 45-64: single / double command, regulating "
+                        "step, setpoint, bitstring; select or execute) sent to an RTU",
+                   service="iec104", level="high", selection={"category": "control", "dest_port": IEC104_PORT},
+                   approved=masters, who=who, label="approved SCADA master(s)", tags=["attack.t0855"],
+                   falsepositives=["A second control centre or a commissioning laptop not modelled as a master."],
+                   fields=fields)
+        unexpected(key="iec104-interrogation-from-unexpected-host",
+                   title="IEC 104 interrogation or counter interrogation from an unexpected host",
+                   what="An IEC 60870-5-104 general interrogation (C_IC_NA_1), counter interrogation (C_CI_NA_1), "
+                        "read, clock synchronisation, test or reset process command (type 100-107) sent to an RTU",
+                   service="iec104", level="medium",
+                   selection={"type_id": list(range(100, 108)), "dest_port": IEC104_PORT},
+                   approved=masters, who=who, label="approved SCADA master(s)", tags=["attack.t0861", "attack.t0801"],
+                   falsepositives=["A protocol test set or gateway polling the RTU during maintenance."],
+                   fields=fields)
+
+    if _hosts(answers, DNP3_SERVER_TYPES):
+        masters, who = role(DNP3_MASTER_TYPES)
+        fields = ["ts", "src", "dest", "function", "objects", "point_index", "frame"]
+        unexpected(key="dnp3-control-from-unexpected-host",
+                   title="DNP3 control, write or restart from a host other than the master",
+                   what="A DNP3 request that changes the outstation (select / operate / direct operate, write, "
+                        "cold / warm restart, application control, enable / disable unsolicited, assign class, "
+                        "time set)",
+                   service="dnp3", level="high",
+                   selection={"function_code": DNP3_CONTROL_FUNCTIONS, "dest_port": DNP3_PORT},
+                   approved=masters, who=who, label="approved DNP3 master(s)",
+                   tags=["attack.t0855", "attack.t0816", "attack.t0815"],
+                   falsepositives=["An engineering laptop configuring the RTAC, not modelled as a master."],
+                   fields=fields)
+        unexpected(key="dnp3-poll-from-unexpected-host",
+                   title="DNP3 poll or counter freeze from an unexpected host",
+                   what="A DNP3 read (class / integrity poll) or counter freeze request sent to an outstation",
+                   service="dnp3", level="medium",
+                   selection={"function_code": DNP3_POLL_FUNCTIONS, "dest_port": DNP3_PORT},
+                   approved=masters, who=who, label="approved DNP3 master(s)", tags=["attack.t0861", "attack.t0801"],
+                   falsepositives=["A secondary master or protocol analyser polling the outstation."],
+                   fields=fields)
+
+    if _hosts(answers, BACNET_SERVER_TYPES):
+        clients, who = role(BACNET_CLIENT_TYPES)
+        unexpected(key="bacnet-write-from-unexpected-host", title="BACnet write or device control from an unapproved host",
+                   what="A BACnet confirmed request that changes a device (WriteProperty, WritePropertyMultiple, "
+                        "Add/RemoveListElement, Create/DeleteObject, DeviceCommunicationControl, ReinitializeDevice)",
+                   service="bacnet", level="high",
+                   selection={"apdu_type": "confirmed_request", "service_code": BACNET_WRITE_SERVICES},
+                   approved=clients, who=who, label="BMS workstation(s)", tags=["attack.t0855", "attack.t0836"],
+                   falsepositives=["A service technician's laptop overriding a point during maintenance."],
+                   fields=["ts", "src", "dest", "service", "object_type", "instance", "property", "value",
+                           "priority", "frame"])
+        unexpected(key="bacnet-foreign-device-from-unexpected-host",
+                   title="BACnet foreign-device registration from an unexpected host",
+                   what="A BVLC Register-Foreign-Device to a BBMD (the registered host then receives every broadcast "
+                        "of the BACnet network and can broadcast into it)",
+                   service="bacnet", level="medium", selection={"bvlc_function": 5},
+                   approved=clients, who=who, label="BMS workstation(s)", tags=["attack.t0886", "attack.t0846"],
+                   falsepositives=["A new remote BMS server registering with the BBMD."],
+                   fields=["ts", "src", "dest", "ttl_s", "frame"])
+        rules.append(_sigma(
+            answers, key="bacnet-bbmd-table-change", title="BACnet BBMD table changed over the network",
+            description="A BVLC Write-Broadcast-Distribution-Table or Delete-Foreign-Device-Table-Entry: changes "
+                        "which networks and foreign devices the BBMD forwards broadcasts to. Not part of normal "
+                        "operation of this site.",
+            service="bacnet", level="medium",
+            detection={"selection": {"bvlc_function": [1, 8]}, "condition": "selection"},
+            tags=["attack.t0814"], falsepositives=["BBMD commissioning, recorded in a change ticket."],
+            fields=["ts", "src", "dest", "bvlc", "frame"]))
+
+    if _hosts(answers, ENIP_TARGET_TYPES):
+        originators, who = role(ENIP_ORIGINATOR_TYPES)
+        fields = ["ts", "src", "dest", "service", "services", "class", "instance", "attribute", "tags", "frame"]
+        unexpected(key="cip-write-from-unexpected-host", title="CIP write service from an unexpected host",
+                   what="A CIP request that changes a device (Write_Tag, Write_Tag_Fragmented, Read_Modify_Write_Tag, "
+                        "Set_Attribute_Single / List / All, Reset, Start, Stop, Create, Delete, ...), also inside a "
+                        "Multiple Service Packet",
+                   service="enip", level="high", selection={"write": True},
+                   approved=originators, who=who, label="approved EtherNet/IP originators (HMI, historian, scanner)",
+                   tags=["attack.t0855", "attack.t0836"],
+                   falsepositives=["Studio 5000 / RSLinx on an engineering workstation not modelled as a client."],
+                   fields=fields)
+        unexpected(key="cip-forward-open-from-unexpected-host", title="CIP Forward_Open from an unexpected host",
+                   what="A CIP Forward_Open / Large_Forward_Open request (opens a class 1 I/O or class 3 messaging "
+                        "connection to the device)",
+                   service="enip", level="medium",
+                   selection={"service_code": [0x54, 0x5B], "response": False},
+                   approved=originators, who=who, label="approved EtherNet/IP originators (HMI, historian, scanner)",
+                   tags=["attack.t0886", "attack.t0855"],
+                   falsepositives=["A new HMI or I/O scanner, or an engineering workstation going online."],
+                   fields=["ts", "src", "dest", "service", "transport_class", "rpi_ot_ms", "rpi_to_ms",
+                           "ot_connection_id", "to_connection_id", "frame"])
+    return rules
+
+
+def _modbus_sigma_rules(answers: dict) -> list[dict]:
+    """Modbus (and DHCP) detections: PLCs = modbus.server, approved writers = modbus.operator,
+    SCADA clients = modbus.poller + operators."""
     ips = host_ips(answers)
     names = {h["id"]: h["name"] for h in answers["topology"]["hosts"]}
     servers = [a for a in answers["actors"] if a["type"] == "modbus.server"]

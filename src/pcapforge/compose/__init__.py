@@ -2,9 +2,11 @@
 
 Pipeline (see docs/DESIGN.md, "Composer spec"): flow/action assignment from the recording's
 markers -> causal retime (TCP segmentation) -> host firewall (filtered vs closed ports) ->
-visibility -> header rebuild -> Ethernet + ARP, DHCPv4 delivery (broadcasts, address conflict
-detection), link-local IPv6 (ND, MLD, IPv6 copies of group datagrams) -> time-ordered merge ->
-SPAN artefacts (duplicates, drops, VLAN tag, sensor clock) -> pcap/pcapng. All randomness comes
+EtherNet/IP class 1 cyclic I/O after each recorded first exchange -> visibility -> header rebuild ->
+Ethernet + ARP, DHCPv4 delivery (broadcasts, address conflict
+detection), IPv6 (ND, MLD, IPv6 copies of group datagrams; Router Advertisements, SLAAC and
+unicast ND once the whole capture is known) -> time-ordered merge -> SPAN artefacts (duplicates,
+drops, VLAN tag, sensor clock) -> pcap/pcapng. All randomness comes
 from the presentation seed, so the same plan, recording and seed always give a byte-identical file.
 """
 
@@ -14,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pcapforge.compose import dhcp
+from pcapforge.compose import dhcp, enip
 from pcapforge.compose.flows import assign_flows
 from pcapforge.compose.headers import Headers
 from pcapforge.compose.ipv6 import Ipv6
@@ -99,6 +101,7 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
     packets = assign_flows(plan, read_ipv4(Path(recording)))
     network = Network(topology, present.child("latency"))
     timeline = _apply_host_firewall(Retimer(plan, network, present).run(packets))
+    timeline = enip.cyclic_io(plan, timeline, present.child("enip_io"))
     headers = Headers(plan, present.child("headers"))
     leases = dhcp.Dhcp(plan, present.child("dhcp"))
     link = Link(plan, network, present.child("arp"), leases.joining)
@@ -131,6 +134,10 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
             frames.append((copy[0], len(frames), copy[1], None))
     if not frames:
         raise ComposeError("no packet of the recording is visible at the sensor")
+    # Router Solicitations, Router Advertisements, SLAAC and unicast ND over the whole capture.
+    times = [f[0] for f in frames]
+    for t, frame in ipv6.finish(min(times), max(times)):
+        frames.append((t, len(frames), frame, None))
     frames.sort(key=lambda f: (f[0], f[1]))
     span = Span(plan, present.child("span"))
     frames = span.apply(frames)

@@ -2,6 +2,7 @@
 
 import struct
 import subprocess
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,8 @@ def scenario(actors, duration="3m"):
 SERVER = {"id": "rtu_dnp3", "type": "dnp3.server", "hosts": "rtu", "params": {"process": "wastewater_treatment"}}
 CLIENT = {"id": "scada_dnp3", "type": "dnp3.client", "hosts": "scada",
           "params": {"targets": "rtu", "integrity_s": 60, "event_s": 30, "link_status_s": 20}}
+USERVER = {**SERVER, "params": {**SERVER["params"], "unsolicited": True}}
+UCLIENT = {**CLIENT, "params": {**CLIENT["params"], "unsolicited": True}}
 
 
 def ops(plan, op):
@@ -166,6 +169,77 @@ def test_unknown_requests_are_flagged_in_iin2(monkeypatch):
     assoc = station.association(1)
     assert station.handle(assoc, bytes([0xC0, 13]))[3] == dnp3.IIN2_NO_FUNC_CODE_SUPPORT
     assert station.handle(assoc, bytes([0xC1, 1, 1, 2, 6]))[3] == dnp3.IIN2_OBJECT_UNKNOWN
+    # A polled outstation does not support unsolicited reporting.
+    enable = bytes([0xC2, dnp3.FC_ENABLE_UNSOLICITED]) + dnp3.class_objects([1, 2, 3])
+    assert station.handle(assoc, enable)[3] == dnp3.IIN2_NO_FUNC_CODE_SUPPORT
+
+
+def test_unsolicited_responses_use_their_own_sequence_and_hold_events_until_confirmed(monkeypatch):
+    plan = build_plan(scenario([USERVER, UCLIENT]), "easy", "unsolicited")
+    station, tables, rt = _outstation(monkeypatch, plan)
+    assoc = station.association(1)
+    first = station.config.unsolicited_seq[1]
+
+    def request(seq, function, objects=b""):
+        return station.handle(assoc, bytes([0xC0 | seq, function]) + objects)
+
+    def confirm(seq, uns=True):
+        assert station.handle(assoc, bytes([0xC0 | (dnp3.AC_UNS if uns else 0) | seq, dnp3.FC_CONFIRM])) is None
+
+    # The session opens with a null unsolicited response: FIR|FIN|CON|UNS, function 130, restart + need time.
+    assert station.unsolicited(assoc) == bytes([0xF0 | first, 130, 0x90, 0x00])
+    assert station.unsolicited(assoc) is None                  # one outstanding at a time
+    confirm(first, uns=False)                                  # a solicited confirm does not match it,
+    confirm((first + 1) & 0x0F)                                # nor one with another sequence number
+    assert assoc.pending is not None
+    confirm(first)
+    assert assoc.pending is None and assoc.null_confirmed
+
+    # Solicited responses echo the request's sequence number and never set UNS.
+    assert request(first, dnp3.FC_DISABLE_UNSOLICITED, dnp3.class_objects([1, 2, 3])) == \
+        bytes([0xC0 | first, 0x81, 0x90, 0x00])
+    assert request(2, dnp3.FC_WRITE, bytes([80, 1, 0, 7, 7, 0]))[:4] == bytes([0xC2, 0x81, 0x10, 0])
+    assert request(3, dnp3.FC_WRITE, bytes([50, 3, 7, 1]) + dnp3.time48(1_700_000_000_000)) == \
+        bytes([0xC3, 0x81, 0, 0])
+
+    # Changes before ENABLE_UNSOLICITED stay buffered and flagged.
+    rt.clock.t = 15.0
+    analog = station.points["analog_inputs"][0]
+    tables["input"][analog.name] = analog.nominal + 2 * station.deadbands[0]
+    flipped = station.points["binary_inputs"][0]
+    tables["discrete"][flipped.name] = 1.0 - flipped.nominal
+    assert request(4, dnp3.FC_RECORD_CURRENT_TIME)[2] == 0x06
+    assert station.unsolicited(assoc) is None
+    assert request(5, dnp3.FC_ENABLE_UNSOLICITED, dnp3.class_objects([1, 2, 3])) == bytes([0xC5, 0x81, 0x06, 0])
+    report = station.unsolicited(assoc)
+    seq = (first + 1) & 0x0F
+    assert report[:4] == bytes([0xF0 | seq, 130, 0, 0])        # carries every event: no class bits left
+    assert report[4:9] == bytes([2, 2, 0x28, 1, 0]) and bytes([32, 7, 0x28, 1, 0]) in report
+    # Until it is confirmed its events are neither flagged nor reported by a poll.
+    assert request(6, dnp3.FC_READ, dnp3.class_objects([1, 2, 3])) == bytes([0xC6, 0x81, 0, 0])
+    # A lost confirm: the identical fragment (same sequence number) once the confirm timeout expired.
+    rt.clock.t = 15.0 + station.config.confirm_timeout - 0.1
+    assert station.unsolicited(assoc) is None
+    rt.clock.t = 15.0 + station.config.confirm_timeout
+    assert station.unsolicited(assoc) == report
+    confirm(seq)
+    assert not assoc.events
+    assert request(7, dnp3.FC_READ, dnp3.class_objects([1, 2, 3])) == bytes([0xC7, 0x81, 0, 0])
+
+    # The next report takes the next unsolicited sequence number.
+    rt.clock.t = 30.0
+    tables["input"][analog.name] = analog.nominal
+    station.scan()
+    following = station.unsolicited(assoc)
+    assert following[:9] == bytes([0xF0 | (seq + 1) & 0x0F, 130, 0, 0, 32, 7, 0x28, 1, 0])
+    confirm((seq + 1) & 0x0F)
+    # DISABLE_UNSOLICITED stops reporting: the next change waits for a poll.
+    request(8, dnp3.FC_DISABLE_UNSOLICITED, dnp3.class_objects([1, 2, 3]))
+    rt.clock.t = 35.0
+    tables["discrete"][flipped.name] = flipped.nominal
+    station.scan()
+    assert station.unsolicited(assoc) is None
+    assert request(9, dnp3.FC_READ, dnp3.class_objects([1, 2, 3]))[:9] == bytes([0xE9, 0x81, 0, 0, 2, 2, 0x28, 1, 0])
 
 
 # --- planning -----------------------------------------------------------------------------
@@ -205,6 +279,25 @@ def test_frequent_event_polls_need_no_keepalive():
     assert 110 <= len(reads) <= 125 and all(a.args["classes"] == [1, 2, 3] for a in reads)
 
 
+def test_unsolicited_plan_enables_reporting_after_startup_and_scans_the_outstation():
+    plan = build_plan(scenario([USERVER, UCLIENT], duration="10m"), "easy", "unsolicited-plan")
+    startup = [a.op for a in plan.actions if a.actor == "scada_dnp3" and a.phase == "setup"]
+    assert startup == ["dnp3.connect", "dnp3.disable_unsolicited", "dnp3.read", "dnp3.clear_restart",
+                       "dnp3.record_time", "dnp3.write_time", "dnp3.enable_unsolicited"]
+    scans = ops(plan, "dnp3.scan")
+    assert all(a.actor == "rtu_dnp3" and a.host == "rtu" and a.phase == "main" for a in scans)
+    assert 290 <= len(scans) <= 310
+    assert all(1.9 <= b.t - a.t <= 2.1 for a, b in zip(scans, scans[1:]))
+    facts = plan.facts["rtu_dnp3"]
+    assert (facts["unsolicited"], facts["scan_s"], facts["confirm_timeout_s"]) == (True, 2.0, 5.0)
+    # With unsolicited reporting the master's event poll is a slow backstop by default.
+    client = {**CLIENT, "params": {"targets": "rtu", "unsolicited": True}}
+    plan = build_plan(scenario([USERVER, client], duration="10m"), "easy", "unsolicited-defaults")
+    facts = plan.facts["scada_dnp3"]
+    assert (facts["unsolicited"], facts["unsolicited_classes"], facts["event_s"]) == (True, [1, 2, 3], 300)
+    assert 1 <= len([a for a in ops(plan, "dnp3.read") if a.phase == "main"]) <= 2
+
+
 def test_facts_map_every_process_point_to_its_dnp3_object():
     plan = build_plan(scenario([SERVER, CLIENT]), "easy", "facts")
     facts = plan.facts["rtu_dnp3"]
@@ -235,6 +328,8 @@ def test_facts_map_every_process_point_to_its_dnp3_object():
     ({"process": "wastewater_treatment", "address": 1}, "also a master address"),
     ({"process": "wastewater_treatment", "master_address": [3, 3]}, "distinct"),
     ({}, "needs params.process"),
+    ({"process": "wastewater_treatment", "unsolicited": "yes"}, "true or false"),
+    ({"process": "wastewater_treatment", "unsolicited": True, "scan_s": 0}, "scan_s"),
 ])
 def test_server_params_are_validated(params, message):
     with pytest.raises(ScenarioError, match=message):
@@ -245,6 +340,7 @@ def test_server_params_are_validated(params, message):
     ({"targets": "rtu", "integrity_s": 0}, "integrity_s"),
     ({"targets": "rtu", "event_s": -1}, "event_s"),
     ({"targets": "rtu", "address": 7}, "accepts master addresses"),
+    ({"targets": "rtu", "unsolicited": True}, "not configured for unsolicited"),
 ])
 def test_client_params_are_validated(params, message):
     with pytest.raises(ScenarioError, match=message):
@@ -262,6 +358,15 @@ capture_tools = (find_tool("tshark") and (find_tool("dumpcap") or find_tool("tcp
                  and tshark_version() >= MIN_TSHARK)
 
 
+def tshark_fields(pcap, display_filter, *names):
+    """Rows of ``names`` (default frame.number) per matching frame; repeated values joined by ';'."""
+    names = names or ("frame.number",)
+    cmd = [find_tool("tshark"), "-n", "-r", str(pcap), "-Y", display_filter, "-T", "fields",
+           "-E", "separator=|", "-E", "aggregator=;", *[arg for n in names for arg in ("-e", n)]]
+    return [line.split("|") for line in
+            subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.splitlines()]
+
+
 @pytest.mark.skipif(not capture_tools, reason="requires tshark >= 4.4 and loopback capture rights")
 def test_recorded_dnp3_session_decodes_and_mirrors_the_process(tmp_path, monkeypatch):
     monkeypatch.setenv("PCAPFORGE_CACHE", str(tmp_path / "cache"))
@@ -270,13 +375,7 @@ def test_recorded_dnp3_session_decodes_and_mirrors_the_process(tmp_path, monkeyp
     pcap = compose(plan, recording, tmp_path / "dnp3.pcap", "e2e").path
     report = verify_capture(pcap)
     assert report.ok, [c for c in report.checks if not c["ok"]]
-
-    def fields(display_filter, *names):
-        names = names or ("frame.number",)
-        cmd = [find_tool("tshark"), "-n", "-r", str(pcap), "-Y", display_filter, "-T", "fields",
-               "-E", "separator=|", *[arg for n in names for arg in ("-e", n)]]
-        return [line.split("|") for line in
-                subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.splitlines()]
+    fields = partial(tshark_fields, pcap)
 
     assert not fields("dnp3.hdr.CRC.incorrect || dnp3.data_chunk.CRC.incorrect || _ws.malformed")
     reads = ops(plan, "dnp3.read")
@@ -298,8 +397,52 @@ def test_recorded_dnp3_session_decodes_and_mirrors_the_process(tmp_path, monkeyp
                        "dnp3.al.ai.event.index", "dnp3.al.ana.float")
     assert len(integrity) == sum(1 for a in reads if 0 in a.args["classes"])
     for static_index, event_index, floats in integrity:
-        values = [float(v) for v in floats.split(",")]
-        events = event_index.split(",") if event_index else []
-        static = dict(zip(static_index.split(","), values[len(events):]))
+        values = [float(v) for v in floats.split(";")]
+        events = event_index.split(";") if event_index else []
+        static = dict(zip(static_index.split(";"), values[len(events):]))
         assert 0.5 <= static["2"] <= 4.0
         assert all(static[index] == value for index, value in dict(zip(events, values)).items())
+
+
+@pytest.mark.skipif(not capture_tools, reason="requires tshark >= 4.4 and loopback capture rights")
+def test_recorded_unsolicited_session_confirms_every_report_and_never_repeats_an_event(tmp_path, monkeypatch):
+    monkeypatch.setenv("PCAPFORGE_CACHE", str(tmp_path / "cache"))
+    server = {**USERVER, "params": {**USERVER["params"], "deadband": 0.005}}
+    plan = build_plan(scenario([server, UCLIENT]), "easy", "e2e-unsolicited")
+    recording, _ = recording_for(plan, use_cache=False)
+    pcap = compose(plan, recording, tmp_path / "dnp3.pcap", "e2e-unsolicited").path
+    report = verify_capture(pcap)
+    assert report.ok, [c for c in report.checks if not c["ok"]]
+    fields = partial(tshark_fields, pcap)
+    assert not fields("dnp3.hdr.CRC.incorrect || dnp3.data_chunk.CRC.incorrect || _ws.malformed"
+                      " || (dnp3 && _ws.expert.severity >= 8388608)")
+
+    # Unsolicited responses: CON and UNS set, their own sequence counting up from the outstation's
+    # first one, each confirmed by a CONFIRM with UNS and the same sequence number. The first is the
+    # null response after the restart.
+    reports = fields("dnp3.al.func == 130", "dnp3.al.seq", "dnp3.al.iin", "dnp3.al.obj")
+    assert len(reports) >= 3
+    assert len(fields("dnp3.al.func == 130 && dnp3.al.con == 1 && dnp3.al.uns == 1 && dnp3.ctl.dir == 0")) \
+        == len(reports)
+    first = next(a for a in plan.actors if a.id == "rtu_dnp3").configs["rtu"].unsolicited_seq[1]
+    seqs = [int(row[0]) for row in reports]
+    assert seqs == [(first + i) % 16 for i in range(len(seqs))]
+    assert int(reports[0][1], 16) & 0x8000 and not reports[0][2]
+    assert all(row[2] for row in reports[1:])
+    confirms = fields("dnp3.al.func == 0 && dnp3.al.uns == 1 && dnp3.ctl.dir == 1", "dnp3.al.seq")
+    assert [int(row[0]) for row in confirms] == seqs
+    # Solicited exchanges keep the master's sequence: responses echo their request, never with UNS.
+    assert not fields("dnp3.al.func == 129 && dnp3.al.uns == 1")
+    requests = [int(row[0]) for row in fields("dnp3.ctl.dir == 1 && dnp3.al.func > 0", "dnp3.al.seq")]
+    app_seq = ops(plan, "dnp3.connect")[0].args["app_seq"]
+    assert requests == [(app_seq + i) % 16 for i in range(len(requests))]
+    assert [int(row[0]) for row in fields("dnp3.al.func == 129", "dnp3.al.seq")] == requests
+    assert len(fields("dnp3.al.func == 20")) == 1 and len(fields("dnp3.al.func == 21")) == 1
+    # Every event is reported once, unsolicited or polled.
+    seen = []
+    for bi, ai, stamps in fields("dnp3.al.func == 129 || dnp3.al.func == 130", "dnp3.al.bi.event.index",
+                                 "dnp3.al.ai.event.index", "dnp3.al.timestamp"):
+        points = [("bi", i) for i in bi.split(";") if i] + [("ai", i) for i in ai.split(";") if i]
+        assert len(points) == len([s for s in stamps.split(";") if s])
+        seen += zip(points, stamps.split(";"))
+    assert seen and len(seen) == len(set(seen))

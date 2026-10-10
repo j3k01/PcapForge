@@ -249,35 +249,57 @@ def test_flow_totals_account_for_every_ip_packet_and_byte(generated):
     assert sum(f["bytes_out"] + f["bytes_in"] for f in flows) == octets
 
 
-def test_windows_hosts_on_the_sensor_segment_show_an_ipv6_link_local_baseline(generated):
+def test_windows_hosts_and_the_router_show_an_ipv6_baseline_on_the_sensor_segment(generated):
     result, answers = generated
     rows = tshark_fields(result.pcap, "ipv6", ["frame.time_epoch", "eth.src", "eth.dst", "ipv6.src", "ipv6.dst",
                                                "ipv6.hlim", "icmpv6.type", "udp.dstport",
-                                               "dhcpv6.duidllt.link_layer_addr", "dns.qry.name"])
+                                               "dhcpv6.duidllt.link_layer_addr", "dns.qry.name",
+                                               "icmpv6.nd.ns.target_address", "icmpv6.opt.prefix"])
     if not find(SCENARIO).level(answers["scenario"]["difficulty"])["vars"].get("ipv6"):
         assert not rows
         return
-    sensor_id = next(s["id"] for s in answers["topology"]["subnets"] if s["sensor"])
+    sensor = next(s for s in answers["topology"]["subnets"] if s["sensor"])
     windows = {i["mac"] for h in answers["topology"]["hosts"] if device(h["device"]).stack.ipv6
-               for i in h["interfaces"] if i["subnet"] == sensor_id}
-    hop_limits = {"133": 255, "135": 255, "143": 1, "5355": 1, "5353": 255, "547": 1}
+               for i in h["interfaces"] if i["subnet"] == sensor["id"]}
+    router = next(i["mac"] for h in answers["topology"]["hosts"] for i in h["interfaces"]
+                  if i["subnet"] == sensor["id"] and i["ip"] == sensor["gateway"])
+    hop_limits = {"133": 255, "134": 255, "135": 255, "136": 255, "143": 1, "5355": 1, "5353": 255, "547": 1}
+    prefixes = {r[11] for r in rows if r[6] == "134"}
+    assert len(prefixes) == 1, "the firewall advertises one ULA prefix"
+    prefix = ipaddress.IPv6Network(f"{prefixes.pop()}/64")
+    assert prefix.subnet_of(ipaddress.IPv6Network("fd00::/8"))
+    link_local = ipaddress.IPv6Network("fe80::/64")
     address_of: dict[str, str] = {}
-    dad: dict[str, float] = {}
-    for epoch, mac, eth_dst, src, dst, hops, icmp_type, port, duid_mac, _name in rows:
-        assert mac in windows, f"IPv6 from {mac}, not a Windows host on the sensor segment"
-        group = ipaddress.IPv6Address(dst)
-        assert group.is_multicast and eth_dst == "33:33:" + ":".join(f"{b:02x}" for b in group.packed[-4:])
+    dad: dict[str, float] = {}  # tentative address -> DAD Neighbor Solicitation
+    slaac: dict[str, set[str]] = {}
+    for epoch, mac, eth_dst, src, dst, hops, icmp_type, port, duid_mac, _name, target, _prefix in rows:
+        assert mac in windows | {router}, f"IPv6 from {mac}, not a Windows host or the router on the sensor segment"
         assert int(hops) == hop_limits[icmp_type or port]
-        if src == "::":  # interface start: MLD join of the solicited-node group, then DAD
+        group = ipaddress.IPv6Address(dst)
+        if group.is_multicast:
+            assert eth_dst == "33:33:" + ":".join(f"{b:02x}" for b in group.packed[-4:])
+        else:  # unicast Neighbor Discovery between a host and the router
+            assert icmp_type in ("135", "136") and {mac, eth_dst} <= windows | {router} and router in {mac, eth_dst}
+            assert group in link_local
+        if icmp_type == "134":
+            assert (mac, dst) == (router, "ff02::1")
+        if src == "::":  # interface start / SLAAC: MLD join of the solicited-node group, then DAD
             if icmp_type == "135":
-                dad[mac] = float(epoch)
+                dad[target] = float(epoch)
+                if ipaddress.IPv6Address(target) in prefix:
+                    slaac.setdefault(mac, set()).add(target)
             continue
-        assert float(epoch) >= dad.get(mac, 0.0) + 0.999, "the link-local address is used before DAD completes"
-        assert ipaddress.IPv6Address(src) in ipaddress.IPv6Network("fe80::/64")
+        assert float(epoch) >= dad.get(src, 0.0) + 0.999, "an address is used before DAD completes"
+        assert ipaddress.IPv6Address(src) in link_local, "hosts send from their link-local address"
         assert address_of.setdefault(mac, src) == src, "one link-local address per host"
         if duid_mac:
             assert duid_mac == mac
-    assert {r[6] for r in rows} >= {"133", "135", "143"} and {r[7] for r in rows} >= {"5355", "5353", "547"}
+    assert {r[6] for r in rows} >= {"133", "134", "135", "136", "143"} and {r[7] for r in rows} >= {"5355", "5353", "547"}
+    # Every host that solicited a router formed a stable and a temporary address in the prefix
+    # (the sensor may miss one of the DAD solicitations).
+    solicited = {r[1] for r in rows if r[6] == "133"}
+    assert solicited and all(1 <= len(slaac.get(mac, ())) <= 2 for mac in solicited)
+    assert sum(len(addresses) for addresses in slaac.values()) >= 2 * len(solicited) - 1
     # LLMNR asks the same names over IPv6 as over IPv4.
     v4 = {r[0] for r in tshark_fields(result.pcap, "ip && llmnr", ["dns.qry.name"])}
     assert {r[9] for r in rows if r[7] == "5355"} == v4
@@ -353,6 +375,8 @@ def test_suricata_rules_alert_on_out_of_band_writes_and_unapproved_writers(gener
     # Offline reading needs no command socket; Debian/Ubuntu's config enables one under /var/run.
     run = subprocess.run([shutil.which("suricata"), "-r", str(result.pcap), "-S", str(rules),
                           "--set", "app-layer.protocols.modbus.enabled=true", "--set", "unix-command.enabled=no",
+                          "--set", "app-layer.protocols.dnp3.enabled=yes",
+                          "--set", "app-layer.protocols.enip.enabled=yes",
                           "-l", str(tmp_path), "-k", "none", "--init-errors-fatal"], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr + run.stdout
     alerts = [e for e in jsonl(tmp_path / "eve.json") if e.get("event_type") == "alert"]

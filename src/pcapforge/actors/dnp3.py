@@ -1,19 +1,32 @@
-"""DNP3 (IEEE 1815) over TCP: a polled outstation and its SCADA master.
+"""DNP3 (IEEE 1815) over TCP: an outstation and its SCADA master, polled or with unsolicited reporting.
 
-Polled configuration, as most utility SCADA runs DNP3: unsolicited responses are disabled (the master
-sends DISABLE_UNSOLICITED for classes 1-3 at startup and the outstation never reports on its own), so
-every application exchange is a master request answered by the outstation. The master collects
+Polled configuration (the default), as most utility SCADA runs DNP3: unsolicited responses are disabled
+(the master sends DISABLE_UNSOLICITED for classes 1-3 at startup and the outstation never reports on its
+own), so every application exchange is a master request answered by the outstation. The master collects
 buffered events with periodic class 1/2/3 polls and reads the whole point database with a slower
 class 0 integrity poll.
+
+Unsolicited configuration (``unsolicited: true`` on both actors): after its restart the outstation
+opens each master session with a null unsolicited response (function 130, FIR/FIN/CON/UNS, IIN device
+restart) and sends no event before that is confirmed. The master confirms every unsolicited response
+at once (CONFIRM with the UNS bit and the response's sequence number), runs its startup (disable
+unsolicited, integrity poll, clear restart, time sync) and then sends ENABLE_UNSOLICITED for classes
+1-3; it keeps slower event and integrity polls. The outstation scans its process every ``scan_s``
+(own actions) and reports the events of the enabled classes in unsolicited responses with their own
+4-bit sequence number, separate from the solicited one that echoes the request. One unsolicited
+response is outstanding at a time; events in it are not reported by polls and leave the buffer on its
+confirm. Without a confirm within ``confirm_timeout_s`` the outstation repeats the identical fragment
+(same sequence number) at its next scan. In the recording the master's confirm belongs to the
+outstation's scan action, as on the wire it answers the unsolicited response within milliseconds.
 
 The outstation is a hand-written asyncio server bound to the host's loopback. Its point database
 mirrors the host's process simulation (shared with a ``modbus.server`` on the same host): discrete
 inputs are binary inputs (g1v2, events g2v2 in class 1), coils binary output status (g10v2), input
 measurements analog inputs (g30v5 float, events g32v7 in class 2), counter-model inputs 32-bit counters
-(g20v1) and holding setpoints analog output status (g40v3). Events are detected when a request arrives:
-the outstation samples the process at the request's virtual time and compares it with the last reported
-values (a bit change, or an analog value outside the deadband of its last event); each change is
-detected once and queued for every associated master. An analog event is stamped at the linearly
+(g20v1) and holding setpoints analog output status (g40v3). Events are detected when a request arrives
+or the outstation scans: it samples the process at that virtual time and compares it with the last
+reported values (a bit change, or an analog value outside the deadband of its last event); each change
+is detected once and queued for every associated master. An analog event is stamped at the linearly
 interpolated time its value crossed the deadband since the previous scan.
 Responses carrying events request an application confirm; the events leave the buffer when it arrives.
 DEVICE_RESTART stays set until the master clears it (WRITE g80v1 index 7) and NEED_TIME until it writes
@@ -24,7 +37,7 @@ The link layer carries application data as unconfirmed user data (function 4) in
 bytes (250 user octets in 16-byte blocks, each with its CRC-16/DNP); a request link status (9) is
 answered with link status (11). A response fragment is capped at five full link frames (1460 bytes on
 the wire, one TCP segment); events that do not fit stay buffered, their class IIN bits stay set and the
-master polls again.
+master polls again (or, unsolicited, the outstation sends them after the confirm).
 """
 
 from __future__ import annotations
@@ -33,6 +46,7 @@ import asyncio
 import math
 import socket
 import struct
+import time
 from dataclasses import dataclass
 
 from pcapforge import ports
@@ -61,9 +75,11 @@ TR_FIN, TR_FIR = 0x80, 0x40
 SEGMENT_MAX = LINK_MAX_DATA - 1       # application octets per transport segment
 FRAGMENT_MAX = 5 * SEGMENT_MAX        # five full frames = 1460 bytes: one TCP segment
 
-AC_FIR, AC_FIN, AC_CON = 0x80, 0x40, 0x20
+AC_FIR, AC_FIN, AC_CON, AC_UNS = 0x80, 0x40, 0x20, 0x10
 FC_CONFIRM, FC_READ, FC_WRITE = 0, 1, 2
-FC_DISABLE_UNSOLICITED, FC_RECORD_CURRENT_TIME, FC_RESPONSE = 21, 24, 129
+FC_ENABLE_UNSOLICITED, FC_DISABLE_UNSOLICITED, FC_RECORD_CURRENT_TIME = 20, 21, 24
+FC_RESPONSE, FC_UNSOLICITED_RESPONSE = 129, 130
+REPLY_TIMEOUT = 3.0                   # seconds of wall time the recording waits for the peer
 
 IIN1_CLASS = {1: 0x02, 2: 0x04, 3: 0x08}
 IIN1_NEED_TIME, IIN1_DEVICE_RESTART = 0x10, 0x80
@@ -314,22 +330,55 @@ class OutstationConfig:
     masters: tuple[int, ...]
     deadband: float
     transport_seq: dict[int, int]     # master address -> first transport sequence number
+    unsolicited: bool                 # reports events unsolicited once a master enables it
+    confirm_timeout: float            # seconds before an unconfirmed unsolicited response is repeated
+    unsolicited_seq: dict[int, int]   # master address -> first unsolicited sequence number
+
+
+@dataclass
+class _Unsolicited:
+    """An unsolicited response awaiting its confirm."""
+    seq: int
+    events: list[Event]
+    fragment: bytes
+    sent_t: float                     # virtual time of the last transmission
 
 
 class _Association:
-    """State an outstation keeps per master: IIN bits, event buffer, transport sequence."""
+    """State an outstation keeps per master: IIN bits, event buffer, transport sequence, and the
+    unsolicited reporting state of a master session."""
 
-    def __init__(self, transport_seq: int) -> None:
+    def __init__(self, master: int, transport_seq: int, unsolicited_seq: int) -> None:
+        self.master = master
         self.transport_seq = transport_seq
         self.restart = True
         self.need_time = True
         self.events: list[Event] = []
         self.unconfirmed: tuple[int, list[Event]] | None = None   # (app seq, events sent with CON)
+        self.unsolicited_seq = unsolicited_seq     # next unsolicited sequence number (own 4-bit space)
+        self.unsolicited_classes: set[int] = set()  # event classes the master enabled
+        self.null_confirmed = False                 # the startup null unsolicited response was confirmed
+        self.pending: _Unsolicited | None = None
+        self.writer: asyncio.StreamWriter | None = None   # connection of the master session
+        self.session: Dnp3Master | None = None             # its master (recording: same process)
+        self.received = 0                                  # fragments processed from the session
+
+
+def _requested_classes(data: bytes, first: int) -> tuple[list[int], bool]:
+    """Classes named by the class object headers of a request (g60v1-4 = class 0-3, all objects),
+    accepting classes from ``first``; and whether every header was such a class object."""
+    classes = []
+    for obj in _request_objects(data):
+        if obj is None or obj[0] != 60 or obj[2] is not None or not first <= obj[1] - 1 <= 3:
+            return classes, False
+        classes.append(obj[1] - 1)
+    return classes, True
 
 
 class Outstation:
-    """One outstation (one host): answers its masters' requests from the process simulation.
-    Changes are detected once and queued for every master associated at that time."""
+    """One outstation (one host): answers its masters' requests from the process simulation and,
+    when configured for it, reports their events unsolicited. Changes are detected once and queued
+    for every master associated at that time."""
 
     def __init__(self, rt, actor: Dnp3Server, host, config: OutstationConfig) -> None:
         self.rt, self.actor, self.host, self.config = rt, actor, host, config
@@ -337,6 +386,7 @@ class Outstation:
         self.deadbands = [config.deadband * deadband_span(p) for p in self.points["analog_inputs"]]
         self.associations: dict[int, _Association] = {}
         self.writers: set[asyncio.StreamWriter] = set()
+        self.expected: dict[tuple[str, int], Dnp3Master] = {}   # master socket (ip, port) -> session
         self.reported_bits: list[bool] | None = None   # last reported state / event value per point
         self.reported_analogs: list[float] = []
         self.scanned_analogs: list[float] = []         # previous scan, for the deadband crossing time
@@ -344,14 +394,20 @@ class Outstation:
 
     def association(self, master: int) -> _Association:
         if master not in self.associations:
-            self.associations[master] = _Association(self.config.transport_seq[master])
+            self.associations[master] = _Association(master, self.config.transport_seq[master],
+                                                     self.config.unsolicited_seq[master])
         return self.associations[master]
+
+    def expect(self, sockname: tuple[str, int], session: Dnp3Master) -> None:
+        """Announce a master session connecting from ``sockname`` (before it connects): the
+        outstation sends it unsolicited responses on the association of its master address."""
+        self.expected[sockname] = session
 
     def _epoch_ms(self, t: float) -> int:
         return epoch_ms(self.rt.plan.start_epoch + t)
 
     def scan(self) -> dict[str, list[float]]:
-        """Sample the process at the request's virtual time, queue new events, return the values."""
+        """Sample the process at the current virtual time, queue new events, return the values."""
         t = self.rt.clock.t
         sim = host_sim(self.rt, self.actor, self.host, self.config.profile)
         sim.advance(t)
@@ -383,6 +439,32 @@ class Outstation:
             assoc.events.extend(events)
         return values
 
+    def _select(self, assoc: _Association, classes, room: int) -> list[Event]:
+        """Buffered events of ``classes`` that fit in ``room`` octets, oldest first per point type;
+        events in an unconfirmed unsolicited response are not reported again."""
+        held = set(assoc.pending.events) if assoc.pending else set()
+        ordered = sorted((e for e in assoc.events if POINT_TYPES[e.kind].event_class in classes and e not in held),
+                         key=lambda e: (EVENT_TYPES.index(e.kind), e.ms))
+        chosen = []
+        for event in ordered:
+            if event.size > room:
+                break
+            chosen.append(event)
+            room -= event.size
+        return chosen
+
+    def _iin1(self, assoc: _Association, reported: list[Event]) -> int:
+        """IIN1: restart, need time, and the classes of buffered events this response does not carry
+        (nor an unconfirmed unsolicited response)."""
+        iin1 = (IIN1_DEVICE_RESTART if assoc.restart else 0) | (IIN1_NEED_TIME if assoc.need_time else 0)
+        held = set(reported)
+        if assoc.pending:
+            held.update(assoc.pending.events)
+        for event in assoc.events:
+            if event not in held:
+                iin1 |= IIN1_CLASS[POINT_TYPES[event.kind].event_class]
+        return iin1
+
     def handle(self, assoc: _Association, fragment: bytes) -> bytes | None:
         """Response fragment to one request fragment (``None`` for a confirm)."""
         if len(fragment) < 2:
@@ -390,8 +472,15 @@ class Outstation:
         control, function = fragment[0], fragment[1]
         seq = control & 0x0F
         if function == FC_CONFIRM:
-            if assoc.unconfirmed is not None and assoc.unconfirmed[0] == seq:
-                sent = assoc.unconfirmed[1]
+            if control & AC_UNS:
+                pending = assoc.pending
+                if pending is not None and pending.seq == seq:
+                    confirmed = set(pending.events)
+                    assoc.events = [e for e in assoc.events if e not in confirmed]
+                    assoc.pending = None
+                    assoc.null_confirmed = True
+            elif assoc.unconfirmed is not None and assoc.unconfirmed[0] == seq:
+                sent = set(assoc.unconfirmed[1])
                 assoc.events = [e for e in assoc.events if e not in sent]
                 assoc.unconfirmed = None
             return None
@@ -400,21 +489,11 @@ class Outstation:
         objects = b""
         reported: list[Event] = []
         if function == FC_READ:
-            classes = []
-            for obj in _request_objects(fragment[2:]):
-                if obj is None or obj[0] != 60 or not 1 <= obj[1] <= 4:
-                    iin2 |= IIN2_OBJECT_UNKNOWN
-                    break
-                classes.append(obj[1] - 1)
+            classes, known = _requested_classes(fragment[2:], 0)
+            if not known:
+                iin2 |= IIN2_OBJECT_UNKNOWN
             static = static_objects(values) if 0 in classes else b""
-            room = FRAGMENT_MAX - 4 - len(static) - EVENT_HEADER * len(EVENT_TYPES)
-            ordered = sorted((e for e in assoc.events if POINT_TYPES[e.kind].event_class in classes),
-                             key=lambda e: (EVENT_TYPES.index(e.kind), e.ms))
-            for event in ordered:
-                if event.size > room:
-                    break
-                reported.append(event)
-                room -= event.size
+            reported = self._select(assoc, classes, FRAGMENT_MAX - 4 - len(static) - EVENT_HEADER * len(EVENT_TYPES))
             objects = event_objects(reported) + static
         elif function == FC_WRITE:
             for obj in _request_objects(fragment[2:]):
@@ -432,19 +511,91 @@ class Outstation:
                     assoc.need_time = False
                 else:
                     iin2 |= IIN2_OBJECT_UNKNOWN
-        elif function not in (FC_DISABLE_UNSOLICITED, FC_RECORD_CURRENT_TIME):
+        elif function == FC_ENABLE_UNSOLICITED and not self.config.unsolicited:
+            iin2 |= IIN2_NO_FUNC_CODE_SUPPORT
+        elif function in (FC_ENABLE_UNSOLICITED, FC_DISABLE_UNSOLICITED):
+            classes, known = _requested_classes(fragment[2:], 1)
+            if not known:
+                iin2 |= IIN2_OBJECT_UNKNOWN
+            elif function == FC_ENABLE_UNSOLICITED:
+                assoc.unsolicited_classes.update(classes)
+            else:
+                assoc.unsolicited_classes.difference_update(classes)
+        elif function != FC_RECORD_CURRENT_TIME:
             iin2 |= IIN2_NO_FUNC_CODE_SUPPORT
         assoc.unconfirmed = (seq, reported) if reported else None
-        iin1 = (IIN1_DEVICE_RESTART if assoc.restart else 0) | (IIN1_NEED_TIME if assoc.need_time else 0)
-        for event in assoc.events:
-            if event not in reported:
-                iin1 |= IIN1_CLASS[POINT_TYPES[event.kind].event_class]
         response_control = AC_FIR | AC_FIN | (AC_CON if reported else 0) | seq
-        return struct.pack("<BBBB", response_control, FC_RESPONSE, iin1, iin2) + objects
+        return struct.pack("<BBBB", response_control, FC_RESPONSE, self._iin1(assoc, reported), iin2) + objects
+
+    def unsolicited(self, assoc: _Association) -> bytes | None:
+        """The unsolicited response due on ``assoc`` now, if any: the null response that opens the
+        session after a restart, the identical repeat (same sequence number) of an unconfirmed one
+        once the confirm timeout has expired, or the buffered events of the enabled classes. Only one
+        is outstanding at a time, and none while a solicited response awaits its confirm."""
+        t = self.rt.clock.t
+        pending = assoc.pending
+        if pending is not None:
+            if t - pending.sent_t < self.config.confirm_timeout:
+                return None
+            pending.sent_t = t
+            return pending.fragment
+        if not assoc.null_confirmed:
+            events: list[Event] = []
+        elif assoc.unconfirmed is not None or not assoc.unsolicited_classes:
+            return None
+        else:
+            events = self._select(assoc, assoc.unsolicited_classes,
+                                  FRAGMENT_MAX - 4 - EVENT_HEADER * len(EVENT_TYPES))
+            if not events:
+                return None
+        seq = assoc.unsolicited_seq
+        assoc.unsolicited_seq = (seq + 1) & 0x0F
+        control = AC_FIR | AC_FIN | AC_CON | AC_UNS | seq
+        fragment = struct.pack("<BBBB", control, FC_UNSOLICITED_RESPONSE, self._iin1(assoc, events), 0)
+        fragment += event_objects(events)
+        assoc.pending = _Unsolicited(seq, events, fragment, t)
+        return fragment
+
+    def _send(self, assoc: _Association, writer: asyncio.StreamWriter, fragment: bytes) -> None:
+        pieces, assoc.transport_seq = segments(fragment, assoc.transport_seq)
+        writer.write(b"".join(link_frame(PRM | UNCONFIRMED_USER_DATA, assoc.master, self.config.address, piece)
+                              for piece in pieces))
+
+    async def report(self, scan: bool = True) -> list[_Association]:
+        """Send every master session the unsolicited response due, after sampling the process when
+        ``scan`` (the follow-up reports of one scan only drain its events: sampling again at the same
+        virtual time would draw fresh measurement noise and invent events). Returns the associations
+        that got one (their master reads and confirms it)."""
+        deadline = time.monotonic() + REPLY_TIMEOUT
+        # The master's confirms get no reply: wait until every fragment it sent has been processed.
+        while any(a.session is not None and a.received < a.session.sent for a in self.associations.values()):
+            if time.monotonic() > deadline:
+                raise RuntimeError("DNP3 outstation did not receive the master's confirm")
+            await asyncio.sleep(0.0005)
+        if scan:
+            self.scan()
+        sent = []
+        for assoc in self.associations.values():
+            fragment = self.unsolicited(assoc) if assoc.writer is not None else None
+            if fragment is not None:
+                self._send(assoc, assoc.writer, fragment)
+                await assoc.writer.drain()
+                sent.append(assoc)
+        return sent
 
     async def connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.writers.add(writer)
         address = self.config.address
+        session = self.expected.pop(writer.get_extra_info("peername")[:2], None)
+        if session is not None:
+            # A master session opens with a null unsolicited response; event reporting waits for its
+            # confirm and for the master to enable it.
+            assoc = self.association(session.master)
+            assoc.writer, assoc.session, assoc.received = writer, session, 0
+            assoc.null_confirmed, assoc.pending = False, None
+            assoc.unsolicited_classes.clear()
+            self._send(assoc, writer, self.unsolicited(assoc))
+            await writer.drain()
         fragment = b""
         try:
             while True:
@@ -469,17 +620,19 @@ class Outstation:
                     continue
                 assoc = self.association(src)
                 response = self.handle(assoc, fragment)
+                assoc.received += 1
                 fragment = b""
                 if response is None:
                     continue
-                pieces, assoc.transport_seq = segments(response, assoc.transport_seq)
-                writer.write(b"".join(link_frame(PRM | UNCONFIRMED_USER_DATA, src, address, piece)
-                                      for piece in pieces))
+                self._send(assoc, writer, response)
                 await writer.drain()
         except (asyncio.IncompleteReadError, ConnectionError, ValueError):
             pass
         finally:
             self.writers.discard(writer)
+            for assoc in self.associations.values():
+                if assoc.writer is writer:
+                    assoc.writer = assoc.session = None
             writer.close()
 
 
@@ -509,9 +662,17 @@ def _seconds(actor: Actor, name: str, default: float, allow_zero: bool) -> float
     return value
 
 
+def _flag(actor: Actor, name: str) -> bool:
+    value = actor.param(name, False)
+    if not isinstance(value, bool):
+        raise ScenarioError(f"{actor.id}: {name} must be true or false, not {value!r}")
+    return value
+
+
 @register
 class Dnp3Server(Actor):
-    """DNP3 outstation (SEL RTAC style gateway) serving the host's process to polling masters."""
+    """DNP3 outstation (SEL RTAC style gateway) serving the host's process to its masters, polled or
+    reporting events unsolicited."""
 
     type = "dnp3.server"
     is_server = True
@@ -524,6 +685,9 @@ class Dnp3Server(Actor):
         masters = tuple(_address(self, "master_address", m) for m in (raw if isinstance(raw, list) else [raw]))
         if not masters or len(set(masters)) != len(masters):
             raise ScenarioError(f"{self.id}: master_address must list distinct addresses")
+        unsolicited = _flag(self, "unsolicited")
+        scan_s = _seconds(self, "scan_s", 2.0, allow_zero=False)
+        confirm_timeout = _seconds(self, "confirm_timeout_s", 5.0, allow_zero=False)
         fixed = self.param("address")
         self.configs: dict[str, OutstationConfig] = {}
         facts = []
@@ -539,21 +703,46 @@ class Dnp3Server(Actor):
             if address in masters:
                 raise ScenarioError(f"{self.id}: outstation address {address} is also a master address")
             config = OutstationConfig(profile, address, masters, deadband,
-                                      {m: rng.randrange(64) for m in masters})
+                                      {m: rng.randrange(64) for m in masters}, unsolicited, confirm_timeout,
+                                      {m: rng.randrange(16) for m in masters})
             self.configs[host.id] = config
+            if unsolicited:
+                # The outstation's event scan: each one may send an unsolicited response.
+                scans = self.rng.child(f"scan:{host.id}")
+                t = scans.uniform(0.1, scan_s)
+                while t < self.plan_.duration:
+                    self.plan_.add(t, self.id, host.id, "dnp3.scan")
+                    t += scans.jitter(scan_s, 0.02)
             identity = host.device.identity or {}
             facts.append({"host": host_ref(host.id), "process": profile.id, "address": address,
                           "master_addresses": list(masters), "product": identity.get("ProductCode"),
                           "points": point_facts(profile, deadband)})
         self.plan_.facts[self.id] = {"hosts": [host_ref(h.id) for h in self.hosts],
                                      "port": ports.WELL_KNOWN[ports.DNP3],
-                                     "unsolicited": False, "deadband": deadband, "outstations": facts}
+                                     "unsolicited": unsolicited, "deadband": deadband, "outstations": facts}
+        if unsolicited:
+            self.plan_.facts[self.id].update(scan_s=scan_s, confirm_timeout_s=confirm_timeout)
 
     async def serve(self, rt) -> None:
+        self.outstations: dict[str, Outstation] = {}
         for host in self.hosts:
-            outstation = Outstation(rt, self, host, self.configs[host.id])
+            outstation = self.outstations[host.id] = Outstation(rt, self, host, self.configs[host.id])
             server = await asyncio.start_server(outstation.connection, host.loopback, ports.DNP3)
             rt.servers.append(_Listener(server, outstation))
+
+    def execute(self, action, rt) -> None:
+        if action.op != "dnp3.scan":
+            raise ValueError(f"unknown op {action.op}")
+        outstation = self.outstations[action.host]
+        scan = True
+        while True:
+            sent = asyncio.run_coroutine_threadsafe(outstation.report(scan), rt.loop).result(REPLY_TIMEOUT)
+            scan = False
+            if not sent:
+                break
+            # The master confirms at once; events that did not fit go out in the next response.
+            for assoc in sent:
+                assoc.session.unsolicited()
 
 
 def point_facts(profile: ProcessProfile, deadband: float) -> dict[str, list[dict]]:
@@ -575,29 +764,37 @@ def point_facts(profile: ProcessProfile, deadband: float) -> dict[str, list[dict
     return out
 
 
-def serving_outstation(plan, host_id: str) -> OutstationConfig:
-    """Configuration of the dnp3.server outstation on ``host_id``."""
+def serving_outstation(plan, host_id: str) -> tuple[Dnp3Server, OutstationConfig]:
+    """The dnp3.server actor running the outstation on ``host_id`` and its configuration."""
     for actor in plan.actors:
         if isinstance(actor, Dnp3Server) and host_id in getattr(actor, "configs", {}):
-            return actor.configs[host_id]
+            return actor, actor.configs[host_id]
     raise ScenarioError(f"no dnp3.server runs on host '{host_id}'")
 
 
 # --- master ----------------------------------------------------------------------------
 
 class Dnp3Master:
-    """One master-to-outstation TCP channel with blocking request / response exchanges."""
+    """One master-to-outstation TCP channel with blocking request / response exchanges.
+
+    A session that takes unsolicited responses is announced to the ``station`` (same process) before
+    it connects; it confirms the null unsolicited response that opens the session."""
 
     def __init__(self, source: str, target: str, master: int, outstation: int, transport_seq: int,
-                 app_seq: int) -> None:
+                 app_seq: int, station: Outstation | None = None) -> None:
         self.master, self.outstation = master, outstation
         self.transport_seq, self.app_seq = transport_seq, app_seq
+        self.sent = 0                  # application fragments sent
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            self.sock.settimeout(3.0)
+            self.sock.settimeout(REPLY_TIMEOUT)
             self.sock.bind((source, 0))
+            if station is not None:
+                station.expect(self.sock.getsockname()[:2], self)
             self.sock.connect((target, ports.DNP3))
+            if station is not None:
+                self.unsolicited()
         except BaseException:
             self.sock.close()
             raise
@@ -620,16 +817,8 @@ class Dnp3Master:
             raise RuntimeError(f"unexpected DNP3 frame {src} -> {dest}")
         return control, data
 
-    def _send(self, fragment: bytes) -> None:
-        pieces, self.transport_seq = segments(fragment, self.transport_seq)
-        self.sock.sendall(b"".join(link_frame(DIR | PRM | UNCONFIRMED_USER_DATA, self.outstation, self.master,
-                                              piece) for piece in pieces))
-
-    def request(self, function: int, objects: bytes = b"") -> int:
-        """Send one request, wait for its response, confirm it when asked; return the IIN."""
-        seq = self.app_seq
-        self.app_seq = (seq + 1) & 0x0F
-        self._send(bytes([AC_FIR | AC_FIN | seq, function]) + objects)
+    def _fragment(self) -> bytes:
+        """The next application fragment from the outstation, reassembled from its transport segments."""
         fragment = b""
         while True:
             control, data = self._frame()
@@ -639,8 +828,21 @@ class Dnp3Master:
                 fragment = b""
             fragment += data[1:]
             if data[0] & TR_FIN:
-                break
-        if len(fragment) < 4 or fragment[1] != FC_RESPONSE or fragment[0] & 0x0F != seq:
+                return fragment
+
+    def _send(self, fragment: bytes) -> None:
+        pieces, self.transport_seq = segments(fragment, self.transport_seq)
+        self.sock.sendall(b"".join(link_frame(DIR | PRM | UNCONFIRMED_USER_DATA, self.outstation, self.master,
+                                              piece) for piece in pieces))
+        self.sent += 1
+
+    def request(self, function: int, objects: bytes = b"") -> int:
+        """Send one request, wait for its response, confirm it when asked; return the IIN."""
+        seq = self.app_seq
+        self.app_seq = (seq + 1) & 0x0F
+        self._send(bytes([AC_FIR | AC_FIN | seq, function]) + objects)
+        fragment = self._fragment()
+        if len(fragment) < 4 or fragment[1] != FC_RESPONSE or fragment[0] & (AC_UNS | 0x0F) != seq:
             raise RuntimeError("DNP3 response does not answer the request")
         iin = fragment[2] << 8 | fragment[3]
         if fragment[3] & (IIN2_NO_FUNC_CODE_SUPPORT | IIN2_OBJECT_UNKNOWN | IIN2_PARAMETER_ERROR):
@@ -648,6 +850,16 @@ class Dnp3Master:
         if fragment[0] & AC_CON:
             self._send(bytes([AC_FIR | AC_FIN | seq, FC_CONFIRM]))
         return iin
+
+    def unsolicited(self) -> int:
+        """Read one unsolicited response and confirm it (CONFIRM with UNS and its sequence number);
+        return the IIN."""
+        fragment = self._fragment()
+        if len(fragment) < 4 or fragment[1] != FC_UNSOLICITED_RESPONSE or not fragment[0] & AC_UNS:
+            raise RuntimeError("expected a DNP3 unsolicited response")
+        if fragment[0] & AC_CON:
+            self._send(bytes([AC_FIR | AC_FIN | AC_UNS | fragment[0] & 0x0F, FC_CONFIRM]))
+        return fragment[2] << 8 | fragment[3]
 
     def poll(self, classes: list[int]) -> None:
         """Class poll; events left behind (class IIN bits still set) are fetched by event polls."""
@@ -673,26 +885,35 @@ INTEGRITY_CLASSES = [1, 2, 3, 0]      # READ g60v2, g60v3, g60v4, g60v1
 
 @register
 class Dnp3Client(Actor):
-    """SCADA DNP3 master: startup sequence, periodic event and integrity polls, link keep-alives."""
+    """SCADA DNP3 master: startup sequence, periodic event and integrity polls, link keep-alives, and
+    (``unsolicited``) enabling and confirming the outstation's unsolicited responses."""
 
     type = "dnp3.client"
 
     def plan(self) -> None:
         plan = self.plan_
         targets = plan.topology.select(self.param("targets"))
+        unsolicited = _flag(self, "unsolicited")
         integrity_s = _seconds(self, "integrity_s", 3600, allow_zero=False)
-        event_s = _seconds(self, "event_s", 5, allow_zero=True)
+        # With unsolicited reporting the event poll is only a slow backstop.
+        event_s = _seconds(self, "event_s", 300 if unsolicited else 5, allow_zero=True)
         link_status_s = _seconds(self, "link_status_s", 60, allow_zero=True)
         wanted = self.param("address")
         configs = {}
+        self.servers: dict[str, Dnp3Server] = {}
         for target in targets:
-            config = serving_outstation(plan, target.id)
+            server, config = serving_outstation(plan, target.id)
             master = config.masters[0] if wanted is None else _address(self, "address", wanted)
             if master not in config.masters:
                 raise ScenarioError(f"{self.id}: outstation on '{target.id}' accepts master addresses "
                                     f"{list(config.masters)}, not {master}")
+            if unsolicited and not config.unsolicited:
+                raise ScenarioError(f"{self.id}: outstation on '{target.id}' is not configured for unsolicited "
+                                    "responses (set unsolicited on its dnp3.server)")
             configs[target.id] = (config, master)
+            self.servers[target.id] = server
         self.intervals = (integrity_s, event_s, link_status_s)
+        self.unsolicited = unsolicited
         sessions = []
         for host in self.hosts:
             for offset, target in enumerate(targets):
@@ -703,7 +924,9 @@ class Dnp3Client(Actor):
         plan.facts[self.id] = {"hosts": [host_ref(h.id) for h in self.hosts],
                                "targets": [host_ref(t.id) for t in targets], "sessions": sessions,
                                "integrity_s": integrity_s, "event_s": event_s, "link_status_s": link_status_s,
-                               "unsolicited": False}
+                               "unsolicited": unsolicited}
+        if unsolicited:
+            plan.facts[self.id]["unsolicited_classes"] = list(EVENT_CLASSES)
 
     def _plan_session(self, host_id: str, target_id: str, outstation: int, master: int, offset: float) -> None:
         plan = self.plan_
@@ -716,13 +939,17 @@ class Dnp3Client(Actor):
         t = offset + rng.uniform(0, 0.05)
         add(t, "dnp3.connect", "setup", master=master, outstation=outstation,
             transport_seq=rng.randrange(64), app_seq=rng.randrange(16))
-        # Startup: unsolicited off, integrity poll, clear DEVICE_RESTART, LAN time sync.
+        # Startup: unsolicited off, integrity poll, clear DEVICE_RESTART, LAN time sync, then
+        # (unsolicited) enable unsolicited reporting of the event classes.
         for op, extra in (("dnp3.disable_unsolicited", {}), ("dnp3.read", {"classes": INTEGRITY_CLASSES}),
                           ("dnp3.clear_restart", {}), ("dnp3.record_time", {})):
             t += rng.uniform(0.004, 0.03)
             recorded = add(t, op, "setup", **extra)
         t += rng.uniform(0.004, 0.03)
         add(t, "dnp3.write_time", "setup", time_ms=epoch_ms(plan.start_epoch + recorded.t))
+        if self.unsolicited:
+            t += rng.uniform(0.004, 0.03)
+            add(t, "dnp3.enable_unsolicited", "setup")
         started = t
         integrity: list[float] = []
         tt = started + rng.jitter(integrity_s, 0.002)
@@ -752,8 +979,10 @@ class Dnp3Client(Actor):
         a = action.args
         key = (self.id, action.host, a["target"])
         if action.op == "dnp3.connect":
+            server = self.servers[a["target"]]
+            station = server.outstations[a["target"]] if server.configs[a["target"]].unsolicited else None
             rt.clients[key] = Dnp3Master(rt.loopback(action.host), rt.loopback(a["target"]), a["master"],
-                                         a["outstation"], a["transport_seq"], a["app_seq"])
+                                         a["outstation"], a["transport_seq"], a["app_seq"], station)
             return
         if action.op == "dnp3.close":
             rt.clients.pop(key).close()
@@ -763,6 +992,8 @@ class Dnp3Client(Actor):
             master.poll(a["classes"])
         elif action.op == "dnp3.disable_unsolicited":
             master.request(FC_DISABLE_UNSOLICITED, class_objects(EVENT_CLASSES))
+        elif action.op == "dnp3.enable_unsolicited":
+            master.request(FC_ENABLE_UNSOLICITED, class_objects(EVENT_CLASSES))
         elif action.op == "dnp3.clear_restart":
             # WRITE g80v1, start-stop 7-7, IIN1.7 DEVICE_RESTART = 0
             master.request(FC_WRITE, _range_header(80, 1, IIN_DEVICE_RESTART_INDEX, IIN_DEVICE_RESTART_INDEX)
