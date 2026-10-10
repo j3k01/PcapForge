@@ -147,6 +147,13 @@ subscription (`vars.opcua`), see below.
     packets/bytes); SPL/KQL not machine-verified. Suricata test verified on Linux (Suricata 7.0.3): seed 42
     gives one band alert per incident write (fc 6 and 16), none for operator writes, and the
     unapproved-writer rule once per incident write on easy/medium, never on hard.
+  - `zeek.py` (`--zeek`) — Zeek over the composed pcap with `-D` (deterministic: uids seeded with zero),
+    JSON logs, `Site::local_nets` from the answer key's subnets and the Modbus / known-hosts policy scripts,
+    written into `zeek/` through a generated site script; local binary first, else the `zeek/zeek:lts` image
+    (`--network none`, run as the calling user). `packet_filter.log` is dropped (wall-clock time only).
+    Verified with Zeek 8.0.10 LTS (OBS packages extracted user-space in WSL): incident writes appear once
+    each in modbus.log at their frame time; on easy Zeek's Modbus requests equal the JSONL export, no
+    weird.log; two runs give identical logs.
 - Grading and packaging (`pcapforge grade`, `pcapforge package`):
   - `grade.py` — every run gets `submission_template.yaml` (question ids with null answers, text as
     comments). Submissions are YAML/JSON maps (student = file stem) or a class CSV

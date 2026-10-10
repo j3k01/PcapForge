@@ -12,6 +12,7 @@ from pcapforge import __version__
 from pcapforge.i18n import LANGS
 from pcapforge.scenario import DIFFICULTIES, ScenarioError, discover, find, load, parse_duration
 from pcapforge.tools import ToolNotFound
+from pcapforge.zeek import ZeekError
 
 
 def _scenarios_dir(args) -> Path | None:
@@ -89,11 +90,12 @@ def cmd_generate(args) -> int:
 
         out = generate(sc, args.difficulty, seed, Path(args.out), base_seed=args.base_seed,
                        fmt=args.format, use_cache=not args.no_cache, duration=duration, lang=args.lang,
-                       verify=not args.no_verify, siem=args.siem, progress=progress)
+                       verify=not args.no_verify, siem=args.siem, zeek=args.zeek, progress=progress)
         verdict = "not verified" if out.report is None else ("verified" if out.report.ok else "VERIFY FAILED")
         print(f"{out.pcap}  ({out.packets} packets, {verdict})")
         if out.exports:
-            print(f"{out.directory / 'siem'}  {out.directory / 'detections'}")
+            print("  ".join(str(out.directory / d) for d in ("siem", "detections", "zeek")
+                            if any(name.startswith(f"{d}/") for name in out.exports)))
         if out.report is not None and not out.report.ok:
             status = 2
             for check in out.report.checks:
@@ -133,8 +135,8 @@ def cmd_export(args) -> int:
     if not (directory / "answers.json").is_file():
         print(f"error: {directory} has no answers.json (not a pcapforge run directory)", file=sys.stderr)
         return 1
-    for _name, path in sorted(export_run(directory).items()):
-        if path.suffix == ".jsonl":
+    for _name, path in sorted(export_run(directory, zeek=args.zeek).items()):
+        if path.suffix in (".jsonl", ".log"):
             with open(path, encoding="utf-8") as fh:
                 print(f"{path}  ({sum(1 for _ in fh)} records)")
         else:
@@ -217,6 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-verify", action="store_true", help="skip tshark verification")
     p.add_argument("--siem", action="store_true",
                    help="also write siem/*.jsonl logs and detections/ (Suricata rules, hunting guide)")
+    p.add_argument("--zeek", action="store_true",
+                   help="also write zeek/*.log (JSON) from a local Zeek or the zeek/zeek Docker image")
     p.add_argument("--quiet", "-q", action="store_true")
     p.set_defaults(func=cmd_generate)
 
@@ -227,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("export", help="(re)create siem/ and detections/ for an existing run directory")
     p.add_argument("run_dir", help="directory containing the capture and answers.json")
+    p.add_argument("--zeek", action="store_true", help="also (re)create zeek/*.log")
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("export-ctfd", help="write CTFd challenges (ctfcli challenge.yml) for an existing run")
@@ -258,6 +263,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except (ScenarioError, ToolNotFound) as exc:
+    except (ScenarioError, ToolNotFound, ZeekError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -73,9 +73,10 @@ restrict them with AppArmor (`kernel.apparmor_restrict_unprivileged_userns`). Wi
 
 **macOS.** Add loopback aliases for the `127.77.0.0/16` addresses first.
 
-The end-to-end tests are skipped when tshark 4.4+ or capture rights are missing, and the Suricata test
-when `suricata` is not on PATH. A green run with skips is not enough for changes that touch recording,
-composing, the answer key or detections: run the full suite on a machine (or WSL/CI) that has them.
+The end-to-end tests are skipped when tshark 4.4+ or capture rights are missing, the Suricata test
+when `suricata` is not on PATH, and the Zeek test when neither Zeek nor Docker is available. A green run
+with skips is not enough for changes that touch recording, composing, the answer key or detections: run
+the full suite on a machine (or WSL/CI) that has them.
 
 ## Writing a scenario
 

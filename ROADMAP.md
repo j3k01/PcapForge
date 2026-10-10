@@ -12,7 +12,7 @@ Current state:
   sensor clock), a host-firewall model (filtered vs closed ports), and RFC-correct DHCP delivery;
 - process models: per-point descriptions, a vendor (Modicon) register-numbering convention and
   IEEE 754 FLOAT32 points across two registers (ABCD or word-swapped CDAB per profile);
-- SIEM export, Suricata and Sigma rules, grading, student/instructor packages, CTFd export,
+- SIEM export, Zeek logs (`--zeek`), Suricata and Sigma rules, grading, student/instructor packages, CTFd export,
   debrief report, Polish handouts; CI and releases on GitHub.
 
 Effort: **S** = hours, **M** = 1–3 days, **L** = a week or more.
@@ -20,7 +20,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ### Next up (open items, highest value first)
 - Long captures (24 h, multi-million packets): streaming compose and memory profiling (section 1).
-- Detection: Zeek output, validated SPL/KQL (section 5).
+- Detection: validated SPL/KQL (section 5).
 - IT line: benign HTTPS, DHCP and AD baselines, then IT scenarios (section 3).
 - Platform: PyPI distribution name, Docker image, docs site, macOS check (section 6).
 
@@ -83,7 +83,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 - [~] **Suricata rules.** Generated rules exist and are tested against Suricata 7 in WSL. Still to do: confirm in the CI log that the Suricata tests run rather than being skipped.
 - [ ] **Validate SPL/KQL hunting queries** (M) against real Splunk and Elastic, e.g. Docker images in a separate CI job.
-- [ ] **Zeek output** (M): when `zeek` is available (or via Docker), produce real `conn.log`/`modbus.log`/`dns.log` alongside the pcapforge JSONL.
+- [x] **Zeek output** (M): `generate --zeek` / `export --zeek` run a local Zeek (or the `zeek/zeek:lts` Docker image) in deterministic mode and keep its JSON logs in `zeek/` (conn, dns, ntp, dhcp, modbus, dnp3, known hosts/services/Modbus masters and slaves, Modbus register changes); `Site::local_nets` = the scenario's subnets. Tested against Zeek 8.0.10 LTS in WSL: every incident write is in modbus.log at its frame's time, and on easy Zeek's Modbus requests equal the pcapforge export and there is no weird.log. Still open: the Docker path is untested (no Docker on the dev machine), and Zeek has no default analyzers for S7comm, OPC UA, IEC 104, BACnet or EtherNet/IP (ICSNPP packages would add them).
 - [x] **Sigma rules** (S): `detections/sigma/*.yml` over the exported JSONL (`logsource: {product: pcapforge, service: <dataset>}`): unapproved writer, out-of-band write, device identification, Modbus connection from an unexpected host (flows dataset), new host on the control LAN (DHCP), and per scenario: reads rejected with Illegal Data Address (register enumeration, discovery), alarm acknowledge / reset coil write (coil manipulation), alarm threshold written out of band (alarm masking), plus two Sigma 2.0 correlations shipped with their base rules — a port-502 sweep (value_count of destinations per source, discovery) and the same point set to the same value by two hosts (command replay). Generated from `answers.json`; converted with sigma-cli 3.1 (splunk, esql); the tests evaluate every rule on the export of its scenario and on `ot-baseline-operations` (no hits).
 
 ## 6. Platform and project

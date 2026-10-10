@@ -26,6 +26,7 @@ from pcapforge.profiles import device
 from pcapforge.record import recording_for
 from pcapforge.scenario import find
 from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
+from pcapforge.zeek import find_zeek, write_zeek_logs
 from sigma_eval import hits, load_rules
 
 SCENARIO = "ot-modbus-write-manipulation"
@@ -408,3 +409,41 @@ def test_suricata_rules_alert_on_out_of_band_writes_and_unapproved_writers(gener
     else:
         assert len(unapproved) >= change["write_count"]
         assert all({a["src_ip"], a["dest_ip"]} == pair for a in unapproved)
+
+
+@pytest.mark.skipif(not find_zeek() and not shutil.which("docker"), reason="requires zeek (or docker)")
+def test_zeek_sees_the_modbus_traffic_of_the_export_and_every_incident_write(generated, tmp_path):
+    result, answers = generated
+    logs = write_zeek_logs(result.pcap, answers, tmp_path / "zeek")
+    requests = [r for r in jsonl(logs["modbus"]) if r["pdu_type"] == "REQ"]
+
+    # Every incident write is one Zeek request record from the writer to the PLC at its frame's time.
+    change = answers["facts"]["change"]
+    writes = {"WRITE_SINGLE_REGISTER", "WRITE_MULTIPLE_REGISTERS", "WRITE_SINGLE_COIL", "WRITE_MULTIPLE_COILS"}
+    for w in change["writes"]:
+        found = [r for r in requests if r["func"] in writes and r["id.orig_h"] == change["source"]["ip"]
+                 and r["id.resp_h"] == change["target"]["ip"] and abs(r["ts"] - w["request"]["epoch"]) < 1e-5]
+        assert len(found) == 1, f"write in frame {w['request']['frame']}: {found}"
+
+    conns = jsonl(logs["conn"])
+    modbus_conns = [c for c in conns if c["id.resp_p"] == 502]
+    # Zeek names the service once it has parsed payload (a connect / close without a request has none).
+    unparsed = [(c["id.orig_h"], c["id.orig_p"], c["id.resp_h"], c.get("history"), c.get("service"))
+                for c in modbus_conns if c.get("orig_bytes") and "modbus" not in c.get("service", "")]
+    assert modbus_conns and not unparsed, unparsed
+    # Site::local_nets is the scenario's subnets: every Modbus client and PLC is local.
+    assert all(c["local_orig"] and c["local_resp"] for c in modbus_conns)
+
+    if answers["scenario"]["difficulty"] == "easy":
+        # Easy has no sensor drops, duplicates or retransmissions: Zeek parses exactly the Modbus
+        # requests the pcapforge export has, and finds nothing odd in the TCP/IP layers.
+        export = Counter((r["src"], r["src_port"], r["dest"], r["trans_id"])
+                         for r in jsonl(result.directory / "siem" / "modbus.jsonl"))
+        zeek = Counter((r["id.orig_h"], r["id.orig_p"], r["id.resp_h"], r["tid"]) for r in requests)
+        assert zeek == export
+        assert "weird" not in logs, (tmp_path / "zeek" / "weird.log").read_text(encoding="utf-8")[:2000]
+
+    # Deterministic mode: a second run gives byte-identical logs.
+    again = write_zeek_logs(result.pcap, answers, tmp_path / "zeek2")
+    assert {name: path.read_bytes() for name, path in again.items()} == {
+        name: path.read_bytes() for name, path in logs.items()}

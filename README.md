@@ -18,6 +18,7 @@ composes the traffic into a believable site topology, and writes:
 - `briefing.md`: the student handout (scenario text, asset inventory, register map, questions without answers)
 - `submission_template.yaml`: the questions as a blank answer sheet for `pcapforge grade`
 - with `--siem`: `siem/*.jsonl` logs for Splunk/Elastic and `detections/` (Suricata rules, Sigma rules, hunting guide)
+- with `--zeek`: `zeek/*.log`, real Zeek logs of the capture (JSON)
 
 The same seed always gives the same exercise, and every student can get their own variant.
 
@@ -68,7 +69,7 @@ Other commands:
 - `pcapforge show <scenario>` describes the techniques, difficulty knobs and questions.
 - `pcapforge validate` checks scenario files.
 - `pcapforge verify capture.pcap -a answers.json` re-checks a capture against its key.
-- `pcapforge export <run dir>` (re)creates `siem/` and `detections/` for an existing run.
+- `pcapforge export <run dir> [--zeek]` (re)creates `siem/` and `detections/` (and `zeek/`) for an existing run.
 - `pcapforge package <run dir>` writes a student zip and an instructor zip (see [Grading and packaging](#grading-and-packaging)).
 - `pcapforge grade answers.json <submissions>` scores student answers. Hints listed under `hints_used` cost 20 % of the question's points (rounded up).
 - `pcapforge export-ctfd <run dir>` writes one CTFd challenge per question in the `ctfcli` format (`ctfd/qNN-<id>/challenge.yml`). Install each with `ctf challenge install <dir>`. The first challenge carries the capture and the briefing. Sets, maps and timestamps use a canonical flag format that each challenge description states.
@@ -272,6 +273,35 @@ use one index per file (`pcapforge-modbus`, ...) with `ts` as the timestamp fiel
 
 On the hard level the unauthorized writes come from the approved engineering workstation, so only
 the out-of-band rules fire; the unapproved-writer rule fires on easy and medium.
+
+### Zeek logs
+
+`--zeek` (on `generate` or `export`) runs [Zeek](https://zeek.org) over the capture and keeps its logs in
+`zeek/`, one JSON object per line (`LogAscii::use_json`): `conn.log`, `dns.log`, `ntp.log`, `dhcp.log`,
+`modbus.log`, `dnp3.log` and, from the policy scripts pcapforge loads, `known_hosts.log`,
+`known_services.log`, `known_modbus.log` (Modbus masters and slaves) and `modbus_register_change.log`.
+`Site::local_nets` is set to the scenario's subnets, so `local_orig` / `local_resp` and the `known_*`
+logs describe the site. Zeek runs with `-D` (deterministic mode), so the same capture always gives
+byte-identical logs; `packet_filter.log` (wall-clock start time only) is not kept. Zeek has no default
+analyzer for S7comm, OPC UA, IEC 104, BACnet or EtherNet/IP; those flows appear in `conn.log` only.
+
+Zeek is found as `PCAPFORGE_ZEEK` (path to the binary), `zeek` on `PATH` or `/opt/zeek/bin/zeek`; otherwise
+the official `zeek/zeek:lts` Docker image is used (`PCAPFORGE_ZEEK_IMAGE` overrides it; the container has
+no network). Zeek does not run natively on Windows: use Docker Desktop or run pcapforge under WSL.
+
+```console
+$ pcapforge generate -s ot-baseline-operations -d medium --seed zeek-smoke --duration 10m --siem --zeek
+$ pcapforge export out/ot-baseline-operations_medium_zeek-smoke --zeek
+...
+out/ot-baseline-operations_medium_zeek-smoke/zeek/conn.log  (215 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/dns.log  (193 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/known_hosts.log  (5 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/known_modbus.log  (6 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/known_services.log  (7 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/modbus.log  (14892 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/modbus_register_change.log  (5 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/ntp.log  (28 records)
+```
 
 ## Scenarios
 
