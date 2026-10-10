@@ -364,6 +364,22 @@ flowchart LR
 - On medium and hard the seed also draws the story structure: the physical process (four profiles, each with its own register map, units and physical effects) and the number of PLCs. Scenario authors get this through `vars` values `{choose: [...]}` and `{range: [lo, hi]}`.
 - `--base-seed` shares one recording between many `--seed`s. Students then get different IPs, MACs, ports and timing jitter on the same story. Without it, every seed is a fully independent variant.
 
+### Long captures
+
+`--duration` takes any length (`24h` works). The composer, the verification and the SIEM export
+stream through the capture with a window of a few minutes, so memory does not grow with the
+capture; what stays is the plan itself (about 0.4 KB per action). Measured on
+`ot-baseline-operations` hard in WSL 2 (Ryzen 7 7700, cached recording for the later stages):
+
+| duration | actions | packets | capture | record | compose | verify | export | peak RSS |
+|---|---|---|---|---|---|---|---|---|
+| 2 h | 0.27 M | 1.05 M | 116 MB | 2.2 min | 25 s | 29 s | 44 s | 0.24 GB |
+| 6 h | 0.82 M | 3.15 M | 348 MB | 6.7 min | 80 s | 85 s | 132 s | 0.49 GB |
+| 24 h | 3.27 M | 12.6 M | 1.4 GB | 23 min | 5.2 min | 5.9 min | 7.3 min | 1.6 GB |
+
+Recording time grows linearly (about 2,000-2,300 actions per second, no capture drops). Before
+streaming, composing alone peaked at 1.3 GB (2 h) and 3.5 GB (6 h), and 24 h ran out of a 13 GB limit.
+
 ## Writing a scenario
 
 Scenarios are YAML files under `scenarios/<line>/<id>/scenario.yaml` (CC-BY-4.0). They are validated by

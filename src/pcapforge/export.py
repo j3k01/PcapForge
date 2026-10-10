@@ -5,6 +5,9 @@ Every file in ``<run>/siem/`` holds one JSON object per line with a ``ts`` field
 plus ``epoch`` (float seconds) and Splunk-CIM style ``src`` / ``dest`` / ``src_port`` /
 ``dest_port`` / ``transport`` / ``app`` fields. Records are sorted by time, then frame.
 
+The export streams: records are written once the capture has moved ``HORIZON_S`` past them
+(responses come within seconds), so memory holds a window of records plus one entry per flow.
+
 All protocol decoding is done by tshark in a single pass; this module only groups the
 decoded fields into flows and request/response transactions and, for Modbus writes,
 looks the written registers up in the process register map from the answer key. The
@@ -16,7 +19,10 @@ connection, direction and minute.
 from __future__ import annotations
 
 import datetime as dt
+import heapq
+import itertools
 import json
+import math
 import re
 import struct
 import subprocess
@@ -32,6 +38,8 @@ from pcapforge.tools import require_tool
 from pcapforge.verify import TsharkError
 
 MODBUS_PORT = 502
+HORIZON_S = 300.0   # a record is final this long (capture time) after its own timestamp
+FLUSH_EVERY_S = 5.0
 SEP = "\t"
 AGG = "\x1f"  # occurrence aggregator: never part of a decoded value
 
@@ -379,23 +387,80 @@ def _is_service_port(port: int | None) -> bool:
     return port is not None and (port < 1024 or port in (1900, 5353, 5355, 3389, 8080, 8443))
 
 
+# JSON-lines files written as the capture streams by (flows.jsonl is written at the end).
+DATASETS = ("modbus", "dns", "ntp", "name_resolution", "arp", "dhcp", "iec104", "dnp3", "bacnet", "enip")
+
+
+class ExportError(RuntimeError):
+    pass
+
+
+def _frame_of(record: dict) -> int:
+    for name in ("request_frame", "query_frame", "response_frame", "frame", "first_frame"):
+        if record.get(name) is not None:
+            return record[name]
+    return 0
+
+
+def _finish_record(record: dict) -> None:
+    """Drop the exporter's working fields; per-minute I/O summaries get their interval stats."""
+    record.pop("_xmt", None)
+    intervals = record.pop("_intervals", None)
+    if intervals:
+        record["interval_ms_mean"] = _ms(sum(intervals) / len(intervals))
+        record["interval_ms_min"] = _ms(min(intervals))
+        record["interval_ms_max"] = _ms(max(intervals))
+
+
+class _Dataset:
+    """One ``<name>.jsonl``: records in (epoch, frame) order, written once they are final."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.file = open(path, "w", encoding="utf-8", newline="\n")
+        self.heap: list[tuple[float, int, dict]] = []
+        self.seq = itertools.count()
+        self.mark = -math.inf
+
+    def append(self, record: dict) -> None:
+        if record["epoch"] < self.mark:
+            raise ExportError(f"{self.path.stem} record at {record['epoch']:.6f} behind already written "
+                              f"capture time {self.mark:.6f}")
+        heapq.heappush(self.heap, (record["epoch"], next(self.seq), record))
+
+    def flush(self, mark: float) -> None:
+        """Write every record before ``mark`` (all records of one timestamp go together)."""
+        heap, batch = self.heap, []
+        while heap and heap[0][0] < mark:
+            batch.append(heapq.heappop(heap))
+        self.mark = max(self.mark, mark)
+        batch.sort(key=lambda e: (e[0], _frame_of(e[2]), e[1]))
+        write = self.file.write
+        for _epoch, _seq, record in batch:
+            _finish_record(record)
+            write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 class _Exporter:
-    def __init__(self, answers: dict) -> None:
+    def __init__(self, answers: dict, out_dir: Path) -> None:
         self.maps = register_maps(answers)
+        self.out_dir = out_dir
+        self.datasets = {name: _Dataset(out_dir / f"{name}.jsonl") for name in DATASETS}
+        self.flushed = -math.inf
         self.flows: dict[tuple, _Flow] = {}
-        self.modbus: list[dict] = []
+        self.modbus = self.datasets["modbus"]
         self.modbus_pending: dict[tuple, deque[dict]] = defaultdict(deque)
-        self.dns: list[dict] = []
+        self.dns = self.datasets["dns"]
         self.dns_pending: dict[tuple, deque[dict]] = defaultdict(deque)
-        self.ntp: list[dict] = []
+        self.ntp = self.datasets["ntp"]
         self.ntp_pending: dict[tuple, list[dict]] = defaultdict(list)
-        self.names: list[dict] = []
-        self.arp: list[dict] = []
-        self.dhcp: list[dict] = []
-        self.iec104: list[dict] = []
-        self.dnp3: list[dict] = []
-        self.bacnet: list[dict] = []
-        self.enip: list[dict] = []
+        self.names = self.datasets["name_resolution"]
+        self.arp = self.datasets["arp"]
+        self.dhcp = self.datasets["dhcp"]
+        self.iec104 = self.datasets["iec104"]
+        self.dnp3 = self.datasets["dnp3"]
+        self.bacnet = self.datasets["bacnet"]
+        self.enip = self.datasets["enip"]
         self.enip_io: dict[tuple, dict] = {}
         self.enip_io_last: dict[tuple, tuple[int | None, float]] = {}
 
@@ -403,6 +468,9 @@ class _Exporter:
     def frame(self, row: list[str]) -> None:
         number = int(row[F["frame.number"]])
         epoch = float(row[F["frame.time_epoch"]])
+        if epoch - self.flushed >= FLUSH_EVERY_S:
+            self.flushed = epoch
+            self._flush(epoch - HORIZON_S)
         if row[F["arp.opcode"]]:
             self._arp(row, number, epoch)
         src, dst = _first(row, "ip.src") or _first(row, "ipv6.src"), _first(row, "ip.dst") or _first(row, "ipv6.dst")
@@ -613,6 +681,8 @@ class _Exporter:
         pending = self.modbus_pending.get((key, pdu["trans_id"]))
         if pending:
             record = pending.popleft()
+            if not pending:
+                del self.modbus_pending[(key, pdu["trans_id"])]
         else:  # response to a request sent before the capture started
             function = pdu["function_code"]
             record = {
@@ -669,6 +739,8 @@ class _Exporter:
         pending = self.dns_pending.get((key, trans))
         if pending:
             record = pending.popleft()
+            if not pending:
+                del self.dns_pending[(key, trans)]
             record["response_time_ms"] = _ms(epoch - record["epoch"])
         else:
             qtype = _int(_first(row, "dns.qry.type"))
@@ -971,6 +1043,7 @@ class _Exporter:
                 "interval_ms_mean": None, "interval_ms_min": None, "interval_ms_max": None,
                 "first_frame": number, "last_frame": number, "_intervals": [],
             }
+            self.enip.append(summary)
         summary["packets"] += 1
         summary["bytes"] += int(length)
         summary["last_frame"] = number
@@ -989,40 +1062,42 @@ class _Exporter:
         self.enip_io_last[stream] = (seq, epoch)
 
     # -- output ------------------------------------------------------------------------
-    def records(self) -> dict[str, list[dict]]:
+    def _flush(self, mark: float) -> None:
+        # A request still unanswered behind the horizon stays unanswered: a reply that late is
+        # matched as a response without request, and its record is already written.
+        for pending in (self.modbus_pending, self.dns_pending):
+            for key in [k for k, queue in pending.items() if queue[0]["epoch"] < mark]:
+                queue = pending[key]
+                while queue and queue[0]["epoch"] < mark:
+                    queue.popleft()
+                if not queue:
+                    del pending[key]
+        for key, queue in self.ntp_pending.items():
+            if queue and queue[0]["epoch"] < mark:
+                queue[:] = [r for r in queue if r["epoch"] >= mark]
+        for key in [k for k in self.enip_io if k[-1] * 60 + 60 < mark]:
+            del self.enip_io[key]   # its minute is over and the summary written
+        for dataset in self.datasets.values():
+            dataset.flush(mark)
+
+    def finish(self) -> dict[str, Path]:
+        """Write what is left and the flow records; ``<name>.jsonl`` -> path."""
+        self._flush(math.inf)
+        for dataset in self.datasets.values():
+            dataset.file.close()
         flows = sorted((self._flow_record(f) for f in self.flows.values()),
                        key=lambda r: (r["epoch"], r["first_frame"]))
-        for record in self.ntp:
-            record.pop("_xmt", None)
-        for summary in self.enip_io.values():
-            intervals = summary.pop("_intervals")
-            if intervals:
-                summary["interval_ms_mean"] = _ms(sum(intervals) / len(intervals))
-                summary["interval_ms_min"] = _ms(min(intervals))
-                summary["interval_ms_max"] = _ms(max(intervals))
+        path = self.out_dir / "flows.jsonl"
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            for record in flows:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        paths = {"flows.jsonl": path}
+        paths.update({f"{name}.jsonl": d.path for name, d in self.datasets.items()})
+        return paths
 
-        def frame_of(record: dict) -> int:
-            for name in ("request_frame", "query_frame", "response_frame", "frame", "first_frame"):
-                if record.get(name) is not None:
-                    return record[name]
-            return 0
-
-        def ordered(records: list[dict]) -> list[dict]:
-            return sorted(records, key=lambda r: (r["epoch"], frame_of(r)))
-
-        return {
-            "flows": flows,
-            "modbus": ordered(self.modbus),
-            "dns": ordered(self.dns),
-            "ntp": ordered(self.ntp),
-            "name_resolution": ordered(self.names),
-            "arp": ordered(self.arp),
-            "dhcp": ordered(self.dhcp),
-            "iec104": ordered(self.iec104),
-            "dnp3": ordered(self.dnp3),
-            "bacnet": ordered(self.bacnet),
-            "enip": ordered(self.enip + list(self.enip_io.values())),
-        }
+    def close(self) -> None:
+        for dataset in self.datasets.values():
+            dataset.file.close()
 
 
 def _header(lines: list[str], name: str) -> str | None:
@@ -1379,15 +1454,11 @@ def _cip(row: list[str], record: dict) -> None:
 
 def export_siem(pcap: Path, answers: dict, out_dir: Path) -> dict[str, Path]:
     """Decode ``pcap`` once with tshark and write ``<name>.jsonl`` files into ``out_dir``."""
-    exporter = _Exporter(answers)
-    for row in _rows(Path(pcap)):
-        exporter.frame(row)
     out_dir.mkdir(parents=True, exist_ok=True)
-    paths = {}
-    for name, records in exporter.records().items():
-        path = out_dir / f"{name}.jsonl"
-        with open(path, "w", encoding="utf-8", newline="\n") as fh:
-            for record in records:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        paths[f"{name}.jsonl"] = path
-    return paths
+    exporter = _Exporter(answers, out_dir)
+    try:
+        for row in _rows(Path(pcap)):
+            exporter.frame(row)
+        return exporter.finish()
+    finally:
+        exporter.close()

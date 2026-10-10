@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pcapforge.compose import _apply_host_firewall
+from pcapforge.compose.firewall import host_firewall
 from pcapforge.compose.packets import K_DATA, K_RST, K_SYN, K_SYNACK, RST, SYN, TCP, Flow, Packet
 from pcapforge.pipeline import generate
 from pcapforge.plan import build_plan
@@ -34,7 +34,7 @@ def _refused(target, scanner_rto=1.0):
 
 def test_firewalled_host_filters_the_probe_but_a_closed_port_still_refuses():
     # drops_unsolicited target: RST dropped, SYN retransmitted once at the client's syn_rto_s.
-    out = _apply_host_firewall(_refused(_host(True), scanner_rto=1.0))
+    out = list(host_firewall(_refused(_host(True), scanner_rto=1.0)))
     assert all(p.kind != K_RST for p in out), "the RST is dropped (filtered)"
     syns = [p for p in out if p.kind == K_SYN]
     assert len(syns) == 2 and syns[1].retransmission
@@ -42,7 +42,7 @@ def test_firewalled_host_filters_the_probe_but_a_closed_port_still_refuses():
 
     # Refusing target (Linux / PLC stacks): unchanged - the RST stands (closed).
     packets = _refused(_host(False))
-    assert _apply_host_firewall(packets) is packets
+    assert list(host_firewall(packets)) == packets
 
 
 def test_established_connections_are_left_alone():
@@ -53,7 +53,7 @@ def test_established_connections_are_left_alone():
                     action=None, time=1.01)
     data = Packet(order=2, flow=flow, side=0, kind=K_DATA, flags=0, seq=2, ack=6, payload=b"x", action=None, time=1.02)
     packets = [syn, synack, data]
-    assert _apply_host_firewall(packets) is packets  # a real session is never touched
+    assert list(host_firewall(packets)) == packets  # a real session is never touched
 
 
 def test_the_scan_plans_recon_actions_and_no_writes():

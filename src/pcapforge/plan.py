@@ -17,7 +17,7 @@ from pcapforge.topology import Topology
 RECORDING_VERSION = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class Action:
     t: float          # virtual seconds since capture start
     actor: str
@@ -29,7 +29,7 @@ class Action:
     id: int = -1
 
 
-@dataclass
+@dataclass(slots=True)
 class Event:
     action: Action
     actor: str
@@ -86,8 +86,11 @@ class Plan:
             action.id = index
 
     def digest(self) -> str:
-        """Key of everything that influences the recording (not the presentation)."""
-        payload = {
+        """Key of everything that influences the recording (not the presentation).
+
+        The sha256 of ``json.dumps(payload, sort_keys=True, default=str)``, fed action by action
+        so a day-long plan is never one string in memory."""
+        rest = {
             "recording_version": RECORDING_VERSION,
             "pcapforge": __version__,
             "scenario": self.scenario.id,
@@ -97,10 +100,13 @@ class Plan:
             # Names travel inside payloads (DNS, S7 SZL, OPC UA), so they must key the recording.
             "site": (self.topology.site_name, self.topology.site_code, self.topology.domain),
             "hosts": [(h.id, h.name, h.device.name, h.loopback) for h in self.topology.hosts],
-            "actions": [(a.t, a.host, a.op, a.args, a.phase) for a in self.actions],
         }
-        blob = json.dumps(payload, sort_keys=True, default=str).encode()
-        return hashlib.sha256(blob).hexdigest()[:24]
+        digest = hashlib.sha256(b'{"actions": [')  # "actions" sorts before every other key
+        for index, a in enumerate(self.actions):
+            item = json.dumps((a.t, a.host, a.op, a.args, a.phase), sort_keys=True, default=str)
+            digest.update(((", " if index else "") + item).encode())
+        digest.update(("], " + json.dumps(rest, sort_keys=True, default=str)[1:]).encode())
+        return digest.hexdigest()[:24]
 
 
 def _start_epoch(site: dict, rng: Rng) -> float:

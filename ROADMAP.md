@@ -19,7 +19,6 @@ Effort: **S** = hours, **M** = 1–3 days, **L** = a week or more.
 Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ### Next up (open items, highest value first)
-- Long captures (24 h, multi-million packets): streaming compose and memory profiling (section 1).
 - Detection: validated SPL/KQL (section 5).
 - IT line: benign HTTPS, DHCP and AD baselines, then IT scenarios (section 3).
 - Platform: PyPI distribution name, Docker image, docs site, macOS check (section 6).
@@ -37,9 +36,9 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
   - 802.1Q VLAN tags;
   - sensor clock offset/drift: `impairments.clock_offset` and `clock_drift_ppm` (number or per-seed range); answers.json records the applied values under `capture.sensor_clock`.
 - [x] **DHCPv4** (M): `dhcp.server` / `dhcp.client` actors with Windows and dhcpcd message formats; joins (DORA, ARP address conflict detection, DHCPINFORM), renewals at T1 and releases; static hosts stay outside the pool. `siem/dhcp.jsonl` in the SIEM export. In `ot-modbus-write-manipulation` the rogue Raspberry Pi (easy) leases its address when it is plugged in, and a vendor service laptop joins and leaves on medium/hard. Still open: DHCP on the IT side (not visible from the control-LAN sensor in the current scenarios).
-- [x] **Firewalled / filtered ports** (M): the composer honours the stack's `drops_unsolicited` / `syn_rto_s` (`compose/_apply_host_firewall`), so a port sweep of a host-firewalled machine (Windows default) shows a retransmitted SYN and no reply (filtered) instead of a RST (closed). In `ot-modbus-discovery` the swept Windows hosts read as filtered and the PLCs' closed/listening ports differ.
+- [x] **Firewalled / filtered ports** (M): the composer honours the stack's `drops_unsolicited` / `syn_rto_s` (`compose/firewall.host_firewall`), so a port sweep of a host-firewalled machine (Windows default) shows a retransmitted SYN and no reply (filtered) instead of a RST (closed). In `ot-modbus-discovery` the swept Windows hosts read as filtered and the PLCs' closed/listening ports differ.
 - [ ] **Windows domain baseline** (L): Kerberos/LDAP/SMB to the DC using a *synthetic* local directory, e.g. a Samba AD container. Never the machine's real credentials.
-- [ ] **Long captures** (M): 24 h and multi-million packets. Needs a streaming compose and memory profiling, and a check that recording time scales linearly.
+- [x] **Long captures** (M): the composer, the verification and the SIEM export stream with a bounded look-behind window (output byte-identical to the former in-memory composer), the per-action frame index is a compact array and the plan digest is hashed action by action. `ot-baseline-operations` hard, 24 h (3.27 M actions, 12.6 M packets, 1.4 GB pcap) peaks at 1.6 GB RSS in WSL (before: over 13 GB); timings in the README's "Long captures" table. Recording time scales linearly (about 2,000-2,300 actions/s). Still open: the plan itself stays in memory (about 0.4 KB per action), and composing is about 1.7x slower than the in-memory composer was.
 
 ## 2. OT content
 

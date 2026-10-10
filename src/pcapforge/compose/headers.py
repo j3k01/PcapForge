@@ -172,7 +172,6 @@ class Headers:
         self.topology = plan.topology
         self.start = plan.start_epoch
         self.rng = rng
-        self.flows: dict[Flow, _FlowHeaders] = {}
         self.host_ipid: dict[str, int] = {}
         self.port_cursor: dict[str, int] = {}
         self.ports_used: dict[str, set[int]] = {}
@@ -196,7 +195,7 @@ class Headers:
 
     # -- flow setup -------------------------------------------------------------------
     def _flow(self, flow: Flow) -> _FlowHeaders:
-        state = self.flows.get(flow)
+        state = flow.headers
         if state is not None:
             return state
         rng = self.rng
@@ -211,7 +210,7 @@ class Headers:
             sstack = server.device.stack
             ttls, dfs = (cstack.ttl, sstack.ttl), (cstack.df, sstack.df)
         agreed = negotiate(cstack, sstack) if flow.proto == TCP else None
-        state = self.flows[flow] = _FlowHeaders(
+        state = flow.headers = _FlowHeaders(
             addrs=(self.address(client, server), self.address(server, client)),
             ports=(self._client_port(flow), self._server_port(flow)),
             stacks=(cstack, sstack),

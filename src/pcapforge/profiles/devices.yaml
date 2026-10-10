@@ -16,7 +16,7 @@
 # `drops_unsolicited` (stacks): the host firewall silently drops inbound SYNs to closed ports
 # instead of answering with RST (Windows Defender Firewall default). The composer then shows a probe
 # of such a host as filtered (no reply, the client retransmits its SYN at `syn_rto_s`) rather than
-# closed (RST); see `compose/_apply_host_firewall`.
+# closed (RST); see `compose/firewall.py`.
 # `ipv6_router` (devices): the device advertises itself as IPv6 router on the sensor segment when
 # the scenario turns IPv6 on (`compose/ipv6.py`): Router Advertisement timers and fields, MTU option
 # (omit `mtu` to leave it out) and the Prefix Information option of the segment's ULA /64.

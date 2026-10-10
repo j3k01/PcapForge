@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import socket
 import struct
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Iterable, Iterator
 
 from pcapforge import ports
 from pcapforge.compose.packets import (
@@ -36,7 +36,7 @@ def _kind(proto: int, flags: int, payload: bytes) -> str:
     return K_ACK
 
 
-def assign_flows(plan: Plan, records: Iterable[bytes]) -> list[Packet]:
+def assign_flows(plan: Plan, records: Iterable[bytes]) -> Iterator[Packet]:
     """Packets that belong in the output, in recorded order, each bound to flow and action.
 
     Markers set the current action; a client packet with payload/SYN/FIN binds its flow to
@@ -53,7 +53,6 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> list[Packet]:
     mid_session = bool(plan.impairments.get("mid_session"))
     current = None
     live: dict[tuple, Flow] = {}
-    packets: list[Packet] = []
 
     for order, ip in enumerate(records):
         ihl = (ip[0] & 0x0F) * 4
@@ -119,8 +118,7 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> list[Packet]:
         action = flow.action
         if action is None or action.phase == "teardown" or (action.phase == "setup" and mid_session):
             continue
-        packets.append(Packet(order, flow, side, kind, flags, seq, ack, bytes(payload), action))
-    return packets
+        yield Packet(order, flow, side, kind, flags, seq, ack, bytes(payload), action)
 
 
 def _guess_flow(proto: int, src_host, dst_host, here: tuple, there: tuple) -> Flow:

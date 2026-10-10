@@ -10,21 +10,32 @@ The loopback recording carries every message in one segment (MSS 65495); message
 than the path MSS go out as a train of full-sized segments at the sender's link rate,
 limited by its congestion window and the receiver's window, and the receiver acknowledges
 every second segment.
+
+Streaming: packets are placed in recorded order and released in capture-time order once they
+lie more than ``HORIZON_S`` before the latest action start seen, so memory holds a window of the
+capture, not the whole of it. A packet that would land before something already released (a
+reaction later than the horizon) is a ``ComposeError``, never a silently reordered capture.
 """
 
 from __future__ import annotations
 
+import heapq
+import itertools
+import math
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable, Iterator
 
 from pcapforge.compose.headers import M32, Negotiated, negotiate
-from pcapforge.compose.packets import ACK, FIN, K_ACK, K_DATA, K_FIN, K_RST, K_SYNACK, PSH, TCP, Flow, Packet
+from pcapforge.compose.packets import (
+    ACK, FIN, K_ACK, K_DATA, K_FIN, K_RST, K_SYNACK, PSH, TCP, ComposeError, Packet,
+)
 
 if TYPE_CHECKING:
     from pcapforge.plan import Plan
     from pcapforge.rng import Rng
     from pcapforge.topology import Host, Topology
 
+HORIZON_S = 300.0              # capture time a packet may still land behind the latest action start
 SAME_SENDER = (10e-6, 60e-6)   # back-to-back segments of one sender
 QUICK = (20e-6, 60e-6)         # kernel-only reaction (immediate ACK, RST)
 SYN_ACK = (30e-6, 80e-6)       # listening socket answers a SYN
@@ -75,6 +86,7 @@ class _Clock:
     trigger: list[Packet | None] = field(default_factory=lambda: [None, None])
     pending: Packet | None = None   # delayed pure ACK not yet sent
     due: float = 0.0
+    early: Packet | None = None     # ``pending`` already released (its timer ran out behind the horizon)
     emitted: int = 0
     # Per side: earliest time of its next packet (after ACKs synthesized inside a segment train).
     floor: list[float] = field(default_factory=lambda: [0.0, 0.0])
@@ -88,32 +100,69 @@ class Retimer:
         self.loss = rng.child("retransmit")
         self.segmenting = rng.child("segments")
         self.rate = float(plan.impairments.get("retransmit_rate") or 0.0)
-        self.clocks: dict[Flow, _Clock] = {}
-        self.agreed: dict[Flow, Negotiated] = {}
-        self.pair_ends: set[Packet] = set()  # last segments of trains that end on a full pair
-        self.out: list[Packet] = []
+        self.heap: list[tuple[float, int, int, Packet]] = []   # (time, order, emission, packet)
+        self.emission = itertools.count()
+        self.dues: list[tuple[float, int, _Clock, Packet]] = []  # delayed ACK timers
+        self.released: tuple[float, int] = (-math.inf, -1)
+        self.front = -math.inf    # latest action start placed
 
-    def run(self, packets: list[Packet]) -> list[Packet]:
-        """Timed packets (plus retransmissions, minus piggybacked ACKs) sorted by time."""
+    def stream(self, packets: Iterable[Packet]) -> Iterator[Packet]:
+        """Timed packets (plus retransmissions, minus piggybacked ACKs) in (time, recorded order)
+        order, as the recorded ``packets`` are consumed."""
+        heap = self.heap
         for packet in packets:
             self._place(packet)
-        for clock in self.clocks.values():
-            if clock.pending is not None:
-                self._commit(clock, clock.pending, clock.due)
-        self.out.sort(key=lambda p: (p.time, p.order))
-        return self.out
+            front = self.start + packet.action.t
+            if front > self.front:
+                self.front = front
+            mark = self.front - HORIZON_S
+            if self.dues and self.dues[0][0] < mark:
+                self._expire(mark)
+            while heap and heap[0][0] < mark:
+                t, order, _n, p = heapq.heappop(heap)
+                self.released = (t, order)
+                yield p
+        for _due, _n, clock, ack in sorted(self.dues):
+            if clock.pending is ack:
+                self._commit(clock, ack, clock.due)
+        while heap:
+            t, order, _n, p = heapq.heappop(heap)
+            self.released = (t, order)
+            yield p
+
+    def _expire(self, mark: float) -> None:
+        """Release delayed ACKs whose timer fired behind the horizon: no later segment of their
+        flow can carry them any more (it would land before ``mark``), so they go out at ``due``.
+        The flow's clock still learns about them when its next packet comes, as before."""
+        dues = self.dues
+        while dues and dues[0][0] < mark:
+            due, _n, clock, ack = heapq.heappop(dues)
+            if clock.pending is ack and clock.early is None:
+                ack.time = due
+                self._push(ack)
+                clock.early = ack
+
+    def _push(self, p: Packet) -> None:
+        if (p.time, p.order) < self.released:
+            raise ComposeError(
+                f"packet of action {p.action.id} lands at {p.time:.6f}, behind already released capture "
+                f"time {self.released[0]:.6f}: a reaction later than the {HORIZON_S:.0f} s streaming horizon")
+        heapq.heappush(self.heap, (p.time, p.order, next(self.emission), p))
 
     # -- placement ----------------------------------------------------------------------
     def _place(self, p: Packet) -> None:
-        clock = self.clocks.get(p.flow)
+        clock = p.flow.clock
         if clock is None:
-            clock = self.clocks[p.flow] = _Clock()
+            clock = p.flow.clock = _Clock()
         if clock.pending is not None:
             ack, due = clock.pending, clock.due
             clock.pending = None
             if ack.side == p.side and p.kind != K_ACK:
                 t, _ = self._time(clock, p)
                 if t < due:
+                    if clock.early is ack:
+                        raise ComposeError(f"segment of action {p.action.id} would carry a delayed ACK "
+                                           f"released {HORIZON_S:.0f} s earlier")
                     # The stack sends this segment before its delayed-ACK timer fires: the
                     # acknowledgement rides on it and the pure ACK never hits the wire.
                     self._commit(clock, p, t)
@@ -125,6 +174,7 @@ class Retimer:
         t, delayed = self._time(clock, p)
         if delayed:
             clock.pending, clock.due = p, t
+            heapq.heappush(self.dues, (t, next(self.emission), clock, p))
             return
         self._commit(clock, p, t)
 
@@ -158,7 +208,7 @@ class Retimer:
             return rng.uniform(*SYN_ACK), False
         if p.kind == K_ACK:
             # Two full-sized segments unacknowledged: the receiver ACKs at once (RFC 1122).
-            if trigger.kind == K_DATA and trigger not in self.pair_ends:
+            if trigger.kind == K_DATA and not trigger.pair_end:
                 delayed_ack = p.src.device.stack.delayed_ack
                 if rng.random() < delayed_ack.probability:
                     return rng.uniform(delayed_ack.min_ms, delayed_ack.max_ms) / 1000.0, True
@@ -186,15 +236,15 @@ class Retimer:
             if stack.rto.plus_rtt:
                 rto += self.net.round_trip(p.dst, self.loss) + self.net.round_trip(p.src, self.loss)
             rto *= self.loss.uniform(1.0, 1.03)
-            self._emit(clock, replace(sent, retransmission=True), sent.time + rto)
+            self._emit(clock, replace(sent, retransmission=True, pair_end=False), sent.time + rto)
 
     def _send(self, clock: _Clock, p: Packet, t: float) -> Packet:
         """Emit ``p`` at ``t``, segmented when it exceeds the path MSS; the packet carrying its end."""
         if p.flow.proto == TCP and p.payload:
-            agreed = self.agreed.get(p.flow)
+            agreed = p.flow.agreed
             if agreed is None:
                 client, server = p.flow.hosts
-                agreed = self.agreed[p.flow] = negotiate(client.device.stack, server.device.stack)
+                agreed = p.flow.agreed = negotiate(client.device.stack, server.device.stack)
             if len(p.payload) > agreed.mss:
                 return self._segments(clock, p, t, agreed)
         self._emit(clock, p, t)
@@ -242,7 +292,7 @@ class Retimer:
                 acks.append(self._ack(clock, p, end, at, delayed=False))
                 unacked = 0
         if unacked == 2 and len(last.payload) == mss:
-            self.pair_ends.add(last)
+            last.pair_end = True
         return last
 
     def _ack(self, clock: _Clock, p: Packet, upto: int, received: float, delayed: bool) -> tuple[float, int]:
@@ -258,13 +308,16 @@ class Retimer:
         at = max(received + self.net.round_trip(p.dst, rng) + reaction, clock.floor[side])
         ack = replace(p, side=side, kind=K_ACK, flags=ACK, seq=p.ack, ack=(p.seq + upto) & M32, payload=b"",
                       more=False, time=at)
-        self.out.append(ack)
+        self._push(ack)
         clock.floor[side] = at + 1e-6
         return at + self.net.round_trip(p.src, rng) + rng.uniform(*QUICK), upto
 
     def _emit(self, clock: _Clock, p: Packet, t: float) -> None:
         p.time = t
-        self.out.append(p)
+        if clock.early is p:
+            clock.early = None  # released when its timer ran out behind the horizon
+        else:
+            self._push(p)
         clock.last_t = t
         clock.last = p
         clock.emitted += 1

@@ -20,11 +20,11 @@ would leave the message undecodable.
 
 from __future__ import annotations
 
+import heapq
 import struct
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable, Iterator, NamedTuple
 
 if TYPE_CHECKING:
-    from pcapforge.compose.packets import Packet
     from pcapforge.plan import Plan
     from pcapforge.rng import Rng
 
@@ -32,7 +32,17 @@ TPID = b"\x81\x00"
 SPAN_RATE = 1e9                   # SPAN destination port: copies leave at 1 Gbit/s
 SWITCH_LATENCY = (1.5e-6, 6e-6)   # forwarding decision until the egress copy
 
-Frame = tuple[float, int, bytes, "Packet | None"]
+
+class FrameInfo(NamedTuple):
+    """What the answer key and the SPAN model need to know about a frame of a recorded packet."""
+
+    action: int           # action id
+    request: bool         # first-request candidate: client data, not a retransmission or a segment
+    control: bool         # client SYN / FIN of that kind (actions without application data)
+    train: bool           # a segment of a message that tshark has to reassemble
+
+
+Frame = tuple[float, int, bytes, "FrameInfo | None"]   # (time, emission index, bytes, info or None if synthesized)
 
 
 def _draw(value, rng: Rng) -> float:
@@ -78,33 +88,35 @@ class Span:
     def active(self) -> bool:
         return bool(self.duplicates or self.drop or self.tag or self.clock_offset or self.clock_drift)
 
-    def _eligible(self, p: Packet | None) -> bool:
-        return p is None or not (p.train or p.action.id in self.protected)
+    def _eligible(self, info: FrameInfo | None) -> bool:
+        return info is None or not (info.train or info.action in self.protected)
 
-    def apply(self, frames: list[Frame]) -> list[Frame]:
+    def stream(self, frames: Iterable[Frame]) -> Iterator[Frame]:
         """``frames`` sorted by (time, index) -> what the capture file holds, in the same order.
 
-        Duplicates carry no packet: the answer key always points at the first copy."""
+        Duplicates carry no info: the answer key always points at the first copy."""
         if not self.active:
-            return frames
+            yield from frames
+            return
         drop = self.rng.child("drop") if self.drop else None
         copy = self.rng.child("duplicates") if self.duplicates else None
-        out: list[Frame] = []
-        late: list[Frame] = []
-        t0 = frames[0][0] if frames else 0.0
-        for t, index, data, p in frames:
+        late: list[Frame] = []   # duplicates, a few microseconds behind their original
+        t0 = None
+        for t, index, data, info in frames:
+            if t0 is None:
+                t0 = t
             if self.clock_offset or self.clock_drift:
                 t = t + self.clock_offset + (t - t0) * self.clock_drift
             if self.tag is not None:
                 data = data[:12] + self.tag + data[12:]
-            eligible = self._eligible(p)
+            eligible = self._eligible(info)
             if drop is not None and eligible and drop.random() < self.drop:
                 continue
-            out.append((t, index, data, p))
+            while late and (late[0][0], late[0][1]) < (t, index):
+                yield heapq.heappop(late)
+            yield t, index, data, info
             if copy is not None and eligible and copy.random() < self.duplicates:
                 delay = (len(data) + 24) * 8 / SPAN_RATE + copy.uniform(*SWITCH_LATENCY)
-                late.append((t + delay, index, data, None))
-        if late:
-            out.extend(late)
-            out.sort(key=lambda f: (f[0], f[1], f[3] is None))
-        return out
+                heapq.heappush(late, (t + delay, index, data, None))
+        while late:
+            yield heapq.heappop(late)

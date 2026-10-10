@@ -69,7 +69,7 @@ from pcapforge.topology import Sink, group6_mac
 
 if TYPE_CHECKING:
     from pcapforge.compose.headers import Headers
-    from pcapforge.compose.packets import Flow, Packet
+    from pcapforge.compose.packets import Packet
     from pcapforge.plan import Plan
     from pcapforge.profiles import Ipv6Router
     from pcapforge.rng import Rng
@@ -199,7 +199,6 @@ class Ipv6:
         self.valid: dict[str, float] = {}  # host -> when its link-local address is usable
         self.solicits: dict[str, list[float]] = {}  # host -> its Router Solicitations if no RA comes first
         self.seen: dict[str, float] = {}   # host -> its last frame in the timeline
-        self.sockets: dict[Flow, int] = {}  # IPv4 query socket -> source port of its IPv6 twin
         self.router: Host | None = None
         router = topology.subnets[topology.sensor].router if self.address else None
         if router is not None and router.device.ipv6_router is not None:
@@ -400,9 +399,9 @@ class Ipv6:
         flow = p.flow
         sport = ports.WELL_KNOWN.get(flow.client_port)
         if sport is None:
-            sport = self.sockets.get(flow)
+            sport = flow.v6port
             if sport is None:
-                sport = self.sockets[flow] = self.headers.ephemeral(host, self.rng)
+                sport = flow.v6port = self.headers.ephemeral(host, self.rng)
         dport = ports.WELL_KNOWN.get(flow.server_port, flow.server_port)
         payload = p.payload
         if flow.server_port == ports.DHCPV6_SERVER:

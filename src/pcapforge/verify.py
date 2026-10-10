@@ -4,7 +4,9 @@ every answer-key question check."""
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,19 +45,22 @@ class VerifyReport:
         return [c for c in self.checks if not c["ok"]]
 
 
-def _tshark(pcap: Path, args: list[str]) -> list[str]:
+def _tshark(pcap: Path, args: list[str]) -> Iterator[str]:
+    """Output lines of a tshark run, as tshark prints them (one per frame for ``-T fields``)."""
     cmd = [require_tool("tshark"), "-n", "-r", str(pcap), *PREFS, *args]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", check=False)
-    except OSError as exc:
-        raise TsharkError(f"cannot run tshark: {exc}") from exc
-    if proc.returncode != 0:
-        message = proc.stderr.strip() or f"exit code {proc.returncode}"
-        raise TsharkError(f"tshark failed on {pcap.name}: {message}", proc.stderr)
-    lines = proc.stdout.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    return lines
+    with tempfile.TemporaryFile() as stderr:
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr, encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise TsharkError(f"cannot run tshark: {exc}") from exc
+        assert proc.stdout is not None
+        with proc.stdout:
+            for line in proc.stdout:
+                yield line.rstrip("\r\n")
+        if proc.wait() != 0:
+            stderr.seek(0)
+            text = stderr.read().decode("utf-8", "replace")
+            raise TsharkError(f"tshark failed on {pcap.name}: {text.strip() or f'exit code {proc.returncode}'}", text)
 
 
 def _frames(numbers: list[int]) -> str:
@@ -65,7 +70,7 @@ def _frames(numbers: list[int]) -> str:
 
 def _expert_errors(pcap: Path) -> str:
     try:
-        lines = _tshark(pcap, ["-q", "-z", "expert,error"])
+        lines = list(_tshark(pcap, ["-q", "-z", "expert,error"]))
     except TsharkError as exc:
         return str(exc)
     rows = [line.strip() for line in lines if line.strip() and not line.startswith(("=", "Errors"))]
@@ -81,11 +86,11 @@ def _integrity(pcap: Path, report: VerifyReport, answers: dict | None) -> None:
     args = ["-T", "fields", "-E", "separator=\t", "-E", "occurrence=a", "-E", "aggregator=,"]
     for name in INTEGRITY_FIELDS:
         args += ["-e", name]
-    rows = _tshark(pcap, args)
-
+    total = 0
     malformed, bad_checksum, expert, leaks, undecoded = [], [], [], [], []
     protocols: Counter[str] = Counter()
-    for row in rows:
+    for row in _tshark(pcap, args):
+        total += 1
         frame = dict(zip(INTEGRITY_FIELDS, row.split("\t")))
         number = int(frame["frame.number"])
         stack = frame.get("frame.protocols", "").split(":")
@@ -102,7 +107,6 @@ def _integrity(pcap: Path, report: VerifyReport, answers: dict | None) -> None:
         if any(_loopback(addr) for name in ADDRESS_FIELDS for addr in frame.get(name, "").split(",")):
             leaks.append(number)
 
-    total = len(rows)
     report.add("frames", total > 0, f"{total} frames read")
     if answers is not None:
         expected = answers.get("capture", {}).get("packets")
@@ -129,7 +133,7 @@ def _integrity(pcap: Path, report: VerifyReport, answers: dict | None) -> None:
 def _count_one(pcap: Path, display_filter: str) -> int | str:
     """Frames matching one display filter, or an error message."""
     try:
-        return len(_tshark(pcap, ["-Y", display_filter, "-T", "fields", "-e", "frame.number"]))
+        return sum(1 for _ in _tshark(pcap, ["-Y", display_filter, "-T", "fields", "-e", "frame.number"]))
     except TsharkError as exc:
         return exc.stderr.strip().replace("\n", " ") or str(exc)
 
@@ -147,8 +151,12 @@ def count_matches(pcap: Path, filters: list[str]) -> dict[str, int | str]:
         args = ["-T", "fields", "-E", "separator=\t"]
         for display_filter in pending:
             args += ["-e", f"!!({display_filter})"]
+        counts = [0] * len(pending)
         try:
-            rows = _tshark(pcap, args)
+            for row in _tshark(pcap, args):
+                for index, value in enumerate(row.split("\t")[:len(pending)]):
+                    if value:
+                        counts[index] += 1
         except TsharkError as exc:
             invalid = {line.strip() for line in exc.stderr.splitlines() if line.startswith("\t")}
             rejected = [f for f in pending if f"!!({f})" in invalid]
@@ -158,11 +166,6 @@ def count_matches(pcap: Path, filters: list[str]) -> dict[str, int | str]:
                 results[display_filter] = _count_one(pcap, display_filter)
             pending = [f for f in pending if f not in rejected]
             continue
-        counts = [0] * len(pending)
-        for row in rows:
-            for index, value in enumerate(row.split("\t")[:len(pending)]):
-                if value:
-                    counts[index] += 1
         results.update(zip(pending, counts))
         break
     return results

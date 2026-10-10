@@ -264,8 +264,31 @@ Input: recording pcap, plan, presentation rng (`Rng("pcapforge", scenario, diffi
    DNS answers: rewrite A-record rdata loopback → final IP (same length).
 8. L2 via `topology.l2_view(src, dst)`; synthesize ARP who-has/is-at for on-segment pairs
    before first contact and again after 30–120 s idle (Windows/Linux cache aging).
-9. Merge sort by time (stable), write classic pcap (Ethernet, µs) or pcapng; return
+9. Merge by time (stable on emission order), write classic pcap (Ethernet, µs) or pcapng; return
    action id → first request frame number for the answer key.
+
+Streaming (long captures): every stage is a generator over a time-ordered stream with a bounded
+look-behind, so memory holds minutes of the capture, not all of it, and the output is the same as a
+global sort would give (checked byte for byte against the former in-memory composer on every
+scenario, level and two seeds, plus a 2 h hard run):
+- `assign_flows` yields packets in recorded order; the `Retimer` places them and releases packets
+  more than `retime.HORIZON_S` (300 s) behind the latest action start, in (time, recorded order)
+  order from a heap. A delayed ACK whose timer ran out behind the horizon is released at its due
+  time (no later segment of its flow can carry it) while the flow's clock learns of it as before.
+  Anything that would land behind already released time raises `ComposeError`;
+- per-flow state (retime clock, negotiated options, header state, IPv6 twin port, firewall kinds)
+  lives on the `Flow`, so it is freed with the flow;
+- `firewall.host_firewall` and `enip.cyclic_io` hold the timeline back 60 s: a refused connection
+  has shown its RST, a recorded first I/O exchange is complete; the cyclic I/O times are drawn per
+  side up front into compact arrays (same draw order) and the packets generated lazily;
+- frames (with ARP / interface-start frames up to `FRAME_HORIZON_S` early) are sorted in a heap and
+  spooled to a temporary file in time order; the final pass merges in the IPv6 router / SLAAC / ND
+  frames (they need the capture's first and last time and each host's last frame), applies the SPAN
+  model as a stream and writes the file, numbering frames on the way;
+- `verify` reads tshark output line by line; the SIEM export writes each record once the capture is
+  `export.HORIZON_S` past it (requests unanswered for that long stay unanswered) and keeps only the
+  flow table to the end; `Plan.digest` hashes the actions one by one; the answer key's per-action
+  frame numbers and times are compact arrays (`compose.ActionIndex`), not dicts.
 
 Implementation notes (where `compose/` refines the spec):
 - a delayed pure ACK whose timer would fire after the sender's next segment is not emitted
