@@ -243,7 +243,8 @@ Next: IT-line scenarios (README roadmap).
 
 ### Composer spec
 Input: recording pcap, plan, presentation rng (`Rng("pcapforge", scenario, difficulty, seed).child("present")`).
-1. Parse with `RawPcapReader`; strip link layer (DLT_NULL 4 bytes / Ethernet 14) → IPv4 bytes.
+1. Parse classic pcap with a buffered reader (pcapng via `RawPcapReader`); strip link layer
+   (DLT_NULL 4 bytes / Ethernet 14 / Linux cooked) → IPv4 bytes.
 2. Markers: UDP to `MARKER_SINK:9999`, payload `PFMK`+u32 action id → set `current_action`; drop.
 3. Flow key = sorted 5-tuple. Client side = SYN sender (TCP) / first sender (UDP). A client
    packet with payload/SYN/FIN binds the flow to `current_action`; others inherit the flow's action.
@@ -278,17 +279,25 @@ scenario, level and two seeds, plus a 2 h hard run):
   Anything that would land behind already released time raises `ComposeError`;
 - per-flow state (retime clock, negotiated options, header state, IPv6 twin port, firewall kinds)
   lives on the `Flow`, so it is freed with the flow;
-- `firewall.host_firewall` and `enip.cyclic_io` hold the timeline back 60 s: a refused connection
-  has shown its RST, a recorded first I/O exchange is complete; the cyclic I/O times are drawn per
-  side up front into compact arrays (same draw order) and the packets generated lazily;
-- frames (with ARP / interface-start frames up to `FRAME_HORIZON_S` early) are sorted in a heap and
-  spooled to a temporary file in time order; the final pass merges in the IPv6 router / SLAAC / ND
-  frames (they need the capture's first and last time and each host's last frame), applies the SPAN
-  model as a stream and writes the file, numbering frames on the way;
+- the host firewall (`firewall.HostFirewall`) and the cyclic EtherNet/IP I/O (`enip.CyclicIo`) are
+  release stages of the `Retimer`: they see every timed packet as it is placed and decide / add as
+  it leaves the heap, by which time a refused connection has shown its RST and a recorded first I/O
+  exchange is complete; the cyclic I/O times are drawn per side up front into compact arrays (same
+  draw order) and the stream packets are generated one at a time into the heap;
+- frames of timeline packets arrive in order (a queue); ARP / interface-start / ACD / IPv6-copy
+  frames (up to `FRAME_HORIZON_S` early) go through a heap, merged in exact (time, index) order.
+  Without IPv6 hosts they go straight through the SPAN model to the writer; with IPv6 they are
+  spooled to a temporary file first and the final pass merges in the router / SLAAC / ND frames
+  (they need the capture's first and last time and each host's last frame). Frames are numbered on
+  the way; frame info (action id and request / control / segment flags) is one packed int;
 - `verify` reads tshark output line by line; the SIEM export writes each record once the capture is
   `export.HORIZON_S` past it (requests unanswered for that long stay unanswered) and keeps only the
   flow table to the end; `Plan.digest` hashes the actions one by one; the answer key's per-action
-  frame numbers and times are compact arrays (`compose.ActionIndex`), not dicts.
+  frame numbers and times are compact arrays (`compose.ActionIndex`), not dicts;
+- the plan: `Action` has slots and no separate insertion counter (its `id` is the insertion order
+  until `finalize` sorts stably by time and renumbers), and `Plan.add` shares equal argument dicts
+  of scalars, so a poll repeated millions of times costs one dict (actors that change an action's
+  arguments later assign a new dict); about 0.15 KB per action.
 
 Implementation notes (where `compose/` refines the spec):
 - a delayed pure ACK whose timer would fire after the sender's next segment is not emitted

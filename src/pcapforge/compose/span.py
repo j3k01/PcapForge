@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import heapq
 import struct
-from typing import TYPE_CHECKING, Iterable, Iterator, NamedTuple
+from typing import TYPE_CHECKING, Iterable, Iterator
 
 if TYPE_CHECKING:
     from pcapforge.plan import Plan
@@ -33,16 +33,19 @@ SPAN_RATE = 1e9                   # SPAN destination port: copies leave at 1 Gbi
 SWITCH_LATENCY = (1.5e-6, 6e-6)   # forwarding decision until the egress copy
 
 
-class FrameInfo(NamedTuple):
-    """What the answer key and the SPAN model need to know about a frame of a recorded packet."""
+# Frame info of a recorded packet's frame, packed in one int (synthesized frames have None):
+# the action id shifted left by ``INFO_SHIFT``, plus flags.
+REQUEST = 1   # first-request candidate: client data, not a retransmission or a non-final segment
+CONTROL = 2   # client SYN / FIN of that kind (actions without application data)
+TRAIN = 4     # a segment of a message that tshark has to reassemble
+INFO_SHIFT = 3
 
-    action: int           # action id
-    request: bool         # first-request candidate: client data, not a retransmission or a segment
-    control: bool         # client SYN / FIN of that kind (actions without application data)
-    train: bool           # a segment of a message that tshark has to reassemble
+
+def frame_info(action: int, request: bool = False, control: bool = False, train: bool = False) -> int:
+    return action << INFO_SHIFT | (REQUEST if request else 0) | (CONTROL if control else 0) | (TRAIN if train else 0)
 
 
-Frame = tuple[float, int, bytes, "FrameInfo | None"]   # (time, emission index, bytes, info or None if synthesized)
+Frame = tuple[float, int, bytes, "int | None"]   # (time, emission index, bytes, frame info or None if synthesized)
 
 
 def _draw(value, rng: Rng) -> float:
@@ -88,8 +91,8 @@ class Span:
     def active(self) -> bool:
         return bool(self.duplicates or self.drop or self.tag or self.clock_offset or self.clock_drift)
 
-    def _eligible(self, info: FrameInfo | None) -> bool:
-        return info is None or not (info.train or info.action in self.protected)
+    def _eligible(self, info: int | None) -> bool:
+        return info is None or not (info & TRAIN or info >> INFO_SHIFT in self.protected)
 
     def stream(self, frames: Iterable[Frame]) -> Iterator[Frame]:
         """``frames`` sorted by (time, index) -> what the capture file holds, in the same order.

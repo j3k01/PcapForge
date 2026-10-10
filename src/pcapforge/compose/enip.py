@@ -4,11 +4,9 @@ class 1 I/O stream that continues each recorded first O->T / T->O exchange."""
 from __future__ import annotations
 
 import heapq
-import math
 import struct
 from array import array
-from collections import deque
-from typing import TYPE_CHECKING, Iterable, Iterator
+from typing import TYPE_CHECKING, Callable, Iterator
 
 from pcapforge import ports
 from pcapforge.actors.enip import RUN, RUN_IDLE, Drive, io_packet, parse_io_packet
@@ -29,9 +27,6 @@ _SIN_ADDR = 2 + 4                # encapsulation version, sin_family, sin_port, 
 # little scheduling jitter: O->T from the Logix scanner (side 0), T->O from the drive (side 1).
 CLOCK_PPM = 30.0
 JITTER_S = (40e-6, 150e-6)
-# A recorded first exchange is complete this long after its first packet; the cyclic stream of
-# its connection starts then (the timeline is held back by as much).
-DELAY_S = 60.0
 # Recorded packets come first among equal times, then the connections in the order they appear,
 # each with its packets in sequence (the order key of a sort that is stable on equal times).
 ORDER_BASE = 1 << 48
@@ -72,50 +67,50 @@ def rewrite_list_identity(payload: bytes, remap) -> bytes:
     return bytes(out) if out is not None else payload
 
 
-def cyclic_io(plan: Plan, timeline: Iterable[Packet], rng: Rng) -> Iterator[Packet]:
-    """``timeline`` (sorted by (time, order)) plus the class 1 packets after each recorded first
-    exchange on UDP 2222: both directions at the connection's API until the end of the capture,
-    sequence numbers and counts continuing from the recorded ones, O->T data from the scanner's
-    ``LineProgram`` and T->O data from a ``Drive`` that consumes it."""
-    actors = {a.id: a for a in plan.actors}
-    start, end = plan.start_epoch, plan.start_epoch + plan.duration
-    flows: dict[int, list[Packet]] = {}       # recorded packets of each I/O connection
-    started: set[int] = set()
-    streams: list[tuple[float, int, int, Packet, Iterator[Packet]]] = []   # heads of the cyclic streams
-    waiting: deque[Packet] = deque()
+class CyclicIo:
+    """The class 1 packets after each recorded first exchange on UDP 2222: both directions at the
+    connection's API until the end of the capture, sequence numbers and counts continuing from the
+    recorded ones, O->T data from the scanner's ``LineProgram`` and T->O data from a ``Drive`` that
+    consumes it.
 
-    def advance(head: Iterator[Packet], index: int) -> None:
-        p = next(head, None)
-        if p is not None:
-            heapq.heappush(streams, (p.time, p.order, index, p, head))
+    A release stage of the ``Retimer``: it collects the recorded packets of each I/O connection
+    (``observe``) and, when the first of them leaves in capture order (``admit``; the exchange is
+    complete by then), starts the connection's stream, handing over one packet at a time."""
 
-    def release(until: float) -> Iterator[Packet]:
-        while waiting and waiting[0].time < until:
-            p = waiting.popleft()
-            while streams and (streams[0][0], streams[0][1]) < (p.time, p.order):
-                _t, _o, index, q, head = heapq.heappop(streams)
-                yield q
-                advance(head, index)
-            key = id(p.flow)
-            if key in flows and key not in started:
-                started.add(key)
-                index = len(started) - 1
-                advance(_stream(actors, flows[key], rng, start, end, ORDER_BASE + index * ORDER_FLOW), index)
-            yield p
+    def __init__(self, plan: Plan, rng: Rng) -> None:
+        self.actors = {a.id: a for a in plan.actors}
+        self.rng = rng
+        self.start, self.end = plan.start_epoch, plan.start_epoch + plan.duration
+        self.flows: dict[int, list[Packet]] = {}       # recorded packets of each I/O connection
+        self.started: set[int] = set()
+        self.heads: dict[int, Iterator[Packet]] = {}   # id of a stream packet in flight -> its stream
 
-    for p in timeline:
-        if p.flow.proto == UDP and p.flow.server_port == ports.ENIP_IO:
-            if id(p.flow) in started:
+    def observe(self, p: Packet) -> None:
+        flow = p.flow
+        if flow.proto == UDP and flow.server_port == ports.ENIP_IO:
+            key = id(flow)
+            if key in self.started:
                 raise ComposeError(f"EtherNet/IP I/O packet of action {p.action.id} after its cyclic stream "
-                                   f"started: the recorded exchange spans more than {DELAY_S:.0f} s")
-            flows.setdefault(id(p.flow), []).append(p)
-        waiting.append(p)
-        yield from release(p.time - DELAY_S)
-    yield from release(math.inf)
-    while streams:
-        _t, _o, index, q, head = heapq.heappop(streams)
-        yield q
-        advance(head, index)
+                                   "started: the recorded exchange outlasts the streaming horizon")
+            self.flows.setdefault(key, []).append(p)
+
+    def admit(self, p: Packet, insert: Callable[[Packet], None]) -> bool:
+        head = self.heads.pop(id(p), None)
+        if head is not None:
+            self._next(head, insert)
+            return True
+        key = id(p.flow)
+        if key in self.flows and key not in self.started:
+            self.started.add(key)
+            order = ORDER_BASE + (len(self.started) - 1) * ORDER_FLOW
+            self._next(_stream(self.actors, self.flows[key], self.rng, self.start, self.end, order), insert)
+        return True
+
+    def _next(self, head: Iterator[Packet], insert: Callable[[Packet], None]) -> None:
+        q = next(head, None)
+        if q is not None:
+            self.heads[id(q)] = head
+            insert(q)
 
 
 def _stream(actors: dict, packets: list[Packet], rng: Rng, start: float, end: float, order: int) -> Iterator[Packet]:

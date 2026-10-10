@@ -23,7 +23,7 @@ import heapq
 import itertools
 import math
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Iterable, Iterator
+from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
 
 from pcapforge.compose.headers import M32, Negotiated, negotiate
 from pcapforge.compose.packets import (
@@ -93,7 +93,9 @@ class _Clock:
 
 
 class Retimer:
-    def __init__(self, plan: Plan, network: Network, rng: Rng) -> None:
+    def __init__(self, plan: Plan, network: Network, rng: Rng, stages: Sequence = ()) -> None:
+        """``stages``: release stages (``observe(p)`` for every timed packet, ``admit(p, insert)``
+        as it leaves in capture order: False drops it, ``insert`` adds a packet to the timeline)."""
         self.start = plan.start_epoch
         self.net = network
         self.rng = rng.child("timing")
@@ -105,6 +107,7 @@ class Retimer:
         self.dues: list[tuple[float, int, _Clock, Packet]] = []  # delayed ACK timers
         self.released: tuple[float, int] = (-math.inf, -1)
         self.front = -math.inf    # latest action start placed
+        self.stages = tuple(stages)
 
     def stream(self, packets: Iterable[Packet]) -> Iterator[Packet]:
         """Timed packets (plus retransmissions, minus piggybacked ACKs) in (time, recorded order)
@@ -121,14 +124,22 @@ class Retimer:
             while heap and heap[0][0] < mark:
                 t, order, _n, p = heapq.heappop(heap)
                 self.released = (t, order)
-                yield p
+                if self._admit(p):
+                    yield p
         for _due, _n, clock, ack in sorted(self.dues):
             if clock.pending is ack:
                 self._commit(clock, ack, clock.due)
         while heap:
             t, order, _n, p = heapq.heappop(heap)
             self.released = (t, order)
-            yield p
+            if self._admit(p):
+                yield p
+
+    def _admit(self, p: Packet) -> bool:
+        for stage in self.stages:
+            if not stage.admit(p, self._insert):
+                return False
+        return True
 
     def _expire(self, mark: float) -> None:
         """Release delayed ACKs whose timer fired behind the horizon: no later segment of their
@@ -143,6 +154,11 @@ class Retimer:
                 clock.early = ack
 
     def _push(self, p: Packet) -> None:
+        for stage in self.stages:
+            stage.observe(p)
+        self._insert(p)
+
+    def _insert(self, p: Packet) -> None:
         if (p.time, p.order) < self.released:
             raise ComposeError(
                 f"packet of action {p.action.id} lands at {p.time:.6f}, behind already released capture "

@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 from dataclasses import dataclass, field
+from operator import attrgetter
 from typing import Any
 
 from pcapforge import __version__
@@ -15,6 +16,7 @@ from pcapforge.topology import Topology
 
 # Recording format version: bump whenever the recorder/actors change what goes on the wire.
 RECORDING_VERSION = 1
+_SCALARS = (str, int, float, bool, type(None))
 
 
 @dataclass(slots=True)
@@ -25,8 +27,7 @@ class Action:
     op: str
     args: dict
     phase: str = "main"  # "setup" | "main" | "teardown"
-    seq: int = 0
-    id: int = -1
+    id: int = -1         # insertion order while planning, then the index in capture order
 
 
 @dataclass(slots=True)
@@ -62,10 +63,17 @@ class Plan:
     facts: dict[str, Any] = field(default_factory=dict)
     events: list[Event] = field(default_factory=list)
     actors: list = field(default_factory=list)
+    _shared_args: dict = field(default_factory=dict, repr=False)   # argument dicts shared while planning
 
     def add(self, t: float, actor: str, host: str, op: str, phase: str = "main", **args) -> Action:
+        """Append an action. Arguments are plain JSON values; equal argument dicts of scalars are one
+        shared dict (a day-long plan repeats the same poll arguments millions of times), so an actor
+        that changes an action's arguments later assigns a new dict instead of editing it."""
+        if all(type(v) in _SCALARS for v in args.values()):
+            key = tuple((k, type(v), repr(v) if type(v) is float else v) for k, v in args.items())
+            args = self._shared_args.setdefault(key, args)
         action = Action(t=round(t, 6), actor=actor, host=host, op=op, args=args, phase=phase,
-                        seq=len(self.actions))
+                        id=len(self.actions))
         self.actions.append(action)
         return action
 
@@ -81,9 +89,11 @@ class Plan:
         return {"vars": self.vars, "facts": self.facts}
 
     def finalize(self) -> None:
-        self.actions.sort(key=lambda a: (a.t, a.seq))
+        """Order the actions (time, then insertion: the sort is stable) and number them."""
+        self.actions.sort(key=attrgetter("t"))
         for index, action in enumerate(self.actions):
             action.id = index
+        self._shared_args.clear()
 
     def digest(self) -> str:
         """Key of everything that influences the recording (not the presentation).

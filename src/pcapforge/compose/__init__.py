@@ -10,9 +10,10 @@ pcap/pcapng. All randomness comes from the presentation seed, so the same plan, 
 seed always give a byte-identical file.
 
 Every stage streams: packets pass through in capture-time order with a bounded look-behind
-window, the frames are spooled to a temporary file in time order, and the file is written in one
-final pass that merges in the frames depending on the whole capture (IPv6 router / SLAAC / ND).
-Memory holds a few minutes of the capture, not all of it.
+window (the host firewall and the cyclic I/O are release stages of the retimer), and frames are
+written as they come. When the capture has IPv6 hosts, frames are spooled to a temporary file
+first and a final pass merges in the frames that depend on the whole capture (IPv6 router /
+SLAAC / ND). Memory holds a few minutes of the capture, not all of it.
 """
 
 from __future__ import annotations
@@ -23,20 +24,22 @@ import math
 import struct
 import tempfile
 from array import array
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Iterator
 
-from pcapforge.compose import dhcp, enip
-from pcapforge.compose.firewall import host_firewall
+from pcapforge.compose import dhcp
+from pcapforge.compose.enip import CyclicIo
+from pcapforge.compose.firewall import HostFirewall
 from pcapforge.compose.flows import assign_flows
 from pcapforge.compose.headers import Headers
 from pcapforge.compose.ipv6 import Ipv6
 from pcapforge.compose.link import BROADCAST, Link, pad
 from pcapforge.compose.packets import FIN, SYN, ComposeError, Packet, read_ipv4
 from pcapforge.compose.retime import Network, Retimer
-from pcapforge.compose.span import Frame, FrameInfo, Span
+from pcapforge.compose.span import CONTROL, INFO_SHIFT, REQUEST, TRAIN, Frame, Span
 from pcapforge.compose.writer import WRITERS
 from pcapforge.rng import Rng
 from pcapforge.topology import Sink
@@ -48,8 +51,7 @@ __all__ = ["ComposeError", "ComposeResult", "compose"]
 
 # Frames synthesized for a packet (ARP before it, an interface start) may lie this far before it.
 FRAME_HORIZON_S = 300.0
-_SPOOL = struct.Struct("<dqiBI")   # time, emission index, action id, info bits, frame length
-_HAS_INFO, _REQUEST, _CONTROL, _TRAIN = 1, 2, 4, 8
+_SPOOL = struct.Struct("<dqqI")   # time, emission index, frame info (-1: synthesized), frame length
 
 
 @dataclass
@@ -64,69 +66,101 @@ class ComposeResult:
     sensor_clock: dict[str, float] = field(default_factory=lambda: {"offset_s": 0.0, "drift_ppm": 0.0})
 
 
-def _info(p: Packet) -> FrameInfo:
-    first = p.side == 0 and not p.retransmission and not p.more
-    request = first and p.is_request
-    return FrameInfo(p.action.id, request, first and not request and bool(p.flags & (SYN | FIN)), p.train)
+def _info(p: Packet) -> int:
+    info = p.action.id << INFO_SHIFT | (TRAIN if p.train else 0)
+    if p.side == 0 and not p.retransmission and not p.more:
+        if p.is_request:
+            info |= REQUEST
+        elif p.flags & (SYN | FIN):
+            info |= CONTROL
+    return info
 
 
 class _Spool:
     """Frames in (time, index) order on a temporary file, read back once."""
 
+    CHUNK = 1 << 22
+
     def __init__(self, file: IO[bytes]) -> None:
         self.file = file
+        self.buffer = bytearray()
         self.count = 0
-        self.first = math.inf
-        self.last = -math.inf
+        self.first = self.last = 0.0
 
     def write(self, frame: Frame) -> None:
         t, index, data, info = frame
-        if info is None:
-            head = _SPOOL.pack(t, index, -1, 0, len(data))
-        else:
-            bits = _HAS_INFO | (_REQUEST if info.request else 0) | (_CONTROL if info.control else 0) \
-                | (_TRAIN if info.train else 0)
-            head = _SPOOL.pack(t, index, info.action, bits, len(data))
-        self.file.write(head)
-        self.file.write(data)
+        self.buffer += _SPOOL.pack(t, index, -1 if info is None else info, len(data))
+        self.buffer += data
+        if len(self.buffer) >= self.CHUNK:
+            self.file.write(self.buffer)
+            self.buffer.clear()
+        if not self.count:
+            self.first = t
+        self.last = t   # frames come in time order
         self.count += 1
-        self.first = min(self.first, t)
-        self.last = max(self.last, t)
 
-    def read(self) -> Iterator[Frame]:
+    def read(self, late: list[Frame]) -> Iterator[Frame]:
+        """The spooled frames merged with ``late`` ones (sorted, few) in (time, index) order."""
+        self.file.write(self.buffer)
+        self.buffer.clear()
         self.file.seek(0)
-        read = self.file.read
-        size = _SPOOL.size
-        while head := read(size):
-            t, index, action, bits, length = _SPOOL.unpack(head)
-            info = None if not bits & _HAS_INFO else FrameInfo(
-                action, bool(bits & _REQUEST), bool(bits & _CONTROL), bool(bits & _TRAIN))
-            yield t, index, read(length), info
+        size, unpack = _SPOOL.size, _SPOOL.unpack_from
+        pending = deque(late)
+        data, pos = b"", 0
+        while True:
+            if len(data) - pos < size:
+                data, pos = data[pos:] + self.file.read(self.CHUNK), 0
+                if len(data) < size:
+                    break
+            t, index, info, length = unpack(data, pos)
+            end = pos + size + length
+            if end > len(data):
+                more = self.file.read(max(self.CHUNK, end - pos))
+                if not more:
+                    raise ComposeError("frame spool ends inside a frame")
+                data, pos = data[pos:] + more, 0
+                continue
+            while pending and (pending[0][0], pending[0][1]) < (t, index):
+                yield pending.popleft()
+            yield t, index, data[pos + size:end], None if info < 0 else info
+            pos = end
+        yield from pending
 
 
 class _Sorter:
-    """Frames pushed roughly in time order (synthesized ones up to ``FRAME_HORIZON_S`` early),
-    handed to ``spool`` in exact (time, index) order."""
+    """Frames in exact (time, index) order: those of timeline packets arrive in that order (a
+    queue), synthesized ones (ARP, interface starts, ACD probes, IPv6 copies) up to
+    ``FRAME_HORIZON_S`` early or a little late (a heap)."""
 
-    def __init__(self, spool: _Spool) -> None:
-        self.spool = spool
+    def __init__(self) -> None:
+        self.queue: deque[Frame] = deque()
         self.heap: list[Frame] = []
         self.released: tuple[float, int] = (-math.inf, -1)
         self.index = itertools.count()
 
-    def push(self, t: float, data: bytes, info: FrameInfo | None) -> None:
+    def packet(self, t: float, data: bytes, info: int) -> None:
+        self.queue.append((t, next(self.index), data, info))
+
+    def synthesized(self, t: float, data: bytes) -> None:
         index = next(self.index)
         if (t, index) < self.released:
             raise ComposeError(f"frame at {t:.6f} lands behind already written capture time "
                                f"{self.released[0]:.6f} (more than {FRAME_HORIZON_S:.0f} s early)")
-        heapq.heappush(self.heap, (t, index, data, info))
+        heapq.heappush(self.heap, (t, index, data, None))
 
-    def release(self, until: float) -> None:
-        heap = self.heap
-        while heap and heap[0][0] < until:
-            frame = heapq.heappop(heap)
+    def release(self, until: float) -> Iterator[Frame]:
+        queue, heap = self.queue, self.heap
+        while True:
+            if heap and (not queue or (heap[0][0], heap[0][1]) < (queue[0][0], queue[0][1])):
+                if heap[0][0] >= until:
+                    return
+                frame = heapq.heappop(heap)
+            elif queue and queue[0][0] < until:
+                frame = queue.popleft()
+            else:
+                return
             self.released = (frame[0], frame[1])
-            self.spool.write(frame)
+            yield frame
 
 
 def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap") -> ComposeResult:
@@ -141,16 +175,18 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
 
     packets = assign_flows(plan, read_ipv4(Path(recording)))
     network = Network(topology, present.child("latency"))
-    timeline = enip.cyclic_io(plan, host_firewall(Retimer(plan, network, present).stream(packets)),
-                              present.child("enip_io"))
+    stages = [HostFirewall()]
+    if any(a.type == "enip.scanner" for a in plan.actors):
+        stages.append(CyclicIo(plan, present.child("enip_io")))
+    timeline = Retimer(plan, network, present, stages).stream(packets)
     headers = Headers(plan, present.child("headers"))
     leases = dhcp.Dhcp(plan, present.child("dhcp"))
     link = Link(plan, network, present.child("arp"), leases.joining)
     ipv6 = Ipv6(plan, headers, present.child("ipv6"))
+    sorter = _Sorter()
 
-    with tempfile.TemporaryFile() as file:
-        spool = _Spool(file)
-        frames = _Sorter(spool)
+    def frames() -> Iterator[Frame]:
+        synthesized = sorter.synthesized
         for p in timeline:
             ipv4 = not isinstance(p.dst, Sink) or p.dst.ipv4
             view = link.view(p.src, p.dst)
@@ -160,30 +196,42 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
                 continue
             eth, hops = view
             for t, frame in ipv6.start_before(p.time, p.src):
-                frames.push(t, frame, None)
+                synthesized(t, frame)
             if ipv4:
                 delivery = dhcp.delivery(p)
                 if delivery is None:
                     for t, arp in link.arp_before(p.time, p.src, p.dst):
-                        frames.push(t, arp, None)
+                        synthesized(t, arp)
                 elif delivery.broadcast:
                     eth = BROADCAST + eth[6:]
-                frames.push(p.time, pad(eth + headers.build(p, hops, delivery)), _info(p))
+                sorter.packet(p.time, pad(eth + headers.build(p, hops, delivery)), _info(p))
                 for t, arp in leases.after(p):
-                    frames.push(t, arp, None)
+                    synthesized(t, arp)
             copy = ipv6.datagram(p)
             if copy is not None:
-                frames.push(copy[0], copy[1], None)
-            frames.release(p.time - FRAME_HORIZON_S)
-        frames.release(math.inf)
-        if not spool.count:
-            raise ComposeError("no packet of the recording is visible at the sensor")
-        # Router Solicitations, Router Advertisements, SLAAC and unicast ND over the whole capture.
-        late = sorted((t, next(frames.index), frame, None) for t, frame in ipv6.finish(spool.first, spool.last))
-        span = Span(plan, present.child("span"))
-        merged = heapq.merge(spool.read(), late, key=lambda f: (f[0], f[1]))
-        written = _Written(span.stream(merged), len(plan.actions))
-        out = Path(out)
+                synthesized(*copy)
+            yield from sorter.release(p.time - FRAME_HORIZON_S)
+        yield from sorter.release(math.inf)
+
+    span = Span(plan, present.child("span"))
+    out = Path(out)
+    with tempfile.TemporaryFile() as file:
+        if ipv6.address:
+            spool = _Spool(file)
+            for frame in frames():
+                spool.write(frame)
+            if not spool.count:
+                raise ComposeError("no packet of the recording is visible at the sensor")
+            # Router Solicitations, Router Advertisements, SLAAC and unicast ND over the whole capture.
+            late = sorted((t, next(sorter.index), frame, None) for t, frame in ipv6.finish(spool.first, spool.last))
+            ordered = spool.read(late)
+        else:
+            ordered = frames()
+            first = next(ordered, None)
+            if first is None:
+                raise ComposeError("no packet of the recording is visible at the sensor")
+            ordered = itertools.chain([first], ordered)
+        written = _Written(span.stream(ordered), len(plan.actions))
         out.parent.mkdir(parents=True, exist_ok=True)
         writer(out, written)
     action_frames, action_times = written.index()
@@ -235,22 +283,23 @@ class _Written:
 
     def __iter__(self) -> Iterator[tuple[int, bytes]]:
         request, control, times = self.request, self.control, self.micros
+        count = 0
         for t, _index, data, info in self.frames:
             micros = round(t * 1_000_000)
-            self.count += 1
-            if self.count == 1:
+            count += 1
+            if count == 1:
                 self.first = micros
-            self.last = micros
             # A segmented request is decoded (reassembled) in the frame of its last segment.
-            if info is not None:
-                action = info.action
-                if info.request:
+            if info is not None and info & (REQUEST | CONTROL):
+                action = info >> INFO_SHIFT
+                if info & REQUEST:
                     if not request[action]:
-                        request[action] = self.count
+                        request[action] = count
                         times[2 * action] = micros
-                elif info.control and not control[action]:
-                    control[action] = self.count
+                elif not control[action]:
+                    control[action] = count
                     times[2 * action + 1] = micros
+            self.count, self.last = count, micros
             yield micros, data
 
     def index(self) -> tuple[ActionIndex, ActionIndex]:

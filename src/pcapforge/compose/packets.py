@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterator
@@ -56,20 +57,64 @@ LINK_TYPES: dict[int, Callable[[bytes], bytes | None]] = {
 }
 
 
-def read_ipv4(path: Path) -> Iterator[bytes]:
-    """IPv4 packets of a pcap/pcapng recording, link layer removed, in capture order."""
+_PCAP_MAGIC = {b"\xd4\xc3\xb2\xa1": "<", b"\xa1\xb2\xc3\xd4": ">", b"\x4d\x3c\xb2\xa1": "<", b"\xa1\xb2\x3c\x4d": ">"}
+_CHUNK = 1 << 22
+
+
+def _classic_pcap(path: Path) -> Iterator[tuple[bytes, int]] | None:
+    """(frame, link type) of a classic pcap file, or None for another format (pcapng)."""
+    with open(path, "rb") as fh:
+        head = fh.read(24)
+    endian = _PCAP_MAGIC.get(head[:4])
+    if endian is None or len(head) < 24:
+        return None
+    linktype = struct.unpack(endian + "I", head[20:24])[0] & 0x0FFFFFFF
+    record = struct.Struct(endian + "IIII")
+
+    def frames() -> Iterator[tuple[bytes, int]]:
+        size = record.size
+        with open(path, "rb") as fh:
+            fh.seek(24)
+            data, pos = b"", 0
+            while True:
+                if len(data) - pos < size:
+                    data, pos = data[pos:] + fh.read(_CHUNK), 0
+                    if len(data) < size:
+                        return
+                _s, _us, captured, _length = record.unpack_from(data, pos)
+                end = pos + size + captured
+                if end > len(data):
+                    more = fh.read(max(_CHUNK, end - pos))
+                    if not more:
+                        return  # truncated last record (capture stopped mid-write)
+                    data, pos = data[pos:] + more, 0
+                    continue
+                yield data[pos + size:end], linktype
+                pos = end
+    return frames()
+
+
+def _any_pcap(path: Path) -> Iterator[tuple[bytes, int | None]]:
     with RawPcapReader(str(path)) as reader:
         default = getattr(reader, "linktype", None)
         for data, meta in reader:
             linktype = getattr(meta, "linktype", None)
-            if linktype is None:
-                linktype = default
-            strip = LINK_TYPES.get(linktype)
+            yield data, default if linktype is None else linktype
+
+
+def read_ipv4(path: Path) -> Iterator[bytes]:
+    """IPv4 packets of a pcap/pcapng recording, link layer removed, in capture order."""
+    frames = _classic_pcap(Path(path)) or _any_pcap(Path(path))
+    strips: dict = {}
+    for data, linktype in frames:
+        strip = strips.get(linktype)
+        if strip is None:
+            strip = strips[linktype] = LINK_TYPES.get(linktype)
             if strip is None:
                 raise ComposeError(f"{path}: unsupported link type {linktype}")
-            packet = strip(data)
-            if packet and len(packet) >= 20 and packet[0] >> 4 == 4:
-                yield packet
+        packet = strip(data)
+        if packet and len(packet) >= 20 and packet[0] >> 4 == 4:
+            yield packet
 
 
 @dataclass(eq=False, slots=True)

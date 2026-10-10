@@ -1156,8 +1156,8 @@ class BacnetClient(Actor):
             # Invoke ids count up per workstation-controller session in the order of the requests.
             for target in targets:
                 invoke = rng.randrange(256)
-                for action in sorted(requests[target.id], key=lambda a: (a.t, a.seq)):
-                    action.args["invoke"] = invoke
+                for action in sorted(requests[target.id], key=lambda a: (a.t, a.id)):
+                    action.args = {**action.args, "invoke": invoke}   # args dicts may be shared
                     invoke = (invoke + 1) % 256
             hosts_facts.append({
                 "host": host_ref(host.id), "subscriber_process_id": process_id,

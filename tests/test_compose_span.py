@@ -3,7 +3,7 @@
 from collections import Counter
 from types import SimpleNamespace
 
-from pcapforge.compose.span import FrameInfo, Span
+from pcapforge.compose.span import INFO_SHIFT, TRAIN, Span, frame_info
 from pcapforge.plan import Action
 from pcapforge.rng import Rng
 
@@ -17,7 +17,7 @@ def wire(count=4000):
     for index in range(count):
         info = None
         if index % 3:
-            info = FrameInfo(ANSWER_ACTION if index % 10 == 0 else 1, False, False, index % 7 == 0)
+            info = frame_info(ANSWER_ACTION if index % 10 == 0 else 1, train=index % 7 == 0)
         data = b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\x08\x00" + index.to_bytes(4, "big") + bytes(42)
         frames.append((1_700_000_000 + index * 1e-3, index, data, info))
     return frames
@@ -33,19 +33,13 @@ def apply(span, frames):
     return list(span.stream(iter(frames)))
 
 
-def span(**impairments):
-    answer = Action(t=0.0, actor="change", host="rogue", op="write", args={}, id=ANSWER_ACTION)
-    plan = SimpleNamespace(impairments=impairments, events=[], facts={"change": {"writes": [{"request": answer}]}})
-    return Span(plan, Rng("test", "span"))
-
-
 def test_drops_and_duplicates_spare_answer_frames_and_message_segments():
     frames = wire()
     out = apply(span(span_duplicates=0.05, sensor_drop=0.02), frames)
     assert out == apply(span(span_duplicates=0.05, sensor_drop=0.02), wire())  # deterministic
     seen = Counter(data for _, _, data, _ in out)
     by_data = {data: (t, p) for t, _, data, p in frames}
-    kept = [f for f in frames if f[3] is not None and (f[3].action == ANSWER_ACTION or f[3].train)]
+    kept = [f for f in frames if f[3] is not None and (f[3] >> INFO_SHIFT == ANSWER_ACTION or f[3] & TRAIN)]
     assert all(seen[data] == 1 for _, _, data, _ in kept)
     dropped = [data for data in by_data if data not in seen]
     copied = [data for data, n in seen.items() if n == 2]

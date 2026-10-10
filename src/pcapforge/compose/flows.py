@@ -49,7 +49,7 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> Iterator[Packet]:
     hosts = {socket.inet_aton(h.loopback): h for h in plan.topology.hosts}
     sinks = {socket.inet_aton(s.loopback): s for s in SINKS.values()}
     sink = socket.inet_aton(MARKER_SINK)
-    actions = {a.id: a for a in plan.actions}
+    actions = plan.actions   # finalized: action ids are list indices
     mid_session = bool(plan.impairments.get("mid_session"))
     current = None
     live: dict[tuple, Flow] = {}
@@ -75,7 +75,7 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> Iterator[Packet]:
         if proto == UDP and dst == sink and dport == ports.MARKER:
             action_id = parse_marker(payload)
             if action_id is not None:
-                if action_id not in actions:
+                if not 0 <= action_id < len(actions):
                     raise ComposeError(f"recording marker for unknown action {action_id}; "
                                        "the recording does not belong to this plan")
                 current = actions[action_id]
