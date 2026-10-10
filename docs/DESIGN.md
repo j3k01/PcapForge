@@ -233,8 +233,10 @@ subscription (`vars.opcua`), see below.
 - IPv6 (`compose/ipv6.py`, `vars.ipv6`): besides the Windows link-local baseline, the sensor segment's
   firewall (`fortigate`, `ipv6_router` in devices.yaml with FortiOS defaults) sends Router Advertisements
   with a seeded ULA /64; Windows hosts form SLAAC stable and temporary addresses (MLDv2 joins, DAD) and run
-  unicast Neighbor Discovery with the router (address resolution, NUD probes after ReachableTime). Hosts
-  never send from the SLAAC addresses: only ND is modelled.
+  unicast Neighbor Discovery with the router (address resolution after the RA, the router's one NUD probe
+  5 s later). Hosts never send from the SLAAC addresses, as on a real IPv4 site with a ULA-only RA: no AAAA
+  records, and Windows' prefix policy (RFC 6724) ranks IPv4 above ULA, so nothing uses the router and no
+  later NUD happens.
 - FLOAT32 registers: profile points may be `type: float32` (two registers, profile `word_order` big = ABCD or
   little = CDAB); `power_substation` and `hvac_building` use them. `Point.encode` returns the register words,
   `ProcessProfile.decode_block` decodes whole points from a read/write block (half a float is skipped), and a
@@ -288,7 +290,7 @@ scenario, level and two seeds, plus a 2 h hard run):
   frames (up to `FRAME_HORIZON_S` early) go through a heap, merged in exact (time, index) order.
   Without IPv6 hosts they go straight through the SPAN model to the writer; with IPv6 they are
   spooled to a temporary file first and the final pass merges in the router / SLAAC / ND frames
-  (they need the capture's first and last time and each host's last frame). Frames are numbered on
+  (they need the capture's first and last time). Frames are numbered on
   the way; frame info (action id and request / control / segment flags) is one packed int;
 - `verify` reads tshark output line by line; the SIEM export writes each record once the capture is
   `export.HORIZON_S` past it (requests unanswered for that long stay unanswered) and keeps only the

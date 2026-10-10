@@ -162,8 +162,8 @@ def test_slaac_addresses_use_the_advertised_prefix_and_pass_dad_before_use(defau
             joins = [u for u, p, _ in frames if ICMPv6MLReport2 in p and p.src == host_mac and u <= t
                      and p[IPv6].src == addr(link_local) and group in {r.dst for r in p[ICMPv6MLReport2].records}]
             assert joins, "the solicited-node group is joined (from the link-local address) before DAD"
-        used = [t for t, p, _ in frames if IPv6 in p and ipaddress.IPv6Address(p[IPv6].src) in prefix]
-        assert all(t >= max(d for d, _ in dads) + 1.0 for t in used)
+    # Nothing is ever sent from a SLAAC address: IPv4 outranks the ULA prefix (RFC 6724).
+    assert not [p for _, p, _ in frames if IPv6 in p and ipaddress.IPv6Address(p[IPv6].src) in prefix]
     # Nobody defends the tentative addresses.
     assert not [p for _, p, _ in frames if ICMPv6ND_NA in p and ipaddress.IPv6Address(p[ICMPv6ND_NA].tgt) in prefix]
 
@@ -174,7 +174,7 @@ def test_neighbor_solicitations_and_advertisements_carry_rfc_4861_flags_and_targ
     router_ll = ras(frames)[0][1][IPv6].src
     hosts = {mac(m): addr(ipv6.address[h]) for h, m in ipv6.mac.items()}
     unicast = [(t, p) for t, p, _ in frames if (ICMPv6ND_NS in p or ICMPv6ND_NA in p) and p[IPv6].src != "::"]
-    resolutions = probes_by_host = probes_by_router = 0
+    resolutions = probes_by_router = 0
     for index, (t, pkt) in enumerate(unicast):
         assert pkt[IPv6].hlim == 255 and icmp_checksum_ok(pkt)
         if ICMPv6ND_NS not in pkt:
@@ -186,15 +186,11 @@ def test_neighbor_solicitations_and_advertisements_carry_rfc_4861_flags_and_targ
         assert ns[ICMPv6NDOptSrcLLAddr].lladdr == pkt.src
         if pkt.src in hosts:
             assert (pkt[IPv6].src, ns.tgt, reply.src) == (hosts[pkt.src], router_ll, router.mac)
-            if pkt[IPv6].dst == router_ll:  # NUD probe: unicast; Linux answers without O / TLLA
-                assert pkt.dst == router.mac
-                assert (na.R, na.S, na.O) == (1, 1, 0) and ICMPv6NDOptDstLLAddr not in reply
-                probes_by_host += 1
-            else:  # address resolution: solicited-node group; NA with Override and TLLA
-                group = bytes.fromhex("ff0200000000000000000001ff") + ipaddress.IPv6Address(router_ll).packed[13:]
-                assert (pkt[IPv6].dst, pkt.dst) == (addr(group), "33:33:" + mac(group[12:]))
-                assert (na.R, na.S, na.O) == (1, 1, 1) and reply[ICMPv6NDOptDstLLAddr].lladdr == router.mac
-                resolutions += 1
+            # address resolution: solicited-node group; NA with Override and TLLA
+            group = bytes.fromhex("ff0200000000000000000001ff") + ipaddress.IPv6Address(router_ll).packed[13:]
+            assert (pkt[IPv6].dst, pkt.dst) == (addr(group), "33:33:" + mac(group[12:]))
+            assert (na.R, na.S, na.O) == (1, 1, 1) and reply[ICMPv6NDOptDstLLAddr].lladdr == router.mac
+            resolutions += 1
         else:  # the router probes a host it has just answered (STALE -> DELAY -> PROBE)
             assert pkt.src == router.mac and pkt[IPv6].src == router_ll and ns.tgt == hosts[pkt.dst]
             assert pkt[IPv6].dst == ns.tgt
@@ -202,12 +198,9 @@ def test_neighbor_solicitations_and_advertisements_carry_rfc_4861_flags_and_targ
             answered = [u for u, p in unicast[:index] if ICMPv6ND_NA in p and p.src == router.mac and p.dst == pkt.dst]
             assert 5.0 <= t - answered[-1] <= 5.005
             probes_by_router += 1
-    assert resolutions == len(hosts), "each host resolves its new default router once"
-    assert probes_by_host > 0 and resolutions <= probes_by_router <= resolutions + probes_by_host
-    # NUD: a host probes its router only after ReachableTime (>= 15 s) since the last confirmation.
-    for host_mac in hosts:
-        confirmations = [t for t, p in unicast if ICMPv6ND_NA in p and p.src == router.mac and p.dst == host_mac]
-        assert all(b - a >= 15.0 + 5.0 for a, b in zip(confirmations, confirmations[1:]))
+    # Each host resolves its router once, the router probes it once 5 s later, and with no IPv6
+    # traffic over the router nobody probes again (no NUD from hosts).
+    assert resolutions == probes_by_router == len(hosts)
 
 
 def test_router_starting_inside_the_capture_runs_dad_joins_all_routers_and_sends_initial_ras():

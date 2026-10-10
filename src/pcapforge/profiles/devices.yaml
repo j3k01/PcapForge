@@ -48,15 +48,12 @@ stacks:
     # IPv6 is on by default with randomized interface identifiers (link-local and SLAAC stable
     # address, plus an RFC 8981 temporary address). LLMNR and DHCPv6 use hop limit 1, mDNS 255
     # (RFC 6762); ND (255) and MLD (1) are fixed by their RFCs. Groups: LLMNR, mDNS, SSDP
-    # (besides the solicited-node groups). RS: RFC 4861 defaults. `router_use_mean_s`: mean time
-    # between the host's uses of its default router (off-link IPv6 the model does not show), each
-    # one after ReachableTime ran out triggering Neighbor Unreachability Detection.
+    # (besides the solicited-node groups). RS: RFC 4861 defaults.
     ipv6:
       multicast_hop_limit: {ff02::1:3: 1, ff02::fb: 255, ff02::1:2: 1}
       groups: [ff02::1:3, ff02::fb, ff02::c]
       router_solicitations: 3
       rs_interval_s: 4
-      router_use_mean_s: 900
   linux:
     ttl: 64
     df: true

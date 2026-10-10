@@ -36,23 +36,22 @@ SLAAC (RFC 4862, RFC 8981): a host whose link-local address is usable forms, fro
 it receives, a stable address with a randomized interface identifier (Windows default, fixed
 per host and seed) and a temporary address in the advertised prefix. For each it joins the
 solicited-node group (MLDv2 report from its link-local address, sent twice) and runs DAD (NS
-from ``::``); the address is usable one RetransTimer (1 s) later. Hosts never send from these
-addresses: the model shows Neighbor Discovery only, not the off-link IPv6 traffic behind it.
+from ``::``); the address is usable one RetransTimer (1 s) later.
+
+Hosts never send from these addresses, as on a real IPv4 site whose router advertises only a
+ULA prefix: the site DNS has no AAAA records, and Windows' default prefix policy (RFC 6724)
+ranks IPv4 (``::ffff:0:0/96``, precedence 35) above ULA (``fc00::/7``, precedence 3), so
+nothing goes out over the ULA addresses and the host does not use its default router either.
 
 Unicast Neighbor Discovery (RFC 4861 section 7):
 
 * right after RA handling the host resolves its new default router: NS from its link-local
   address to the router's solicited-node group with a Source Link-Layer Address option,
   answered by a unicast NA (Router, Solicited, Override, Target Link-Layer Address);
-* the host then uses the router every exponential(``router_use_mean_s``) s. A use after its
-  ReachableTime (uniform 0.5-1.5 x BaseReachableTime 30 s; the RA leaves it unspecified) ran
-  out takes the entry through DELAY: DELAY_FIRST_PROBE_TIME (5 s) later a unicast NS probe,
-  answered by a unicast NA (Router, Solicited; the router's Linux kernel sets Override and
-  adds the Target Link-Layer Address only when it answers a multicast NS);
-* the router knows the host from its RS / NS (STALE), and answering it is a use: 5 s later it
-  probes the host with a unicast NS (with its Source Link-Layer Address) unless its own
-  ReachableTime since the host's last NA has not run out; the host answers with an NA
-  (Solicited, Override, Target Link-Layer Address).
+* the router knows the host from that NS (STALE), and answering it is a use: 5 s later
+  (DELAY_FIRST_PROBE_TIME) it probes the host with a unicast NS (with its Source Link-Layer
+  Address); the host answers with an NA (Solicited, Override, Target Link-Layer Address).
+  With no traffic after that, neither side probes again.
 """
 
 from __future__ import annotations
@@ -98,8 +97,6 @@ MIN_DELAY_BETWEEN_RAS_S = 3.0
 MAX_INITIAL_RTR_ADVERT_INTERVAL_S = 16.0
 MAX_INITIAL_RTR_ADVERTISEMENTS = 3
 DELAY_FIRST_PROBE_S = 5.0
-REACHABLE_S = 30.0
-REACHABLE_FACTOR = (0.5, 1.5)  # MIN_RANDOM_FACTOR, MAX_RANDOM_FACTOR
 TIMER_SLACK = (0.0, 0.004)     # kernel timer granularity
 ND_REPLY = (60e-6, 400e-6)     # NS -> NA at the sensor (wire both ways + kernel)
 RA_HANDLING = (0.0005, 0.005)  # RA -> the host's first SLAAC frame
@@ -198,7 +195,6 @@ class Ipv6:
                 self.up[action.host] = self.start + action.args["up"]
         self.valid: dict[str, float] = {}  # host -> when its link-local address is usable
         self.solicits: dict[str, list[float]] = {}  # host -> its Router Solicitations if no RA comes first
-        self.seen: dict[str, float] = {}   # host -> its last frame in the timeline
         self.router: Host | None = None
         router = topology.subnets[topology.sensor].router if self.address else None
         if router is not None and router.device.ipv6_router is not None:
@@ -217,7 +213,6 @@ class Ipv6:
         """Interface start of ``host`` if this frame at ``t`` is its first appearance."""
         if host.id not in self.address:
             return []
-        self.seen[host.id] = max(t, self.seen.get(host.id, t))
         if host.id in self.valid:
             return []
         rng = self.rng
@@ -279,7 +274,6 @@ class Ipv6:
             router_valid = self._router_start(self.router_up, rng, frames)
             initial = MAX_INITIAL_RTR_ADVERTISEMENTS
             next_ra = router_valid + rng.uniform(0.0, MAX_RA_DELAY_S)
-        router_reachable = REACHABLE_S * rng.uniform(*REACHABLE_FACTOR)
         pending: float | None = None  # solicited RA
         last_ra = -math.inf
         configured: set[str] = set()
@@ -313,7 +307,7 @@ class Ipv6:
             for host_id in self.address:
                 if host_id not in configured and self.valid.get(host_id, math.inf) <= ra_t:
                     configured.add(host_id)
-                    self._configure(host_id, ra_t, last, router_reachable, frames)
+                    self._configure(host_id, ra_t, frames)
         return frames
 
     def _router_start(self, at: float, rng: Rng, frames: list[tuple[float, bytes]]) -> float:
@@ -329,8 +323,7 @@ class Ipv6:
         frames.append((report + rng.uniform(*REPORT_REPEAT), self._mld(mac, own, [ALL_ROUTERS, node_group])))
         return valid
 
-    def _configure(self, host_id: str, ra_t: float, last: float, router_reachable: float,
-                   frames: list[tuple[float, bytes]]) -> None:
+    def _configure(self, host_id: str, ra_t: float, frames: list[tuple[float, bytes]]) -> None:
         """What the host does with its first RA (at ``ra_t``): SLAAC, then ND with the router."""
         rng = self.rng.child("slaac").child(host_id)
         mac, own = self.mac[host_id], self.address[host_id]
@@ -354,38 +347,12 @@ class Ipv6:
         confirmed = need + rng.uniform(*ND_REPLY)
         frames.append((confirmed, self._icmp(rmac, router, own, neighbor_advertisement(
             router, NA_ROUTER | NA_SOLICITED | NA_OVERRIDE, rmac), mac)))
-        router_confirmed = self._router_probe(host_id, confirmed, -math.inf, router_reachable, rng, frames)
-
-        # Later uses of the router: NUD once ReachableTime has run out.
-        reachable = REACHABLE_S * rng.uniform(*REACHABLE_FACTOR)
-        end = min(last, self.seen.get(host_id, last)) - 2 * DELAY_FIRST_PROBE_S - 1.0
-        mean = self.hosts[host_id].device.stack.ipv6.router_use_mean_s
-        use = need + rng.expovariate(1.0 / mean)
-        while use < end:
-            if use - confirmed > reachable:
-                probe = use + DELAY_FIRST_PROBE_S + rng.uniform(*TIMER_SLACK)
-                frames.append((probe, self._icmp(mac, own, router, neighbor_solicitation(router, mac), rmac)))
-                confirmed = probe + rng.uniform(*ND_REPLY)
-                frames.append((confirmed, self._icmp(rmac, router, own, neighbor_advertisement(
-                    router, NA_ROUTER | NA_SOLICITED), mac)))
-                router_confirmed = self._router_probe(host_id, confirmed, router_confirmed, router_reachable,
-                                                      rng, frames)
-            use += rng.expovariate(1.0 / mean)
-
-    def _router_probe(self, host_id: str, sent: float, confirmed: float, reachable: float, rng: Rng,
-                      frames: list[tuple[float, bytes]]) -> float:
-        """The router sent to the host at ``sent``: NUD probe if its entry was STALE. Returns
-        when the router last had reachability confirmed."""
-        if sent - confirmed <= reachable:
-            return confirmed
-        mac, own = self.mac[host_id], self.address[host_id]
-        probe = sent + DELAY_FIRST_PROBE_S + rng.uniform(*TIMER_SLACK)
-        frames.append((probe, self._icmp(self.router_mac, self.router_ll, own,
-                                         neighbor_solicitation(own, self.router_mac), mac)))
+        # The router's entry for the host was STALE (from the NS) when it answered: DELAY, then PROBE.
+        probe = confirmed + DELAY_FIRST_PROBE_S + rng.uniform(*TIMER_SLACK)
+        frames.append((probe, self._icmp(rmac, router, own, neighbor_solicitation(own, rmac), mac)))
         answered = probe + rng.uniform(*ND_REPLY)
-        frames.append((answered, self._icmp(mac, own, self.router_ll, neighbor_advertisement(
-            own, NA_SOLICITED | NA_OVERRIDE, mac), self.router_mac)))
-        return answered
+        frames.append((answered, self._icmp(mac, own, router, neighbor_advertisement(
+            own, NA_SOLICITED | NA_OVERRIDE, mac), rmac)))
 
     # -- datagrams ----------------------------------------------------------------------
     def datagram(self, p: Packet) -> tuple[float, bytes] | None:

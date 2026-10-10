@@ -41,7 +41,6 @@ class Ipv6:
     groups: tuple[str, ...]              # groups joined besides the solicited-node group (MLDv2)
     router_solicitations: int            # Router Solicitations when the interface comes up
     rs_interval_s: float
-    router_use_mean_s: float             # mean time between uses of the default router (ND model)
 
 
 @dataclass(frozen=True)
@@ -142,8 +141,7 @@ def stack(name: str) -> Stack:
         initial_window=raw["initial_window"],
         ipv6=Ipv6(multicast_hop_limit=dict(raw["ipv6"]["multicast_hop_limit"]), groups=tuple(raw["ipv6"]["groups"]),
                   router_solicitations=raw["ipv6"]["router_solicitations"],
-                  rs_interval_s=raw["ipv6"]["rs_interval_s"],
-                  router_use_mean_s=raw["ipv6"]["router_use_mean_s"]) if "ipv6" in raw else None,
+                  rs_interval_s=raw["ipv6"]["rs_interval_s"]) if "ipv6" in raw else None,
         syn_rto_s=float(raw.get("syn_rto_s", 1.0)),
         drops_unsolicited=bool(raw.get("drops_unsolicited", False)),
     )
