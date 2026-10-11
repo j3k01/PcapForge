@@ -292,7 +292,7 @@ def section(name: str, directory: Path, answers: dict) -> str:
                     + (f"{CACHE} is outdated; " if stale else "")
                     + f"reads the capture once (about 1 s per million packets) into {CACHE}</span></div>")
     else:
-        body.append(chart_svg(data, answers.get("timeline", [])))
+        body.append(views.scroll(chart_svg(data, answers.get("timeline", []))))
         width = float(data.get("width") or 0)
         body.append(f'<div class="traffic-note"><span class="dim small">shade: packets per '
                     f'{views.e(_short(width))} bucket, log scale &middot; markers: '
@@ -302,7 +302,7 @@ def section(name: str, directory: Path, answers: dict) -> str:
     flows = directory / "siem" / "flows.jsonl"
     if flows.is_file():
         total, top = top_flows(flows)
-        body.append(f"<h2>top conversations ({len(top)} of {total:,} flows)</h2>" + _flows_table(top))
+        body.append(f"<h2>top conversations ({len(top)} of {total:,} flows)</h2>" + views.scroll(_flows_table(top)))
     return "".join(body)
 
 
@@ -395,9 +395,9 @@ def _flows_table(top: list[dict]) -> str:
             f'<td>{transport}</td><td>{views.e(f.get("app") or "")}</td>'
             f'<td class="num">{_int(f.get("packets")):,}</td><td class="num">{views.e(views._size(_int(f.get("bytes"))))}</td>'
             f'<td class="num">{views.e(_seconds(f.get("duration")))}</td><td class="dim">{views.e(f.get("state") or "")}</td></tr>')
-    return ('<table class="grid"><thead><tr><th>src &rarr; dest</th><th>transport/port</th><th>app</th>'
-            '<th class="num">packets</th><th class="num">bytes</th><th class="num">duration</th><th>state</th>'
-            "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+    return ('<table class="grid">' + views.head("src → dest", "transport/port", "app", "packets", "bytes", "duration",
+                                                "state", num=("packets", "bytes", "duration"))
+            + "<tbody>" + "".join(rows) + "</tbody></table>")
 
 
 def _int(value) -> int:

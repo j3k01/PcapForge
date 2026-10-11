@@ -6,7 +6,11 @@ and the stylesheet. The answer key never leaves the server: questions are copied
 from an allow-list before they reach a page. Submissions are written to
 ``<run>/submissions/<slug(student)>.yaml`` in the format ``grade.load_submissions`` reads.
 
-The student's name is honour-system (a cookie, no password), like the ``hints_used`` list.
+With a class roster (``<out>/roster.json``, see ``roster.py``) a student signs in with login +
+access code and the session cookie is signed by the server; the submission file is the login's.
+Without one the student's name is honour-system (a plain cookie, no password), like ``hints_used``.
+The pages speak the exercise's language (``answers['lang']``); the list and login pages that of
+the listed runs when they share one, else English.
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ import json
 import os
 import re
 import tempfile
+import threading
+import time
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler
@@ -27,20 +33,20 @@ import yaml
 
 from pcapforge.grade import (HINTS_KEY, TEMPLATE_NAME, GradeError, Submission, grade, grade_submission, hint_cost,
                              load_submissions, submission_template)
-from pcapforge.i18n import ui
+from pcapforge.i18n import LANGS, ui
 from pcapforge.pipeline import slug
-from pcapforge.ui import views
+from pcapforge.ui import roster, views
+from pcapforge.ui.roster import RESERVED, RosterError
 from pcapforge.ui.server import STATIC, App, Handler
 from pcapforge.ui.views import e
 
 COOKIE = "pcapforge_student"
 SUBMISSIONS = "submissions"
 GRADES = "grades.json"
-NAV = (("exercises", "/"),)
 MAX_NAME = 64
+FAILED_LOGIN_DELAY_S = 0.5
 QUESTION_FIELDS = ("id", "text", "type", "points", "hint")  # everything else of a question is answer key
 SINGLE_LINE = ("ip", "mac", "number", "timestamp", "text")
-_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
 
 # -- data ------------------------------------------------------------------------------
@@ -51,7 +57,7 @@ def clean_name(raw: str) -> str | None:
     if not name or len(name) > MAX_NAME or not name.isprintable():
         return None
     stem = slug(name)
-    if not re.search(r"[A-Za-z0-9]", name) or stem.startswith(".") or stem.split(".")[0].lower() in _RESERVED:
+    if not re.search(r"[A-Za-z0-9]", name) or stem.startswith(".") or stem.split(".")[0].lower() in RESERVED:
         return None
     return name
 
@@ -142,17 +148,40 @@ def grade_run(directory: Path) -> dict:
     return report
 
 
+def lang_of(answers: dict) -> str:
+    lang = answers.get("lang", "en")
+    return lang if lang in LANGS else "en"
+
+
+def list_lang(items: list[dict]) -> str:
+    """The language all ``items`` share, else English."""
+    langs = {x["lang"] for x in items}
+    return langs.pop() if len(langs) == 1 else "en"
+
+
 class StudentApp:
     def __init__(self, out: Path, show_score: bool = False) -> None:
         self.out = out
         self.show_score = show_score
+        self._secret: bytes | None = None
+        self._secret_lock = threading.Lock()
 
     run_dir = App.run_dir
 
     def answers(self, directory: Path) -> dict:
         return json.loads((directory / "answers.json").read_text(encoding="utf-8"))
 
-    def exercises(self, student: str) -> tuple[list[dict], bool]:
+    def roster(self) -> dict[str, dict] | None:
+        """The class roster (None: honour system); re-read per request, so instructor changes apply at once."""
+        return roster.load(self.out)
+
+    def secret(self) -> bytes:
+        with self._secret_lock:
+            if self._secret is None:
+                self._secret = roster.server_secret(self.out)
+            return self._secret
+
+    def exercises(self, student: str | None) -> tuple[list[dict], bool]:
         """Runs whose seed is the student's login (case-insensitive slug), else all runs; the flag
         tells whether the list is personal."""
         found = []
@@ -167,7 +196,10 @@ class StudentApp:
             found.append({"name": path.parent.name, "title": sc.get("title", sc.get("id", "")),
                           "difficulty": sc.get("difficulty", ""), "seed": str(sc.get("seed", "")),
                           "packets": capture.get("packets"), "duration": capture.get("duration_s"),
-                          "submitted": submission_path(path.parent, student).is_file()})
+                          "lang": lang_of(answers),
+                          "submitted": student is not None and submission_path(path.parent, student).is_file()})
+        if student is None:
+            return found, False
         mine = [x for x in found if slug(x["seed"]).casefold() == slug(student).casefold()]
         return (mine, True) if mine else (found, False)
 
@@ -186,48 +218,56 @@ class StudentApp:
 
 # -- views -----------------------------------------------------------------------------
 
-def login_page(message: str = "") -> str:
+def login_page(t: dict, roster_mode: bool, message: str = "", login: str = "") -> str:
     error = f'<p class="alert">{e(message)}</p>' if message else ""
-    return ('<h1>exercises</h1><p class="lead">Who are you?</p>' + error
-            + '<form class="gen" method="post" action="/login"><label>name or login '
-            f'<input name="name" maxlength="{MAX_NAME}" required autofocus autocomplete="username"></label>'
-            '<button type="submit">continue</button></form>'
-            '<p class="dim">Honour system: there is no password. The name labels your submissions for the '
-            "instructor; when it is the seed of your exercise (e.g. your login), you only see your own runs.</p>")
+    if roster_mode:
+        form = (f'<form class="gen" method="post" action="/login"><label>{e(t["st_login"])} '
+                f'<input name="login" value="{e(login)}" maxlength="{roster.MAX_NAME}" required autofocus '
+                'autocomplete="username" spellcheck="false"></label>'
+                f'<label>{e(t["st_code"])} <input name="code" type="password" maxlength="32" required '
+                'autocomplete="current-password" spellcheck="false"></label>'
+                f'<button type="submit">{e(t["st_sign_in"])}</button></form>')
+    else:
+        form = (f'<form class="gen" method="post" action="/login"><label>{e(t["st_name"])} '
+                f'<input name="name" maxlength="{MAX_NAME}" required autofocus autocomplete="username"></label>'
+                f'<button type="submit">{e(t["st_continue"])}</button></form>')
+    note = t["st_roster"] if roster_mode else t["st_honour"]
+    return (f'<h1>{e(t["st_exercises"])}</h1><p class="lead">{e(t["st_who"])}</p>{error}{form}'
+            f'<p class="dim">{e(note)}</p>')
 
 
-def exercises_page(student: str, items: list[dict], personal: bool) -> str:
-    who = (f'<form class="inline" method="post" action="/logout"><span class="dim">signed in as</span> '
-           f'{e(student)} <button type="submit">not me</button></form>')
+def exercises_page(t: dict, student: str, display: str, items: list[dict], personal: bool) -> str:
+    shown = e(display) + (f' <span class="dim">({e(student)})</span>' if display != student else "")
+    who = (f'<form class="inline" method="post" action="/logout"><span class="dim">{e(t["st_signed_in"])}</span> '
+           f'{shown} <button type="submit">{e(t["st_sign_out"])}</button></form>')
     if not items:
-        return f"<h1>exercises</h1>{who}<p>No exercises in this directory yet.</p>"
-    note = ("your exercises (seed = your login)" if personal
-            else "all exercises (none has your login as its seed)")
+        return f'<h1>{e(t["st_exercises"])}</h1>{who}<p>{e(t["st_none"])}</p>'
     rows = "".join(
         f'<tr><td><a href="/x/{quote(x["name"])}">{e(x["title"])}</a><br><span class="dim small">{e(x["name"])}'
         f'</span></td><td>{e(x["difficulty"])}</td><td>{e(x["seed"])}</td>'
         f'<td class="num">{e(x["packets"] if x["packets"] is not None else "?")}</td>'
         f'<td class="num">{e(views._duration(x["duration"])) if x["duration"] else "?"}</td>'
-        f'<td>{"submitted" if x["submitted"] else "<span class=dim>open</span>"}</td></tr>' for x in items)
-    return (f"<h1>exercises</h1>{who}<p class=\"dim\">{e(note)}</p>"
-            '<table class="grid"><thead><tr><th>exercise</th><th>level</th><th>seed</th><th class="num">packets</th>'
-            '<th class="num">length</th><th>status</th></tr></thead><tbody>' + rows + "</tbody></table>")
+        f'<td>{e(t["st_done"]) if x["submitted"] else f"<span class=dim>{e(t["st_open"])}</span>"}</td></tr>'
+        for x in items)
+    head = "".join(f'<th{" class=num" if i in (3, 4) else ""}>{e(c)}</th>' for i, c in enumerate(t["st_list_cols"]))
+    return (f'<h1>{e(t["st_exercises"])}</h1>{who}<p class="dim">{e(t["st_mine"] if personal else t["st_all"])}</p>'
+            f'<table class="grid"><thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table>')
 
 
-def _field(q: dict, value, formats: dict) -> str:
+def _field(q: dict, value, t: dict) -> str:
     name = f"a:{q['id']}"
     kind = q.get("type", "text")
     if kind in SINGLE_LINE:
         text = "" if value is None else str(value[0] if isinstance(value, list) and len(value) == 1 else value)
-        return (f'<input type="text" name="{e(name)}" value="{e(text)}" placeholder="{e(formats.get(kind, ""))}" '
-                'autocomplete="off" spellcheck="false">')
+        return (f'<input type="text" name="{e(name)}" value="{e(text)}" '
+                f'placeholder="{e(t["formats"].get(kind, ""))}" autocomplete="off" spellcheck="false">')
     if isinstance(value, dict):
         text = "\n".join(f"{k} = {v if v is not None else ''}" for k, v in value.items())
     elif isinstance(value, list):
         text = "\n".join(str(v) for v in value)
     else:
         text = "" if value is None else str(value)
-    placeholder = "one per line" if kind == "set" else "name = value, one per line"
+    placeholder = t["st_set_placeholder"] if kind == "set" else t["st_map_placeholder"]
     return (f'<textarea name="{e(name)}" rows="{max(4, text.count(chr(10)) + 2)}" placeholder="{e(placeholder)}" '
             f'spellcheck="false">{e(text)}</textarea>')
 
@@ -235,22 +275,24 @@ def _field(q: dict, value, formats: dict) -> str:
 def exercise_page(name: str, answers: dict, handout: dict, briefing: str, previous: Submission | None,
                   saved: str | None) -> str:
     sc, capture = answers.get("scenario", {}), answers.get("capture", {})
-    t = ui(answers.get("lang", "en"))
+    t = ui(lang_of(answers))
+    labels = t["st_meta"]
     meta = [
-        ("scenario", f'{e(sc.get("id", ""))}'),
-        ("level / seed", f'{e(sc.get("difficulty", ""))} / <code>{e(sc.get("seed", ""))}</code>'),
-        ("capture", f'<code>{e(capture.get("file", ""))}</code> &middot; {e(capture.get("packets", "?"))} packets'
+        (labels[0], f'{e(sc.get("id", ""))}'),
+        (labels[1], f'{e(sc.get("difficulty", ""))} / <code>{e(sc.get("seed", ""))}</code>'),
+        (labels[2], f'<code>{e(capture.get("file", ""))}</code> &middot; {e(capture.get("packets", "?"))} '
+                    f'{e(t["st_packets"])}'
                     + (f' &middot; {e(views._duration(capture["duration_s"]))}' if capture.get("duration_s") else "")),
-        ("window", f'{e(capture.get("start", ""))} &rarr; {e(capture.get("end", ""))}'),
-        ("sha-256", f'<code class="small">{e(capture.get("sha256", ""))}</code>'),
+        (labels[3], f'{e(capture.get("start", ""))} &rarr; {e(capture.get("end", ""))}'),
+        (labels[4], f'<code class="small">{e(capture.get("sha256", ""))}</code>'),
     ]
     downloads = " &middot; ".join(f'<a href="/x/{quote(name)}/files/{quote(f)}" download>{e(f)}</a>' for f in handout)
     body = [f'<h1>{e(sc.get("title", name))}</h1>', f'<p class="dim">{e(name)}</p>']
     if sc.get("summary"):
         body.append(f'<p>{e(" ".join(str(sc["summary"]).split()))}</p>')
-    body += [views._kv(meta), "<h2>downloads</h2>", f"<p>{downloads}</p>"]
+    body += [views._kv(meta), f'<h2>{e(t["st_downloads"])}</h2>', f"<p>{downloads}</p>"]
     if briefing:
-        body += ["<h2>briefing</h2>", f'<pre class="briefing">{e(briefing)}</pre>']
+        body += [f'<h2>{e(t["st_briefing"])}</h2>', f'<pre class="briefing">{e(briefing)}</pre>']
     questions = student_questions(answers)
     given = previous.answers if previous else {}
     used = given.get(HINTS_KEY) or []
@@ -260,35 +302,37 @@ def exercise_page(name: str, answers: dict, handout: dict, briefing: str, previo
         hint = ""
         if q.get("hint"):
             checked = " checked" if q["id"] in used else ""
-            hint = (f'<details><summary>hint</summary><p class="dim">{e(" ".join(str(q["hint"]).split()))}</p>'
+            label = t["st_used_hint"].format(cost=q["hint_cost"], points=t["points"])
+            hint = (f'<details><summary>{e(t["st_hint"])}</summary>'
+                    f'<p class="dim">{e(" ".join(str(q["hint"]).split()))}</p>'
                     f'<label class="check"><input type="checkbox" name="{e("h:" + q["id"])}" value="1"{checked}> '
-                    f'I used this hint (-{e(q["hint_cost"])} {e(t["points"])})</label></details>')
+                    f'{e(label)}</label></details>')
         text = "<br>".join(e(line) for line in str(q.get("text", "")).strip().splitlines())
         items.append(f'<li><p>{text} <span class="dim">[{e(q.get("type", "text"))}, {e(q.get("points", ""))} '
-                     f'{e(t["points"])}]</span></p>{_field(q, given.get(q["id"]), t["formats"])}{hint}</li>')
-    body.append(f"<h2>questions ({len(questions)})</h2>")
+                     f'{e(t["points"])}]</span></p>{_field(q, given.get(q["id"]), t)}{hint}</li>')
+    body.append(f'<h2>{e(t["st_questions"].format(n=len(questions)))}</h2>')
     if saved:
-        body.append(f'<p class="dim">Your last submission ({e(saved)}) is filled in; submitting again replaces it.</p>')
+        body.append(f'<p class="dim">{e(t["st_prefilled"].format(saved=saved))}</p>')
     body.append(f'<form class="answers" method="post" action="/x/{quote(name)}"><ol class="questions">'
-                + "".join(items) + '</ol><p class="dim">Hints are honour-system too: tick the ones you read.</p>'
-                '<button type="submit">submit</button></form>')
+                + "".join(items) + f'</ol><p class="dim">{e(t["st_hint_note"])}</p>'
+                f'<button type="submit">{e(t["st_submit"])}</button></form>')
     return "".join(body)
 
 
-def submitted_page(name: str, title: str, saved: str, graded: dict | None) -> str:
-    body = [f"<h1>submitted</h1><p>Your answers to <a href=\"/x/{quote(name)}\">{e(title)}</a> were saved "
-            f"({e(saved)}). You can change them and submit again until your instructor collects them.</p>"]
+def submitted_page(t: dict, name: str, title: str, saved: str, graded: dict | None) -> str:
+    link = f'<a href="/x/{quote(name)}">{e(title)}</a>'
+    body = [f'<h1>{e(t["st_submitted"])}</h1><p>{e(t["st_saved"]).format(title=link, saved=e(saved))}</p>']
     if graded is None:
-        return "".join(body) + '<p class="dim">Your instructor grades the submissions.</p>'
+        return "".join(body) + f'<p class="dim">{e(t["st_graded_later"])}</p>'
     css = {"correct": "", "partial": "alert", "wrong": "dim", "blank": "dim"}
     rows = "".join(
-        f'<tr><td class="num">{i}</td><td>{e(q["id"])}</td><td class="{css.get(q["result"], "")}">{e(q["result"])}'
-        f'</td><td class="num">{q["score"]:g}/{e(q["points"])}</td>'
+        f'<tr><td class="num">{i}</td><td>{e(q["id"])}</td><td class="{css.get(q["result"], "")}">'
+        f'{e(t["st_results"].get(q["result"], q["result"]))}</td><td class="num">{q["score"]:g}/{e(q["points"])}</td>'
         f'<td class="num dim">{f"-{q["hint_penalty"]}" if q["hint_penalty"] else ""}</td></tr>'
         for i, q in enumerate(graded["questions"], 1))
-    body += [f'<h2>score {graded["score"]:g}/{e(graded["max"])} ({graded["percent"]:g} %)</h2>',
-             '<table class="grid"><thead><tr><th class="num">#</th><th>question</th><th>result</th>'
-             '<th class="num">score</th><th class="num">hint</th></tr></thead><tbody>' + rows + "</tbody></table>"]
+    head = "".join(f'<th{"" if i in (1, 2) else " class=num"}>{e(c)}</th>' for i, c in enumerate(t["st_result_cols"]))
+    body += [f'<h2>{e(t["st_score"])} {graded["score"]:g}/{e(graded["max"])} ({graded["percent"]:g} %)</h2>',
+             f'<table class="grid"><thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table>']
     return "".join(body)
 
 
@@ -314,6 +358,8 @@ class StudentHandler(BaseHTTPRequestHandler):
             return
         try:
             self._get(unquote(urlsplit(self.path).path))
+        except RosterError:
+            self._broken(roster_broken=True)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             self._broken()
 
@@ -323,15 +369,21 @@ class StudentHandler(BaseHTTPRequestHandler):
             return
         try:
             self._post(unquote(urlsplit(self.path).path), form)
+        except RosterError:
+            self._broken(roster_broken=True)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             self._broken()
 
     def _get(self, path: str) -> None:
         if path == "/":
             student = self._student()
+            items, personal = self.app.exercises(student)
+            lang = list_lang(items)
+            t = ui(lang)
             if student is None:
-                return self._page("exercises", login_page())
-            return self._page("exercises", exercises_page(student, *self.app.exercises(student)))
+                return self._page(lang, t["st_exercises"], login_page(t, self.app.roster() is not None))
+            return self._page(lang, t["st_exercises"],
+                              exercises_page(t, student, self._display(student), items, personal))
         if m := re.fullmatch(r"/x/([^/]+)", path):
             return self._exercise(m.group(1))
         if m := re.fullmatch(r"/x/([^/]+)/submitted", path):
@@ -345,12 +397,7 @@ class StudentHandler(BaseHTTPRequestHandler):
 
     def _post(self, path: str, form: dict[str, str]) -> None:
         if path == "/login":
-            name = clean_name(form.get("name", ""))
-            if name is None:
-                return self._page("exercises", login_page(
-                    f"Use 1-{MAX_NAME} printable characters with at least one letter or digit (A-Z, 0-9)."),
-                    status=HTTPStatus.BAD_REQUEST)
-            return self._redirect_cookie("/", quote(name, safe=""), 30 * 24 * 3600)
+            return self._login(form)
         if path == "/logout":
             return self._redirect_cookie("/", "", 0)
         if m := re.fullmatch(r"/x/([^/]+)", path):
@@ -364,6 +411,24 @@ class StudentHandler(BaseHTTPRequestHandler):
             save_submission(directory, student, data)
             return self._redirect(f"/x/{quote(m.group(1))}/submitted")
         return self._not_found()
+
+    def _login(self, form: dict[str, str]) -> None:
+        lang = list_lang(self.app.exercises(None)[0])
+        t = ui(lang)
+        current = self.app.roster()
+        if current is not None:
+            login = roster.check(current, form.get("login", ""), form.get("code", ""))
+            if login is None:
+                time.sleep(FAILED_LOGIN_DELAY_S)
+                typed = form.get("login", "").strip()[:roster.MAX_NAME]
+                return self._page(lang, t["st_exercises"], login_page(t, True, t["st_bad_login"], typed),
+                                  status=HTTPStatus.FORBIDDEN)
+            return self._redirect_cookie("/", roster.sign(self.app.secret(), current, login), roster.SESSION_S)
+        name = clean_name(form.get("name", ""))
+        if name is None:
+            return self._page(lang, t["st_exercises"], login_page(t, False, t["st_bad_name"].format(max=MAX_NAME)),
+                              status=HTTPStatus.BAD_REQUEST)
+        return self._redirect_cookie("/", quote(name, safe=""), 30 * 24 * 3600)
 
     # -- pages --------------------------------------------------------------------------
     def _exercise(self, name: str) -> None:
@@ -379,25 +444,30 @@ class StudentHandler(BaseHTTPRequestHandler):
         previous = load_own(directory, student)
         saved = self._saved(directory, student) if previous else None
         title = answers.get("scenario", {}).get("title", name)
-        self._page(title, exercise_page(name, answers, self.app.handout(directory, answers), text, previous, saved))
+        self._page(lang_of(answers), title,
+                   exercise_page(name, answers, self.app.handout(directory, answers), text, previous, saved))
 
     def _submitted(self, name: str) -> None:
         directory = self.app.run_dir(name)
-        student = self._student()
         if directory is None:
             return self._not_found()
+        student = self._student()
         own = load_own(directory, student) if student else None
         if own is None:
             return self._redirect(f"/x/{quote(name)}")
         answers = self.app.answers(directory)
         graded = grade_submission(answers, own) if self.app.show_score else None
         title = answers.get("scenario", {}).get("title", name)
-        self._page("submitted", submitted_page(name, title, self._saved(directory, student), graded))
+        t = ui(lang_of(answers))
+        self._page(lang_of(answers), t["st_submitted"],
+                   submitted_page(t, name, title, self._saved(directory, student), graded))
 
     def _file(self, name: str, filename: str) -> None:
         directory = self.app.run_dir(name)
         if directory is None:
             return self._not_found()
+        if self._student() is None:
+            return self._redirect("/")
         answers = self.app.answers(directory)
         handout = self.app.handout(directory, answers)
         if filename not in handout:
@@ -416,11 +486,21 @@ class StudentHandler(BaseHTTPRequestHandler):
 
     # -- helpers ------------------------------------------------------------------------
     def _student(self) -> str | None:
+        """The signed-in student: with a roster the login of a valid signed session, else the honour name."""
         try:
             morsel = SimpleCookie(self.headers.get("Cookie") or "").get(COOKIE)
         except CookieError:
             return None
-        return clean_name(unquote(morsel.value)) if morsel else None
+        if not morsel or not morsel.value:
+            return None
+        current = self.app.roster()
+        if current is None:  # a signed session has a raw "|"; honour names are percent-encoded
+            return None if "|" in morsel.value else clean_name(unquote(morsel.value))
+        return roster.session_login(self.app.secret(), current, morsel.value)
+
+    def _display(self, student: str) -> str:
+        current = self.app.roster()
+        return str(current[student]["name"]) if current and student in current else student
 
     @staticmethod
     def _saved(directory: Path, student: str) -> str:
@@ -434,16 +514,25 @@ class StudentHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _page(self, title: str, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-        student = self._student()
-        html = views.page(title, body, self.app.out, "exercises", nav=NAV,
-                          meta=f"student mode{f' · {student}' if student else ''}")
+    def _page(self, lang: str, title: str, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        t = ui(lang)
+        try:
+            student = self._student()
+        except RosterError:
+            student = None
+        html = views.page(title, body, self.app.out, t["st_exercises"], nav=((t["st_exercises"], "/"),),
+                          meta=t["st_mode"] + (f" · {student}" if student else ""), lang=lang)
         self._send(status, html.encode("utf-8"), "text/html; charset=utf-8")
 
-    def _not_found(self) -> None:
-        self._page("not found", "<h1>404</h1><p>No such page.</p>", status=HTTPStatus.NOT_FOUND)
+    def _list_lang(self) -> str:
+        return list_lang(self.app.exercises(None)[0])
 
-    def _broken(self) -> None:
-        """A run that cannot be read; no details (they could quote the answer key)."""
-        self._page("error", views.error("This exercise cannot be read. Tell your instructor."),
-                   status=HTTPStatus.INTERNAL_SERVER_ERROR)
+    def _not_found(self) -> None:
+        lang = self._list_lang()
+        self._page(lang, "404", f'<h1>404</h1><p>{e(ui(lang)["st_not_found"])}</p>', status=HTTPStatus.NOT_FOUND)
+
+    def _broken(self, roster_broken: bool = False) -> None:
+        """A run (or the roster) that cannot be read; no details (they could quote the answer key)."""
+        lang = self._list_lang()
+        message = ui(lang)["st_roster_broken" if roster_broken else "st_broken"]
+        self._page(lang, "error", views.error(message), status=HTTPStatus.INTERNAL_SERVER_ERROR)

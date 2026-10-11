@@ -269,6 +269,9 @@ subscription (`vars.opcua`), see below.
   `grade` format. The traffic strip chart (`ui/traffic.py`) streams the capture once (memory-mapped, pcap /
   pcapng, VLAN / QinQ, IPv6 extension headers, classification by `ports.WELL_KNOWN`) into 144 buckets and
   caches them in `traffic.json` keyed by the capture's SHA-256 (about 1 s per million packets).
+  `ui/roster.py`: `<out>/roster.json` {login: name, salted PBKDF2-HMAC-SHA256 code hash}; sessions are
+  `login|expiry|HMAC(secret, login|expiry|salt)` cookies (secret `<out>/.ui-secret`), so a code reset ends
+  the student's sessions; the student identity of every request comes from the verified cookie.
 Next: IT-line scenarios (README roadmap).
 
 ### Composer spec

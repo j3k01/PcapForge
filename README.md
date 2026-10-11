@@ -127,16 +127,24 @@ It works on the same output directory as `generate` (`--out`, default `out`):
   CTFd export.
 
 `pcapforge ui --student [--show-score]` is the student side on the same output directory, and nothing else:
-students enter their name or login (honour system, no passwords), see their exercises (runs whose seed is
-their login, otherwise all runs), download the capture, `briefing.md` and `submission_template.yaml`,
-read the briefing and answer the questions in a form (hints with their cost, as in the template). A
-submission is saved as `<run>/submissions/<name>.yaml` in the format `pcapforge grade` reads; resubmitting
+students sign in, see their exercises (runs whose seed is their login, otherwise all runs), download the
+capture, `briefing.md` and `submission_template.yaml`, read the briefing and answer the questions in a form
+(hints with their cost, as in the template). The pages follow the exercise's language (en, pl, de). A
+submission is saved as `<run>/submissions/<login>.yaml` in the format `pcapforge grade` reads; resubmitting
 overwrites it. With `--show-score` students see their score per question right away, never the expected
 answers. The instructor's `grade` action writes `<run>/grades.json` (same as `pcapforge grade --json`).
 
+Access: on the instructor's **students** page, paste the class list (`login` or `login, Display Name` per
+line; the same logins can be the seed list of a batch). Each new student gets a random access code, shown
+once on a printable page; `<out>/roster.json` keeps only salted PBKDF2 hashes, and codes can be reset or
+students removed. With a roster, students sign in with login + code and get a signed 12-hour session
+(secret in `<out>/.ui-secret`); each student sees and overwrites only their own submission. Without a
+roster the student side is honour-system: any name is accepted.
+
 Standard library only, no extra dependency. It listens on 127.0.0.1 and refuses other `Host` headers and
-cross-origin form posts. `--host 0.0.0.0` makes it reachable from the network: in instructor mode anyone
-who reaches it can start jobs and read the answer keys; in student mode anyone can submit under any name.
+cross-origin form posts. `--host 0.0.0.0` makes it reachable from the network over plain HTTP: in
+instructor mode anyone who reaches it can start jobs and read the answer keys, so expose only the student
+mode to a class network, preferably with a roster.
 
 ## Grading and packaging
 

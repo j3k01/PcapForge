@@ -19,15 +19,18 @@ def e(value) -> str:
     return escape(str(value), quote=True)
 
 
-NAV = (("scenarios", "/"), ("runs", "/runs"), ("jobs", "/jobs"))
+NAV = (("scenarios", "/"), ("runs", "/runs"), ("jobs", "/jobs"), ("students", "/students"))
 
 
-def page(title: str, body: str, out_root: Path, active: str = "", nav: tuple = NAV, meta: str | None = None) -> str:
-    """``nav``: (name, href) links of the header; ``meta``: header note instead of the output root."""
-    nav = "".join(f'<a href="{href}"{" class=on" if name == active else ""}>{name}</a>' for name, href in nav)
+def page(title: str, body: str, out_root: Path, active: str = "", nav: tuple = NAV, meta: str | None = None,
+         lang: str = "en") -> str:
+    """``nav``: (name, href) links of the header; ``meta``: header note instead of the output root;
+    ``lang``: language of the page (student pages follow their exercise)."""
+    nav = "".join(f'<a href="{href}"{" class=on aria-current=page" if name == active else ""}>{name}</a>'
+                  for name, href in nav)
     meta = e(meta) if meta is not None else f"out: {e(out_root)}"
     return (
-        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
+        f'<!DOCTYPE html>\n<html lang="{e(lang)}"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<title>{e(title)} · pcapforge</title>'
         '<link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script></head>'
@@ -39,7 +42,24 @@ def page(title: str, body: str, out_root: Path, active: str = "", nav: tuple = N
 
 def _kv(rows: list[tuple[str, str]]) -> str:
     """Key/value table; values are HTML already."""
-    return '<table class="kv">' + "".join(f"<tr><th>{e(k)}</th><td>{v}</td></tr>" for k, v in rows) + "</table>"
+    return ('<table class="kv">' + "".join(f'<tr><th scope="row">{e(k)}</th><td>{v}</td></tr>' for k, v in rows)
+            + "</table>")
+
+
+def scroll(html: str) -> str:
+    """A wide table or chart in a box that scrolls sideways instead of widening the page."""
+    return f'<div class="scroll">{html}</div>'
+
+
+def head(*columns: str, num: tuple[str, ...] = ()) -> str:
+    """``<thead>`` of a grid table; the ``num`` columns are right-aligned like their numbers."""
+    cells = "".join(f'<th scope="col"{" class=num" if c in num else ""}>{e(c)}</th>' for c in columns)
+    return f"<thead><tr>{cells}</tr></thead>"
+
+
+def stamp(epoch: float) -> str:
+    """Local time of a file on disk, one format for every page."""
+    return dt.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M")
 
 
 def _compact(value) -> str:
@@ -83,9 +103,8 @@ def catalog(scenarios: dict[str, Scenario]) -> str:
                     f'<td class="dim">{e(techniques) or "&ndash;"}</td></tr>')
     if not rows:
         return "<h1>scenarios</h1><p>No scenarios found.</p>"
-    return ("<h1>scenarios</h1>"
-            '<table class="grid"><thead><tr><th>id</th><th>line</th><th>title</th><th>levels</th>'
-            "<th>att&amp;ck</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+    return ("<h1>scenarios</h1>" + scroll('<table class="grid">' + head("id", "line", "title", "levels", "att&ck")
+                                          + "<tbody>" + "".join(rows) + "</tbody></table>"))
 
 
 def scenario(sc: Scenario, runs: list[dict]) -> str:
@@ -107,7 +126,7 @@ def scenario(sc: Scenario, runs: list[dict]) -> str:
         "<h2>levels</h2>", levels,
     ]
     if mitre:
-        body.append('<h2>att&amp;ck</h2><table class="grid"><tbody>' + mitre + "</tbody></table>")
+        body.append('<h2>att&amp;ck</h2>' + scroll('<table class="grid"><tbody>' + mitre + "</tbody></table>"))
     body.append(f"<h2>questions ({len(doc['questions'])})</h2><ol class=\"questions\">{questions}</ol>")
     if existing:
         body.append("<h2>runs of this scenario</h2>" + _runs_table(existing))
@@ -133,10 +152,10 @@ def _levels_matrix(sc: Scenario) -> str:
             text = "&ndash;" if v is None else e(_compact(v))
             kind = "" if i == 0 else (" class=lit" if v != values[i - 1] else " class=dim")
             cells.append(f"<td{kind}>{text}</td>")
-        out.append(f'<tr><th>{e(label)}</th>{"".join(cells)}</tr>')
-    head = "".join(f"<th>{e(n)}</th>" for n in names)
-    return (f'<table class="grid levels"><thead><tr><th></th>{head}</tr></thead><tbody>'
-            + "".join(out) + "</tbody></table>")
+        out.append(f'<tr><th scope="row">{e(label)}</th>{"".join(cells)}</tr>')
+    columns = "".join(f'<th scope="col">{e(n)}</th>' for n in names)
+    return scroll(f'<table class="grid levels"><thead><tr><td></td>{columns}</tr></thead><tbody>'
+                  + "".join(out) + "</tbody></table>")
 
 
 def _generate_form(sc: Scenario) -> str:
@@ -179,10 +198,11 @@ def _runs_table(runs: list[dict]) -> str:
         f'<tr><td><a href="/runs/{quote(r["name"])}">{e(r["name"])}</a></td><td>{e(r["difficulty"])}</td>'
         f'<td>{e(r["seed"])}</td><td class="num">{e(r["packets"] if r["packets"] is not None else "?")}</td>'
         f'<td class="num">{e(_duration(r["duration"])) if r["duration"] else "?"}</td><td>{e(r["lang"])}</td>'
-        f'<td class="dim">{dt.datetime.fromtimestamp(r["mtime"]).strftime("%Y-%m-%d %H:%M")}</td></tr>'
+        f'<td class="dim nw">{stamp(r["mtime"])}</td></tr>'
         for r in runs)
-    return ('<table class="grid"><thead><tr><th>run</th><th>level</th><th>seed</th><th>packets</th>'
-            "<th>length</th><th>lang</th><th>written</th></tr></thead><tbody>" + rows + "</tbody></table>")
+    return scroll('<table class="grid">' + head("run", "level", "seed", "packets", "length", "lang", "written",
+                                                num=("packets", "length"))
+                  + "<tbody>" + rows + "</tbody></table>")
 
 
 def run(name: str, directory: Path, answers: dict, packages: dict[str, Path], active: list[Job]) -> str:
@@ -206,8 +226,8 @@ def run(name: str, directory: Path, answers: dict, packages: dict[str, Path], ac
     if active:
         body.append("<p class=\"busy\">" + " ".join(
             f'<a href="/jobs/{j.id}">{e(j.kind)} {e(j.state)}</a>' for j in active) + "</p>")
-    body += ["<h2>actions</h2>", _actions(name, directory, packages),
-             "<h2>network</h2>", topology_svg(topo), _hosts_table(topo)]
+    body += ["<h2>actions</h2>", scroll(_actions(name, directory, packages)),
+             "<h2>network</h2>", scroll(topology_svg(topo)), _hosts_table(topo)]
     from pcapforge.ui.traffic import section as traffic_section  # traffic imports views
     body.append(traffic_section(name, directory, answers))
     timeline = answers.get("timeline", [])
@@ -242,28 +262,37 @@ def _actions(name: str, directory: Path, packages: dict[str, Path]) -> str:
          link("grades.json", "grades.json") if (directory / "grades.json").is_file()
          else "score submissions/*.yaml (from pcapforge ui --student)"),
     ]
-    return ('<table class="actions">' + "".join(f"<tr><th>{e(k)}</th><td>{form}</td><td>{note}</td></tr>"
+    return ('<table class="actions">' + "".join(f'<tr><th scope="row">{e(k)}</th><td>{form}</td><td>{note}</td></tr>'
                                                 for k, form, note in rows) + "</table>")
 
 
 def _submissions(name: str, directory: Path) -> str:
     """``submissions/*.yaml`` of the student mode and, once graded, the class table of ``grades.json``."""
+    from pcapforge.ui.roster import names
+
     paths = sorted((directory / "submissions").glob("*.yaml"))
+    known = names(directory.parent)
     grades_path = directory / "grades.json"
     if not paths and not grades_path.is_file():
         return ""
-    rows = "".join(f'<tr><td><a href="/runs/{quote(name)}/files/submissions/{quote(p.name)}">{e(p.stem)}</a></td>'
-                   f'<td class="dim">{dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")}'
-                   "</td></tr>" for p in paths)
+    rows = "".join(f'<tr><td><a href="/runs/{quote(name)}/files/submissions/{quote(p.name)}">{e(p.stem)}</a>'
+                   f'{_display(p.stem, known)}</td>'
+                   f'<td class="dim nw">{stamp(p.stat().st_mtime)}</td></tr>' for p in paths)
     body = [f"<h2>submissions ({len(paths)})</h2>",
-            '<table class="grid"><thead><tr><th>student</th><th>submitted</th></tr></thead><tbody>' + rows
-            + "</tbody></table>" if paths else '<p class="dim">No files in submissions/.</p>']
+            scroll('<table class="grid">' + head("student", "submitted") + "<tbody>" + rows + "</tbody></table>")
+            if paths else '<p class="dim">No files in submissions/.</p>']
     if grades_path.is_file():
-        body += ["<h2>class results</h2>", _class_table(grades_path, paths)]
+        body += ["<h2>class results</h2>", _class_table(grades_path, paths, known)]
     return "".join(body)
 
 
-def _class_table(path: Path, submissions: list[Path]) -> str:
+def _display(login: str, known: dict[str, str]) -> str:
+    """The roster display name after a login, when it says more than the login."""
+    name = known.get(login)
+    return f' <span class="dim">{e(name)}</span>' if name and name != login else ""
+
+
+def _class_table(path: Path, submissions: list[Path], known: dict[str, str]) -> str:
     try:
         students = json.loads(path.read_text(encoding="utf-8"))["students"]
         ids = [q["id"] for q in students[0]["questions"]] if students else []
@@ -272,16 +301,18 @@ def _class_table(path: Path, submissions: list[Path]) -> str:
             cells = "".join(
                 f'<td class="num{"" if q["result"] == "correct" else " alert" if q["result"] == "partial" else " dim"}"'
                 f' title="{e(q["id"])}: {e(q["result"])}">{q["score"]:g}</td>' for q in s["questions"])
-            rows.append(f'<tr><td>{e(s["student"])}</td><td class="num">{s["score"]:g}/{e(s["max"])}</td>'
+            rows.append(f'<tr><td>{e(s["student"])}{_display(s["student"], known)}</td>'
+                        f'<td class="num">{s["score"]:g}/{e(s["max"])}</td>'
                         f'<td class="num">{s["percent"]:g}</td>{cells}</tr>')
     except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
         return f'<pre class="err">{e(path.name)}: {e(type(exc).__name__)}: {e(exc)}</pre>'
     stale = submissions and max(p.stat().st_mtime for p in submissions) > path.stat().st_mtime
-    head = "".join(f'<th class="num" title="{e(qid)}">Q{i}</th>' for i, qid in enumerate(ids, 1))
+    columns = "".join(f'<th scope="col" class="num" title="{e(qid)}">Q{i}</th>' for i, qid in enumerate(ids, 1))
     return ((f'<p class="alert">submissions changed after {e(path.name)} was written; run grade again.</p>'
              if stale else "")
-            + '<table class="grid"><thead><tr><th>student</th><th class="num">score</th><th class="num">%</th>'
-            + head + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+            + scroll('<table class="grid"><thead><tr><th scope="col">student</th><th scope="col" class="num">score</th>'
+                     '<th scope="col" class="num">%</th>' + columns + "</tr></thead><tbody>" + "".join(rows)
+                     + "</tbody></table>")
             + '<p class="dim small">' + " &middot; ".join(f"Q{i} = {e(qid)}" for i, qid in enumerate(ids, 1)) + "</p>")
 
 
@@ -294,9 +325,9 @@ def _hosts_table(topo: dict) -> str:
         rows.append(f'<tr><td>{e(h["name"])}</td><td>{e(h["role"])}</td><td>{e(h.get("vendor", ""))} '
                     f'<span class="dim">{e(h["device"])}</span></td><td>{ips}</td><td class="small">{v6}</td>'
                     f'<td class="small dim">{macs}</td></tr>')
-    return ('<details><summary>hosts ({})</summary><table class="grid"><thead><tr><th>name</th><th>role</th>'
-            "<th>device</th><th>ipv4</th><th>ipv6</th><th>mac</th></tr></thead><tbody>").format(len(rows)) \
-        + "".join(rows) + "</tbody></table></details>"
+    return (f"<details><summary>hosts ({len(rows)})</summary>"
+            + scroll('<table class="grid">' + head("name", "role", "device", "ipv4", "ipv6", "mac") + "<tbody>"
+                     + "".join(rows) + "</tbody></table>") + "</details>")
 
 
 def _timeline(items: list[dict], capture: dict) -> str:
@@ -309,8 +340,8 @@ def _timeline(items: list[dict], capture: dict) -> str:
         rows.append(f'<tr{" class=hot" if t.get("incident") else ""}><td class="num">+{e(_duration(offset))}</td>'
                     f'<td class="num">{e(t.get("frame", ""))}</td><td>{mark}</td><td>{e(t["title"])}</td>'
                     f'<td class="dim">{e(t["actor"])} {e(techniques)}</td></tr>')
-    return ('<table class="grid"><thead><tr><th>t</th><th>frame</th><th></th><th>event</th><th>actor</th>'
-            "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+    return scroll('<table class="grid">' + head("t", "frame", "kind", "event", "actor", num=("t", "frame")) + "<tbody>"
+                  + "".join(rows) + "</tbody></table>")
 
 
 def _questions(answers: dict) -> str:
@@ -342,6 +373,8 @@ def _entries(name: str, directory: Path, rel: str) -> str:
             size = _size(path.stat().st_size)
         rows.append(f'<tr><td><a href="/runs/{quote(name)}/files/{quote(sub)}">{e(path.name)}'
                     f'{"/" if path.is_dir() else ""}</a></td><td class="num">{e(size)}</td></tr>')
+    if not rows:
+        return '<p class="dim">Empty directory.</p>'
     return '<table class="grid files"><tbody>' + "".join(rows) + "</tbody></table>"
 
 
@@ -397,7 +430,8 @@ def topology_svg(topo: dict) -> str:
                              f'<text class="tiny" x="{LEFT - 8}" y="{cy - 4}" text-anchor="end">{e(i["ip"])}</text>')
         parts.append(_host_box(h, x, top, router=True, show_ip=False))
         total = max(total, top + BOX_H + 8)
-    return (f'<svg class="topo" viewBox="0 0 {width} {total:.0f}" role="img" aria-label="network topology">'
+    label = f"network topology: {len(subnets)} subnets, {len(topo['hosts'])} hosts (listed in the hosts table)"
+    return (f'<svg class="topo" viewBox="0 0 {width} {total:.0f}" role="img" aria-label="{e(label)}">'
             + "".join(parts) + "</svg>")
 
 
@@ -426,7 +460,7 @@ def job_row(j: Job) -> dict:
 
 def jobs(items: list[Job]) -> str:
     if not items:
-        return "<h1>jobs</h1><p>Nothing ran yet in this session.</p>"
+        return '<h1>jobs</h1><p>Nothing ran yet in this session. Pick a scenario and <a href="/">generate</a> one.</p>'
     rows = []
     for r in map(job_row, items):
         what = f'<a href="/runs/{quote(r["run"])}">{e(r["title"])}</a>' if r["run"] else e(r["title"])
@@ -434,9 +468,9 @@ def jobs(items: list[Job]) -> str:
                     f'<td>{what}</td><td class="state-{e(r["state"])}">{e(r["state"])}</td>'
                     f'<td class="dim">{e(r["outcome"])}</td></tr>')
     active = any(j.state in ("queued", "running") for j in items)
-    return (f'<h1>jobs</h1><table class="grid" id="jobs" data-active="{"1" if active else ""}"><thead><tr>'
-            "<th></th><th>kind</th><th>what</th><th>state</th><th>outcome</th></tr></thead><tbody>"
-            + "".join(rows) + "</tbody></table>")
+    return ('<h1>jobs</h1>' + scroll(f'<table class="grid" id="jobs" data-active="{"1" if active else ""}">'
+                                     + head("#", "kind", "what", "state", "outcome", num=("#",)) + "<tbody>"
+                                     + "".join(rows) + "</tbody></table>"))
 
 
 def job(j: Job) -> str:

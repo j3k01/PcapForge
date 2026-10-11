@@ -590,6 +590,7 @@ li.question dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;m
 li.question dt{color:#5c6773}li.question dd{margin:0}li.question ul{margin:0;padding-left:16px}
 dd.answer{font-weight:600}
 footer{margin-top:40px;color:#8a949e;font-size:12px}
+@media (max-width:640px){table{display:block;overflow-x:auto}}
 @media print{body{max-width:none}h2{break-after:avoid}.change,li.question{break-inside:avoid}}
 """
 

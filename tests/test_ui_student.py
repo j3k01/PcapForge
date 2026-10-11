@@ -1,5 +1,8 @@
 """Student mode of the web UI never serves the answer key, stores submissions that grade like
-hand-written ones, and refuses cross-origin posts; the instructor's grade action writes grades.json."""
+hand-written ones, and refuses cross-origin posts; the instructor's grade action writes grades.json.
+With a class roster a student needs login + access code, the session cookie is signed and expires,
+codes are stored only as salted hashes, a student only ever sees or replaces their own submission,
+and student pages speak the language of the exercise."""
 
 from __future__ import annotations
 
@@ -12,8 +15,10 @@ from urllib.parse import urlencode
 import pytest
 
 from pcapforge.grade import grade_submission, load_submissions
+from pcapforge.i18n import LANGS, UI
+from pcapforge.ui import roster, views
 from pcapforge.ui.server import App, make_server
-from pcapforge.ui.student import StudentApp, StudentHandler
+from pcapforge.ui.student import COOKIE, StudentApp, StudentHandler
 
 RUN = "ot-test_easy_jdoe"
 SECRETS = ["10.9.8.77", "zz_alpha_pt", "zz_beta_pt", "zz_gamma_key", "zz_delta_key", "4242", "T0836X", "SecretAlt",
@@ -182,3 +187,166 @@ def test_instructor_grade_action_writes_grades_json(tmp_path):
     grades = json.loads((run / "grades.json").read_text(encoding="utf-8"))
     assert [(s["student"], s["score"]) for s in grades["students"]] == [("ann", 19), ("bob", 8)]
     assert grades["max"] == 34
+
+
+# -- class roster ----------------------------------------------------------------------
+
+PL_RUN = "ot-test_easy_ann"
+
+
+@pytest.fixture
+def fast_hash(monkeypatch):
+    monkeypatch.setattr(roster, "ITERATIONS", 1000)
+    monkeypatch.setattr("pcapforge.ui.student.FAILED_LOGIN_DELAY_S", 0)
+
+
+def _serve(app, handler=None):
+    server = make_server(app, "127.0.0.1", 0, handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.fixture
+def classroom(tmp_path, fast_hash):
+    for name, seed, lang in ((RUN, "JDoe", "en"), (PL_RUN, "ann", "pl")):
+        run = tmp_path / name
+        run.mkdir()
+        answers = _answers()
+        answers["scenario"]["seed"], answers["lang"] = seed, lang
+        (run / "answers.json").write_text(json.dumps(answers), encoding="utf-8")
+        (run / "capture.pcap").write_bytes(b"\xd4\xc3\xb2\xa1")
+    issued, kept = roster.add(tmp_path, "# class 3b\nann, Ann Adams\n\nbob\n")
+    assert kept == [] and [x["login"] for x in issued] == ["ann", "bob"]
+    app = StudentApp(tmp_path)
+    server = _serve(app, StudentHandler)
+    yield tmp_path, app, server.server_address[1], {x["login"]: x["code"] for x in issued}
+    server.shutdown()
+    server.server_close()
+
+
+def _sign_in(port: int, login: str, code: str) -> dict:
+    status, _, response = _request(port, "POST", "/login", form={"login": login, "code": code})
+    assert status == 303, (login, status)
+    cookie = response.getheader("Set-Cookie")
+    assert "HttpOnly" in cookie and "SameSite=Strict" in cookie and f"Max-Age={roster.SESSION_S}" in cookie
+    return {"Cookie": cookie.split(";", 1)[0]}
+
+
+def _signed_in(port: int, headers: dict) -> bool:
+    return 'name="code"' not in _request(port, "GET", "/", headers)[1].decode()
+
+
+def test_roster_codes_are_stored_only_as_salted_hashes(classroom):
+    out, _app, _port, codes = classroom
+    text = (out / roster.ROSTER).read_text(encoding="utf-8")
+    data = json.loads(text)
+    assert set(data) == {"ann", "bob"} and data["ann"]["name"] == "Ann Adams" and data["bob"]["name"] == "bob"
+    assert data["ann"]["salt"] != data["bob"]["salt"]
+    for code in codes.values():
+        assert code not in text and code.replace("-", "") not in text
+        assert len(code) == 14 and set(code.replace("-", "")) <= set(roster.ALPHABET)
+
+
+def test_roster_login_requires_the_right_code(classroom):
+    _out, _app, port, codes = classroom
+    page = _request(port, "GET", "/")[1].decode()
+    assert 'name="code"' in page and "class roster" in page
+    for form in ({"login": "ann"}, {"login": "ann", "code": codes["bob"]}, {"login": "nobody", "code": codes["ann"]},
+                 {"name": "ann"}):
+        status, body, response = _request(port, "POST", "/login", form=form)
+        assert status == 403 and response.getheader("Set-Cookie") is None, form
+        assert "Unknown login or wrong access code." in body.decode()
+    cookie = _sign_in(port, "ANN", codes["ann"].lower().replace("-", " "))  # case and separators do not matter
+    assert _signed_in(port, cookie) and "Ann Adams" in _request(port, "GET", "/", cookie)[1].decode()
+
+
+def test_forged_tampered_and_expired_sessions_are_refused(classroom):
+    out, app, port, codes = classroom
+    cookie = _sign_in(port, "ann", codes["ann"])
+    _login_, expiry, mac = cookie["Cookie"].split("=", 1)[1].split("|")
+    forged = [
+        "ann",  # an honour-system cookie
+        f"bob|{expiry}|{mac}",  # ann's mac on bob's login
+        f"ann|{int(expiry) + 3600}|{mac}",  # extended expiry
+        f"ann|{expiry}|{mac[:-1]}{'0' if mac[-1] != '0' else '1'}",
+        roster.sign(app.secret(), roster.load(out), "ann", now=time.time() - roster.SESSION_S - 1),  # expired
+        roster.sign(b"x" * 32, roster.load(out), "ann"),  # another server's secret
+    ]
+    for value in forged:
+        headers = {"Cookie": f"{COOKIE}={value}"}
+        assert not _signed_in(port, headers), value
+        assert _request(port, "POST", f"/x/{PL_RUN}", headers, {"a:src": "1.1.1.1"})[0] == 303
+        assert _request(port, "GET", f"/x/{PL_RUN}/files/capture.pcap", headers)[0] == 303
+    assert not (out / PL_RUN / "submissions").exists()
+    assert _signed_in(port, cookie)
+    roster.reset(out, "ann")  # a new code ends the sessions of the old one
+    assert not _signed_in(port, cookie)
+    assert (out / roster.SECRET).is_file()
+
+
+def test_a_student_only_sees_and_replaces_their_own_submission(classroom):
+    out, _app, port, codes = classroom
+    ann, bob = _sign_in(port, "ann", codes["ann"]), _sign_in(port, "bob", codes["bob"])
+    assert _request(port, "POST", f"/x/{PL_RUN}", ann, {"a:src": "10.1.2.3", "a:technique": "ann_answer"})[0] == 303
+    path = out / PL_RUN / "submissions" / "ann.yaml"
+    before = path.read_text(encoding="utf-8")
+    assert "ann_answer" in before
+    page = _request(port, "GET", f"/x/{PL_RUN}", bob)[1].decode()
+    assert "ann_answer" not in page and "10.1.2.3" not in page
+    status, _, response = _request(port, "GET", f"/x/{PL_RUN}/submitted", bob)
+    assert status == 303 and response.getheader("Location") == f"/x/{PL_RUN}"
+    assert _request(port, "POST", f"/x/{PL_RUN}", bob, {"a:technique": "bob_answer", "login": "ann"})[0] == 303
+    assert path.read_text(encoding="utf-8") == before
+    assert sorted(p.name for p in path.parent.iterdir()) == ["ann.yaml", "bob.yaml"]
+    assert "ann_answer" in _request(port, "GET", f"/x/{PL_RUN}", ann)[1].decode()
+
+
+def test_student_pages_follow_the_language_of_the_exercise(classroom):
+    _out, _app, port, codes = classroom
+    assert '<html lang="en">' in _request(port, "GET", "/")[1].decode()  # runs in en and pl: English
+    ann = _sign_in(port, "ann", codes["ann"])
+    listing = _request(port, "GET", "/", ann)[1].decode()  # only ann's (pl) run
+    assert '<html lang="pl">' in listing and UI["pl"]["st_mine"] in listing
+    polish = _request(port, "GET", f"/x/{PL_RUN}", ann)[1].decode()
+    assert '<html lang="pl">' in polish and f'>{UI["pl"]["st_submit"]}</button>' in polish
+    assert UI["pl"]["st_used_hint"].format(cost=2, points=UI["pl"]["points"]) in polish
+    english = _request(port, "GET", f"/x/{RUN}", ann)[1].decode()
+    assert '<html lang="en">' in english and ">submit</button>" in english
+    _request(port, "POST", f"/x/{PL_RUN}", ann, {"a:src": "10.9.8.77"})
+    assert UI["pl"]["st_submitted"] in _request(port, "GET", f"/x/{PL_RUN}/submitted", ann)[1].decode()
+    for lang in LANGS:
+        assert set(UI[lang]["st_results"]) == set(UI["en"]["st_results"])
+        assert len(UI[lang]["st_list_cols"]) == len(UI["en"]["st_list_cols"])
+        assert len(UI[lang]["st_meta"]) == len(UI["en"]["st_meta"])
+
+
+def test_instructor_roster_page_shows_codes_once(tmp_path, fast_hash):
+    run = tmp_path / RUN
+    (run / "submissions").mkdir(parents=True)
+    (run / "answers.json").write_text(json.dumps(_answers()), encoding="utf-8")
+    (run / "submissions" / "cy.yaml").write_text("src: 10.9.8.77\n", encoding="utf-8")
+    server = _serve(App(tmp_path))
+    port = server.server_address[1]
+    try:
+        assert "No roster yet" in _request(port, "GET", "/students")[1].decode()
+        status, body, _ = _request(port, "POST", "/students/add", form={"logins": "cy, Cy <Cole>\ndee"})
+        page = body.decode()
+        assert status == 200 and "Cy &lt;Cole&gt;" in page
+        stored = roster.load(tmp_path)
+        shown = [chunk.split("</code>")[0] for chunk in page.split("<code>")[1:]]
+        [code] = [c for c in shown if roster.check(stored, "cy", c)]
+        assert code not in _request(port, "GET", "/students")[1].decode()
+        assert "Cy &lt;Cole&gt;" in views._submissions(RUN, run)  # the instructor's run page
+
+        status, body, _ = _request(port, "POST", "/students/add", form={"logins": "bad login\ncy\n../x"})
+        assert status == 400 and "line 1" in body.decode() and "line 3" in body.decode()
+        assert set(roster.load(tmp_path)) == {"cy", "dee"}
+
+        assert _request(port, "POST", "/students/reset", form={"login": "cy"})[0] == 200
+        assert roster.check(roster.load(tmp_path), "cy", code) is None
+        assert _request(port, "POST", "/students/remove", form={"login": "dee"})[0] == 303
+        assert set(roster.load(tmp_path)) == {"cy"}
+        assert _request(port, "POST", "/students/add", {"Origin": "http://evil.example"}, {"logins": "eve"})[0] == 403
+    finally:
+        server.shutdown()
+        server.server_close()

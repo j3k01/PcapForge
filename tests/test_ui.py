@@ -85,3 +85,19 @@ def test_foreign_host_and_cross_origin_posts_are_refused(ui):
     assert status == 403 and not app.jobs.all()
     status, _ = _request(port, "POST", f"/runs/{RUN}/report", {"Origin": f"http://127.0.0.1:{port}"}, "")
     assert status == 303 and [j.kind for j in app.jobs.all()] == ["report"]
+
+
+def test_an_unexpected_error_in_a_route_renders_a_500_page_without_the_traceback(ui, monkeypatch, capsys):
+    app, port = ui
+
+    def broken():
+        raise RuntimeError("internal detail")
+
+    monkeypatch.setattr(app, "runs", broken)
+    status, page = _request(port, "GET", "/runs")
+    assert status == 500 and b"<h1>error</h1>" in page and b"RuntimeError" in page
+    assert b"internal detail" not in page and b"Traceback" not in page
+    err = capsys.readouterr().err
+    assert "Traceback" in err and "internal detail" in err  # the details go to the server console
+    status, page = _request(port, "GET", f"/runs/{RUN}")  # the server keeps serving
+    assert status == 200 and b"<h1>ot-test_easy_1</h1>" in page

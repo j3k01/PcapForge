@@ -15,6 +15,7 @@ import mimetypes
 import re
 import shutil
 import sys
+import traceback
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +25,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from pcapforge.i18n import LANGS
 from pcapforge.scenario import ScenarioError, discover
-from pcapforge.ui import batch, views
+from pcapforge.ui import batch, roster, views
 from pcapforge.ui.jobs import Job, Jobs
 
 _NAME = re.compile(r"[A-Za-z0-9._-]+")
@@ -58,9 +59,9 @@ class App:
         for answers_path in self.out.glob("*/answers.json"):
             try:
                 answers = json.loads(answers_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                found.append(views.run_summary(answers_path.parent.name, answers, answers_path.stat().st_mtime))
+            except (OSError, ValueError, AttributeError):  # unreadable or not a run's answers.json
                 continue
-            found.append(views.run_summary(answers_path.parent.name, answers, answers_path.stat().st_mtime))
         return sorted(found, key=lambda r: -r["mtime"])
 
     def packages(self, name: str) -> dict[str, Path]:
@@ -182,8 +183,33 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- dispatch -----------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
-        if not self._host_ok():
-            return
+        if self._host_ok():
+            self._guarded(self._get)
+
+    def do_POST(self) -> None:  # noqa: N802
+        form = self._form()  # read the body first: refusing before it resets the client's connection
+        if self._host_ok() and self._origin_ok():
+            self._guarded(self._post, form)
+
+    def _guarded(self, route, *args) -> None:
+        """Run ``route``; an unexpected exception becomes a 500 page without details (the
+        traceback goes to stderr), or closes the connection if the response had already begun."""
+        self._responded = False
+        try:
+            route(*args)
+        except ConnectionError:  # the client went away
+            self.close_connection = True
+        except Exception as exc:  # noqa: BLE001 - last resort of a request
+            print(f"pcapforge ui: {self.command} {self.path} failed:", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            if self._responded:
+                self.close_connection = True
+                return
+            self._page("server error", views.error(f"unexpected {type(exc).__name__} while serving this page; "
+                                                    "the traceback is on the server console."),
+                       status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _get(self) -> None:
         path = unquote(urlsplit(self.path).path)
         app = self.app
         try:
@@ -207,6 +233,8 @@ class Handler(BaseHTTPRequestHandler):
                 if m.group(2) not in zips:
                     return self._not_found()
                 return self._send_file(zips[m.group(2)], "application/zip", attachment=True)
+            if path == "/students":
+                return self._students()
             if path == "/jobs":
                 return self._page("jobs", views.jobs(app.jobs.all()), "jobs")
             if m := re.fullmatch(r"/jobs/(\d+)", path):
@@ -230,10 +258,7 @@ class Handler(BaseHTTPRequestHandler):
         except ScenarioError as exc:
             return self._page("error", views.error(str(exc)), status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
-    def do_POST(self) -> None:  # noqa: N802
-        form = self._form()  # read the body first: refusing before it resets the client's connection
-        if not self._host_ok() or not self._origin_ok():
-            return
+    def _post(self, form: dict[str, str]) -> None:
         path = unquote(urlsplit(self.path).path)
         app = self.app
         try:
@@ -243,6 +268,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._not_found()
                 jobs = app.submit_generate(sc, form)
                 return self._redirect(f"/jobs/{jobs[0].id}" if len(jobs) == 1 else "/jobs")
+            if m := re.fullmatch(r"/students/(add|reset|remove)", path):
+                return self._students_post(m.group(1), form)
             if path == "/package-all":
                 app.submit_package_all(form.get("scenario", ""), form.get("level", ""))
                 return self._redirect("/jobs")
@@ -253,7 +280,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self._redirect(f"/jobs/{app.submit_action(m.group(2), m.group(1), directory, form).id}")
             return self._not_found()
         except (ValueError, ScenarioError) as exc:
-            return self._page("error", views.error(str(exc)), status=HTTPStatus.BAD_REQUEST)
+            return self._page("bad request", views.error(str(exc)), status=HTTPStatus.BAD_REQUEST)
+
+    def _students(self, error: str = "", status: HTTPStatus = HTTPStatus.OK) -> None:
+        try:
+            current = roster.load(self.app.out)
+        except roster.RosterError as exc:
+            current, error, status = None, str(exc), HTTPStatus.INTERNAL_SERVER_ERROR
+        self._page("students", roster.students_page(current, error), "students", status=status)
+
+    def _students_post(self, action: str, form: dict[str, str]) -> None:
+        out = self.app.out
+        try:
+            if action == "add":
+                return self._page("access codes", roster.codes_page(*roster.add(out, form.get("logins", ""))),
+                                  "students")
+            if action == "reset":
+                return self._page("access codes", roster.codes_page([roster.reset(out, form.get("login", ""))], []),
+                                  "students")
+            roster.remove(out, form.get("login", ""))
+        except roster.RosterError as exc:
+            return self._students(str(exc), HTTPStatus.BAD_REQUEST)
+        return self._redirect("/students")
 
     # -- pages --------------------------------------------------------------------------
     def _run_page(self, name: str) -> None:
@@ -263,8 +311,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             answers = json.loads((directory / "answers.json").read_text(encoding="utf-8"))
             body = views.run(name, directory, answers, self.app.packages(name), self.app.jobs.active_for(name))
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-            return self._page(name, views.error(f"{directory}/answers.json: {type(exc).__name__}: {exc}"),
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            return self._page(name, views.error(f"{directory / 'answers.json'}: {type(exc).__name__}: {exc}"), "runs",
                               status=HTTPStatus.INTERNAL_SERVER_ERROR)
         self._page(name, body, "runs")
 
@@ -314,7 +362,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, html.encode("utf-8"), "text/html; charset=utf-8")
 
     def _not_found(self) -> None:
-        self._page("not found", "<h1>404</h1><p>No such page.</p>", status=HTTPStatus.NOT_FOUND)
+        self._page("not found", '<h1>not found</h1><p>No such page. <a href="/">back to the scenarios</a></p>',
+                   status=HTTPStatus.NOT_FOUND)
+
+    def send_response(self, code, message=None) -> None:
+        self._responded = True  # from here on an error can no longer become an error page
+        super().send_response(code, message)
 
     def _redirect(self, location: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
@@ -370,11 +423,20 @@ def serve(out: Path, scenarios_dir: Path | None, host: str, port: int, open_brow
     else:
         server = make_server(App(out, scenarios_dir), host, port)
     url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{server.server_address[1]}/"
-    mode = "student mode " if student else ""
+    mode = ""
+    if student:
+        try:
+            current = roster.load(out)
+        except roster.RosterError as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+            current = {}
+        mode = ("student mode, honour system (no roster.json) " if current is None
+                else f"student mode, login + access code ({len(current)} students in roster.json) ")
     print(f"pcapforge ui {mode}on {url}  (output directory {out.resolve()}; Ctrl+C to stop)", file=sys.stderr)
     if host not in LOOPBACK:
         print("warning: listening beyond this machine; " + (
-              "anyone who reaches it can download the captures and submit under any name" if student
+              "anyone who reaches it can download the captures and submit under any name" if student and current is None
+              else "codes and sessions travel unencrypted (plain HTTP)" if student
               else "anyone who reaches it can run jobs and read answer keys"), file=sys.stderr)
     if open_browser:
         webbrowser.open(url)
