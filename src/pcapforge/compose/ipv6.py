@@ -21,7 +21,8 @@ global id from the presentation seed; the subnet id is the IPv4 subnet's third o
 hex digits, 10.20.37.0/24 -> ``:37::``) from its modified EUI-64 link-local address:
 
 * Router Advertisements to ff02::1 with the Prefix Information (L, A), MTU and Source
-  Link-Layer Address options. Unsolicited ones every uniform [MinRtrAdvInterval,
+  Link-Layer Address options (on a dual-stack site also RDNSS with the dual-stack DNS servers'
+  stable addresses). Unsolicited ones every uniform [MinRtrAdvInterval,
   MaxRtrAdvInterval] s; the router is up before the capture, so the first one falls at a
   random phase. Solicited ones go out 0-MAX_RA_DELAY_TIME (0.5 s) after a Router
   Solicitation, no sooner than MIN_DELAY_BETWEEN_RAS (3 s) after the previous multicast RA,
@@ -107,7 +108,7 @@ REPORT_DELAY = (0.0005, 0.003)  # DAD done -> MLDv2 report of the joined groups
 # ICMPv6 Neighbor Discovery types, NA flags and option types.
 RS, RA, NS, NA = 133, 134, 135, 136
 NA_ROUTER, NA_SOLICITED, NA_OVERRIDE = 0x80, 0x40, 0x20
-SLLA, TLLA, PREFIX_INFO, MTU_OPTION = 1, 2, 3, 5
+SLLA, TLLA, PREFIX_INFO, MTU_OPTION, RDNSS = 1, 2, 3, 5, 25
 
 
 def _ip6(src: bytes, dst: bytes, hop: int, next_header: int, payload: bytes) -> bytes:
@@ -136,14 +137,17 @@ def ula_prefix(global_id: int, subnet_id: int) -> bytes:
     return b"\xfd" + global_id.to_bytes(5, "big") + subnet_id.to_bytes(2, "big")
 
 
-def router_advertisement(config: Ipv6Router, mac: bytes, prefix: bytes) -> bytes:
-    """RA message (checksum 0) with Prefix Information, MTU and Source Link-Layer Address."""
+def router_advertisement(config: Ipv6Router, mac: bytes, prefix: bytes, resolvers: tuple[bytes, ...] = ()) -> bytes:
+    """RA message (checksum 0) with Prefix Information, RDNSS (``resolvers``, if any), MTU and
+    Source Link-Layer Address."""
     flags = (0x80 if config.managed else 0) | (0x40 if config.other_config else 0)
     message = struct.pack("!BBHBBHII", RA, 0, 0, config.cur_hop_limit, flags, config.router_lifetime,
                           config.reachable_time_ms, config.retrans_timer_ms)
     prefix_flags = (0x80 if config.on_link else 0) | (0x40 if config.autonomous else 0)
     message += struct.pack("!BBBBIII16s", PREFIX_INFO, 4, 64, prefix_flags, config.valid_lifetime,
                            config.preferred_lifetime, 0, prefix + bytes(8))
+    if resolvers:
+        message += struct.pack("!BBHI", RDNSS, 1 + 2 * len(resolvers), 0, config.rdnss_lifetime) + b"".join(resolvers)
     if config.mtu:
         message += struct.pack("!BBHI", MTU_OPTION, 1, 0, config.mtu)
     return message + struct.pack("!BB6s", SLLA, 1, mac)
@@ -193,6 +197,7 @@ class GlobalAddresses:
         self.prefix: dict[str, bytes] = {}
         self.stable: dict[str, bytes] = {}
         self.temporary: dict[str, bytes] = {}
+        self.resolvers: tuple[bytes, ...] = ()  # stable addresses of the RDNSS option
         if not self.hosts:
             return
         site = rng.getrandbits(16)
@@ -211,6 +216,7 @@ class GlobalAddresses:
                 prefix = self.prefix[host.subnets[0]]
                 self.stable[host.id] = prefix + (draw.getrandbits(64) or 1).to_bytes(8, "big")
                 self.temporary[host.id] = prefix + (draw.getrandbits(64) or 1).to_bytes(8, "big")
+        self.resolvers = tuple(self.stable[h] for h in dualstack.resolvers(plan, self.hosts))
 
     def endpoints(self, p: Packet) -> tuple[bytes, bytes]:
         """(source, destination) address of a packet of an IPv6 flow."""
@@ -330,8 +336,9 @@ class Ipv6:
         config = self.router.device.ipv6_router
         rng = self.rng.child("router")
         lo, hi = config.min_rtr_adv_interval, config.max_rtr_adv_interval
+        resolvers = self.global6.resolvers if self.global6 is not None else ()
         ra = self._icmp(self.router_mac, self.router_ll, ALL_NODES,
-                        router_advertisement(config, self.router_mac, self.prefix))
+                        router_advertisement(config, self.router_mac, self.prefix, resolvers))
         if self.router_up is None:
             router_valid, initial = -math.inf, 0
             next_ra = first + rng.uniform(0.0, rng.uniform(lo, hi))

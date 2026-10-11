@@ -483,8 +483,8 @@ def test_dual_stack_site_carries_only_windows_to_windows_services_over_ipv6(gene
         # Between two dual-stack hosts, from a client's temporary to a server's stable address.
         assert src in by_address and dst in by_address
         ports = {int(p) for p in (tdport, tsport, udport, usport) if p}
-        assert ports & {123, 4840}, ports
-        assert not ports & {502, 102, 44818, 2404, 20000, 53}
+        assert ports & {53, 123, 4840}, ports
+        assert not ports & {502, 102, 44818, 2404, 20000}
         assert int(hlim) in (127, 128)   # Windows hop limit 128, one less across the router
         if mss:
             assert int(mss) == 1440      # MSS of an IPv6 SYN on Ethernet
@@ -494,3 +494,14 @@ def test_dual_stack_site_carries_only_windows_to_windows_services_over_ipv6(gene
     stable = {hosts[h]["ipv6"]["stable"] for h in dual}
     answered = {a for (row,) in tshark_fields(result.pcap, "dns.aaaa", ["dns.aaaa"]) for a in row.split(",")}
     assert answered <= stable
+    # Every RA advertises the dual-stack DNS server (RDNSS), and the dual-stack hosts query it over
+    # IPv6 only: no IPv4 DNS from them.
+    resolver = answers["facts"]["dns_service"]["hosts"][0]["ipv6"]
+    assert resolver in stable
+    advertised = tshark_fields(result.pcap, "icmpv6.type == 134", ["icmpv6.opt.rdnss", "icmpv6.opt.rdnss.lifetime"])
+    assert advertised and {tuple(r) for r in advertised} == {(resolver, "1800")}
+    queries6 = tshark_fields(result.pcap, "dns && udp.dstport == 53 && ipv6 && dns.flags.response == 0", ["ipv6.dst"])
+    assert queries6 and {d for (d,) in queries6} == {resolver}
+    v4 = {i["ip"] for h in dual for i in hosts[h]["interfaces"]}
+    v4_dns = {s for (s,) in tshark_fields(result.pcap, "dns && udp.port == 53 && ip", ["ip.src"])}
+    assert not v4_dns & v4 - {answers["facts"]["dns_service"]["hosts"][0]["ip"]}

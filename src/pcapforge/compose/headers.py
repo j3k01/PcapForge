@@ -309,8 +309,11 @@ class Headers:
         sport, dport = state.ports[side], state.ports[1 - side]
         if flow.proto == TCP:
             l4 = self._tcp(p, state, sport, dport)
-        else:
-            l4 = _UDP.pack(sport, dport, 8 + len(p.payload), 0) + p.payload
+        else:  # of the UDP payloads with addresses only DNS goes over IPv6 (dualstack.IPV4_ONLY)
+            payload = p.payload
+            if side == 1 and flow.server_port == ports.DNS:
+                payload = rewrite_a_records(payload, lambda rdata: self._dns_address(rdata, flow), self._dns_address6)
+            l4 = _UDP.pack(sport, dport, 8 + len(payload), 0) + payload
         csum = checksum(src + dst + len(l4).to_bytes(4, "big") + bytes((0, 0, 0, flow.proto)) + l4)
         if flow.proto == UDP and csum == 0:
             csum = 0xFFFF

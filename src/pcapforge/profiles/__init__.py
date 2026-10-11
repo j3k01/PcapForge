@@ -60,6 +60,7 @@ class Ipv6Router:
     preferred_lifetime: int
     on_link: bool             # L flag
     autonomous: bool          # A flag
+    rdnss_lifetime: int       # RDNSS option (RFC 8106) when the site advertises IPv6 DNS servers
 
 
 @dataclass(frozen=True)
@@ -184,6 +185,7 @@ def _ipv6_router(raw: dict) -> Ipv6Router:
         preferred_lifetime=prefix["preferred_lifetime"],
         on_link=bool(prefix["on_link"]),
         autonomous=bool(prefix["autonomous"]),
+        rdnss_lifetime=raw["rdnss_lifetime"],
     )
 
 

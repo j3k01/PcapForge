@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: ot-baseline-operations
 title: Baseline of normal OT operations (no incident)
 line: ot
-version: 4
+version: 5
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [baseline, modbus, opcua, s7comm, ics, ot, water, wastewater, hvac, power]
@@ -327,17 +327,29 @@ questions:
       filter: "opcua && tcp.srcport == 4840 && ipv6.src == ${facts.opcua_service.hosts[0].ipv6}"
       expect: {min: 1}
   - id: ipv6_services
-    when: "vars.opcua and vars.ipv6 == 'dual'"
+    when: "vars.opcua and vars.dns and vars.ipv6 == 'dual'"
     text: >-
       This site is dual-stack. Which server ports do the Windows hosts reach over IPv6 (everything
       else, including all PLC traffic, stays IPv4)?
-    answer: [123, 4840]
+    answer: [53, 123, 4840]
     type: set
     points: 10
     hint: Filter on "ipv6 && !icmpv6 && !(ipv6.dst == ff00::/8)" and look at the destination ports.
     check:
-      filter: "ipv6 && (udp.dstport == 123 || tcp.dstport == 4840)"
-      expect: {min: 2}
+      filter: "ipv6 && (udp.dstport == 53 || udp.dstport == 123 || tcp.dstport == 4840)"
+      expect: {min: 3}
+  - id: ipv6_resolver
+    when: "vars.dns and vars.ipv6 == 'dual'"
+    text: >-
+      The Windows hosts resolve names over IPv6. Which IPv6 address do they use as DNS server? It
+      was not configured by DHCP.
+    answer: "${facts.dns_service.hosts[0].ipv6}"
+    type: ip
+    points: 10
+    hint: The firewall's Router Advertisements carry it in an RDNSS option (icmpv6.opt.rdnss).
+    check:
+      filter: "icmpv6.type == 134 && icmpv6.opt.rdnss == ${facts.dns_service.hosts[0].ipv6}"
+      expect: {min: 1}
 
 translations:
   pl:
@@ -372,3 +384,6 @@ translations:
       ipv6_services:
         text: Ten zakład jest dual-stack. Na jakie porty serwerów hosty Windows łączą się po IPv6 (cała reszta, w tym cały ruch do PLC, zostaje na IPv4)?
         hint: Przefiltruj "ipv6 && !icmpv6 && !(ipv6.dst == ff00::/8)" i sprawdź porty docelowe.
+      ipv6_resolver:
+        text: Hosty Windows rozwiązują nazwy po IPv6. Którego adresu IPv6 używają jako serwera DNS? Nie został skonfigurowany przez DHCP.
+        hint: Ogłoszenia routera (Router Advertisement) z firewalla niosą go w opcji RDNSS (icmpv6.opt.rdnss).

@@ -7,8 +7,10 @@ Windows PCs and servers on such subnets (devices with a ``browser`` profile) wer
 global IPv6 destination to IPv4 (RFC 6724 default policy: ``::/0`` precedence 40 over
 ``::ffff:0:0/96`` 35), so a Windows client that reaches another dual-stack Windows host by name
 uses IPv6: in the shipped scenarios time sync with the DC and the historian's OPC UA session to
-the SCADA server. DNS itself stays on the IPv4 resolver the hosts got over DHCPv4 / static
-configuration (the RAs carry no RDNSS). PLCs (also those on embedded Windows), RTUs, drives and
+the SCADA server. The RAs carry the site DNS servers that are dual-stack themselves in an RDNSS
+option (RFC 8106, Windows 10 1703 and later), and Windows queries the IPv6 DNS servers of an
+interface before the IPv4 ones it got over DHCPv4 / static configuration, so name lookups of the
+dual-stack hosts go over IPv6 as well. PLCs (also those on embedded Windows), RTUs, drives and
 building controllers are IPv4 only, and BACnet/IP and EtherNet/IP are IPv4 protocols, so
 everything else stays IPv4. A host that joins the segment during the capture keeps IPv4 for its
 conversations.
@@ -29,7 +31,8 @@ if TYPE_CHECKING:
 
 DUAL = "dual"
 # Recording ports of conversations that stay IPv4 between dual-stack hosts.
-IPV4_ONLY = frozenset({ports.DNS, ports.BACNET, ports.ENIP, ports.ENIP_IO, ports.DHCP_SERVER, ports.DHCP_CLIENT})
+IPV4_ONLY = frozenset({ports.BACNET, ports.ENIP, ports.ENIP_IO, ports.DHCP_SERVER, ports.DHCP_CLIENT})
+DNS_QUERY_OP = "dns.query"
 
 
 def enabled(plan: Plan) -> bool:
@@ -50,6 +53,12 @@ def hosts(plan: Plan) -> frozenset[str]:
         h.id for h in plan.topology.hosts
         if h.device.stack.ipv6 is not None and h.device.browser is not None and not h.router
         and h.id not in joining and routed_by_ipv6_router(plan, h.subnets[0]))
+
+
+def resolvers(plan: Plan, dual: frozenset[str]) -> list[str]:
+    """Ids of the dual-stack DNS servers the dual-stack hosts query: the RAs' RDNSS option."""
+    return sorted({a.args["server"] for a in plan.actions
+                   if a.op == DNS_QUERY_OP and a.host in dual and a.args["server"] in dual})
 
 
 def carries(dual: frozenset[str], client: Host, server, server_port: int) -> bool:

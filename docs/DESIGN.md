@@ -242,8 +242,10 @@ subscription (`vars.opcua`), see below.
   per subnet the IPv6 router serves, a stable and a temporary address per Windows PC / server (devices
   with a `browser` profile), configured before the capture. The DNS server answers AAAA for them in the
   recording with the IPv4-mapped loopback address and the composer writes the stable address there.
-  `assign_flows` marks a conversation between two dual-stack hosts `Flow.v6` unless it is DNS, BACnet/IP,
-  EtherNet/IP or DHCP: in the shipped scenarios NTP to the DC and the historian's OPC UA session. Such
+  `assign_flows` marks a conversation between two dual-stack hosts `Flow.v6` unless it is BACnet/IP,
+  EtherNet/IP or DHCP: in the shipped scenarios NTP to the DC, the historian's OPC UA session and name
+  lookups at the DC. The RAs list the dual-stack DNS servers the dual-stack hosts query in an RDNSS option
+  (lifetime `rdnss_lifetime`); Windows queries an interface's IPv6 DNS servers before its IPv4 ones. Such
   flows get an IPv6 header (client temporary -> server stable address, hop limit from the stack TTL,
   flow label 0), MSS 1440 in the handshake and in segmentation, Ethertype 86dd, and Neighbor
   Unreachability Detection instead of ARP: caches are warm at the capture start; a STALE entry

@@ -19,7 +19,8 @@
 # closed (RST); see `compose/firewall.py`.
 # `ipv6_router` (devices): the device advertises itself as IPv6 router on the sensor segment when
 # the scenario turns IPv6 on (`compose/ipv6.py`): Router Advertisement timers and fields, MTU option
-# (omit `mtu` to leave it out) and the Prefix Information option of the segment's ULA /64.
+# (omit `mtu` to leave it out), the Prefix Information option of the segment's /64 (ULA, or global
+# on a dual-stack site) and `rdnss_lifetime` of the RDNSS option a dual-stack site adds.
 
 stacks:
   windows:
@@ -258,6 +259,8 @@ devices:
     # ip6-retrans-time 0 (unspecified), ra-send-mtu enable (interface MTU 1500), M and O flags off;
     # ip6-prefix-list entry with onlink-flag and autonomous-flag enable, valid-life-time 2592000,
     # preferred-life-time 604800. Link-local address: modified EUI-64 of the interface MAC.
+    # On a dual-stack site the prefix entry's `rdnss` lists the site DNS servers; FortiOS has no
+    # lifetime knob, so the RDNSS option carries 3 x ip6-max-interval (RFC 8106 section 5.1).
     ipv6_router:
       min_rtr_adv_interval: 198
       max_rtr_adv_interval: 600
@@ -269,3 +272,4 @@ devices:
       managed: false
       other_config: false
       prefix: {valid_lifetime: 2592000, preferred_lifetime: 604800, on_link: true, autonomous: true}
+      rdnss_lifetime: 1800
