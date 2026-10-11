@@ -48,7 +48,7 @@ jobs:
           - `<run>-instructor.zip`: the whole run, including `answers.json`, `siem/` and `detections/`.
             Keep it away from students.
           EOF
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*.zip
           body_path: notes.md
