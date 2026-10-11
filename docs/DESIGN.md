@@ -272,7 +272,7 @@ subscription (`vars.opcua`), see below.
   `ui/roster.py`: `<out>/roster.json` {login: name, salted PBKDF2-HMAC-SHA256 code hash}; sessions are
   `login|expiry|HMAC(secret, login|expiry|salt)` cookies (secret `<out>/.ui-secret`), so a code reset ends
   the student's sessions; the student identity of every request comes from the verified cookie.
-Next: IT-line scenarios (README roadmap).
+Next: IT-line scenarios (ROADMAP.md).
 
 ### Composer spec
 Input: recording pcap, plan, presentation rng (`Rng("pcapforge", scenario, difficulty, seed).child("present")`).

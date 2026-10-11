@@ -30,6 +30,11 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Web UI: web-ui.md
+  - Grading and packaging: grading.md
+  - SIEM export and detections: siem.md
+  - Scenarios: scenarios.md
+  - How it works: how-it-works.md
   - Contributing: contributing.md
   - Design notes: DESIGN.md
   - Roadmap: roadmap.md

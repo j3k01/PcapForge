@@ -155,7 +155,7 @@ actors:
     params: {targets: plc, writes: "${vars.writes}", deviation: "${vars.deviation}"}
 ```
 
-- `type` selects an actor class (the README lists the built-in ones; the class docstrings and `param()`
+- `type` selects an actor class (the [actor list](docs/scenarios.md#built-in-actor-types) names the built-in ones; the class docstrings and `param()`
   calls in `src/pcapforge/actors/` document their params).
 - `hosts` names the host ids that run the actor; `targets`/`server` params name the hosts it talks to.
 - Numeric params usually accept a scalar or a `[low, high]` range the seed draws from.
@@ -216,7 +216,8 @@ difficulty:
   `plc_devices`), so that every seed is a qualitatively different exercise. Host `device:` and `count:`
   accept `${vars.*}`.
 
-Provide all three levels unless a level would be meaningless, and describe them in the README table.
+Provide all three levels unless a level would be meaningless, and describe them in the level table of
+[docs/scenarios.md](docs/scenarios.md).
 
 ### Facts, questions, `check` and `hunt`
 
@@ -291,7 +292,7 @@ generate each level and read the result like a student would.
    core install still plans every scenario and the recorder stops before capturing with the install
    command. Enable such actors in a scenario only behind a difficulty variable.
 7. If the protocol needs SIEM fields or Suricata rules, extend `export.py` / `detections.py`.
-8. Document the actor in the README's built-in actor list.
+8. Document the actor in the [built-in actor list](docs/scenarios.md#built-in-actor-types).
 
 ### A new device or OS stack
 
@@ -340,7 +341,8 @@ Before opening a pull request:
       band, the key's frame numbers point at the right packets), not implementation details.
 - [ ] `pytest -q` passes; for recording, composer, answer-key or detection changes, also on Linux
       (`unshare -rn pytest -q`) and with Suricata installed when rules change.
-- [ ] README updated (scenario table, difficulty table, actor list) when you add user-visible features.
+- [ ] README and [docs/scenarios.md](docs/scenarios.md) updated (scenario table, level table, actor list) when you
+      add user-visible features.
 
 ## Licensing
 

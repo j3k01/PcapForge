@@ -21,6 +21,7 @@ composes the traffic into a believable site topology, and writes:
 - with `--zeek`: `zeek/*.log`, real Zeek logs of the capture (JSON)
 
 The same seed always gives the same exercise, and every student can get their own variant.
+Ready-made student and instructor packs are on the [releases page](https://github.com/j3k01/PcapForge/releases).
 
 > **Defensive by design.** The repository contains no malware, implants, exploit code or
 > working payloads. Every "suspicious" behaviour is produced by benign clients and
@@ -35,13 +36,14 @@ Requirements:
 - loopback capture rights:
   - Windows: Npcap with *loopback support*, the Wireshark installer default
   - Linux: none when pcapforge runs in its own user and network namespace (`unshare -rn pcapforge ...`, see
-    [Platform notes](#development)), otherwise `sudo setcap cap_net_raw,cap_net_admin=eip $(which dumpcap)`
+    [platform notes](docs/how-it-works.md#platform-notes)), otherwise `sudo setcap cap_net_raw,cap_net_admin=eip $(which dumpcap)`
     plus, once per boot, `sudo ip route add local 127.77.0.0/16 dev lo table local quickack 1`
 
 ```console
-$ pip install -e .                # medium/hard of the OT scenario also need: pip install -e .[opcua,s7]
+$ pip install -e .                # medium/hard of the OT scenarios also need: pip install -e .[opcua,s7]
 $ pcapforge list
-ot-modbus-write-manipulation  OT  easy/medium/hard  T0855,T0836     Unauthorized Modbus/TCP setpoint changes on a water-treatment PLC
+...
+ot-modbus-write-manipulation  OT  easy/medium/hard  T0855,T0836     Unauthorized Modbus/TCP setpoint changes on a process PLC
 
 $ pcapforge generate --scenario ot-modbus-write-manipulation --difficulty easy --seed 42
   [42] plan: 4020 actions, recording key 088575127c99cf5e0fbfc8c4
@@ -50,31 +52,14 @@ $ pcapforge generate --scenario ot-modbus-write-manipulation --difficulty easy -
 out/ot-modbus-write-manipulation_easy_42/capture.pcap  (13751 packets, verified)
 ```
 
-Optional protocol extras record more industrial background traffic: `pip install -e .[opcua]` (OPC UA,
-asyncua) and `pip install -e .[s7]` (Siemens S7comm, python-snap7). Scenarios enable these actors only on
-levels that need them (medium and hard of `ot-modbus-write-manipulation`); generating such a level without
-the extra stops before recording with a message naming the extra to install.
-
-A class of 25 students, each with a unique variant, or one variant per login:
+A class of 25 students, each with a unique variant, or one variant per login, or a Polish handout
+(also `--lang de`):
 
 ```console
 $ pcapforge generate -s ot-modbus-write-manipulation -d hard --seed course-2026 --count 25
 $ pcapforge generate -s ot-modbus-write-manipulation -d medium --seeds-file students.txt
-$ pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42 --lang pl   # Polish handout, questions and template (also: de)
+$ pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42 --lang pl
 ```
-
-`--lang pl` (Polish) or `--lang de` (German) translates the student-facing prose: `briefing.md`, the question texts in `answers.json` and `submission_template.yaml`. Answers, filters and register names stay unchanged. Scenarios provide translations under `translations: {<lang>: {title, briefing, questions}}`; process profiles translate their title the same way. Register names and point descriptions are not translated.
-
-Other commands:
-- `pcapforge show <scenario>` describes the techniques, difficulty knobs and questions.
-- `pcapforge validate` checks scenario files.
-- `pcapforge verify capture.pcap -a answers.json` re-checks a capture against its key.
-- `pcapforge export <run dir> [--zeek]` (re)creates `siem/` and `detections/` (and `zeek/`) for an existing run.
-- `pcapforge package <run dir>` writes a student zip and an instructor zip (see [Grading and packaging](#grading-and-packaging)).
-- `pcapforge grade answers.json <submissions>` scores student answers. Hints listed under `hints_used` cost 20 % of the question's points (rounded up).
-- `pcapforge export-ctfd <run dir>` writes one CTFd challenge per question in the `ctfcli` format (`ctfd/qNN-<id>/challenge.yml`). Install each with `ctf challenge install <dir>`. The first challenge carries the capture and the briefing. Sets, maps and timestamps use a canonical flag format that each challenge description states.
-- `pcapforge report <run dir> [--grades grades.json]` writes `report.html` for the debrief: one self-contained page (inline SVG, no external resources) with the incident timeline and frame numbers, before/after charts of the changed setpoints and affected measurements (needs `siem/`, i.e. `--siem` or `pcapforge export`), the answers with their tshark checks, and optional class results from `pcapforge grade --json`.
-- `pcapforge ui [--out out] [--port 8765]` starts the local web UI (see below).
 
 ### What the analyst sees (easy, seed 42)
 
@@ -86,10 +71,6 @@ $ tshark -r capture.pcap -Y "modbus.func_code in {6, 43} && !modbus.request_fram
 2025-03-22T11:45:37.918517Z  b8:27:eb:23:26:6d  10.241.35.219  10.241.35.159  6  4  635
 ...
 ```
-
-Wireshark 4.2 and older (the Ubuntu 24.04 package) do not decode the value of a Write Single Register
-(function 6): students see it only as raw `modbus.data` bytes (`06:33` = 1587), and `modbus.regval_uint16`
-and the answer-key filters that use it match nothing. pcapforge itself needs 4.4+ to verify a capture.
 
 And the matching entry in `answers.json`:
 
@@ -105,277 +86,38 @@ And the matching entry in `answers.json`:
 }
 ```
 
-## Web UI
+## Commands
 
-`pcapforge ui` serves a small local web interface on `http://127.0.0.1:8765/` and opens it in the browser.
-It works on the same output directory as `generate` (`--out`, default `out`):
+| command | what it does |
+|---|---|
+| `pcapforge generate` | plan, record, compose and verify one run (or a batch of seeds) |
+| `pcapforge list` / `show <scenario>` / `validate` | list scenarios, describe one, check scenario files |
+| `pcapforge verify capture.pcap -a answers.json` | re-check a capture against its answer key |
+| `pcapforge export <run dir> [--zeek]` | (re)create the [SIEM logs, detections and Zeek logs](docs/siem.md) |
+| `pcapforge package <run dir>` | student zip and instructor zip ([grading and packaging](docs/grading.md)) |
+| `pcapforge grade answers.json <submissions>` | score YAML or CSV submissions, per question and per class |
+| `pcapforge report <run dir>` | self-contained `report.html` for the debrief, with process charts |
+| `pcapforge export-ctfd <run dir>` | one CTFd challenge per question (`ctfcli` format) |
+| `pcapforge ui [--student]` | local [web UI](docs/web-ui.md) for instructors, or the student side with answer forms |
 
-- **scenarios**: the catalog; per scenario its summary, ATT&CK techniques, questions and a level matrix
-  (every knob per level, values that change from the level before highlighted), plus a generate form
-  (level, seed, length, language, format, SIEM / Zeek export). Its "batch" section takes a seed list (one
-  per line, e.g. student logins; `#` comments and blanks skipped, at most 200, duplicates refused) and an
-  optional base seed that works like `--base-seed`; each seed becomes its own job.
-- **jobs**: generation and the run actions run one at a time in the background; the job list and the job
-  page update live with the recording progress and the log, then link the run.
-- **runs**: filterable by scenario and level, grouped with a "package all" button per group. Per run the
-  capture metadata, a network map (subnets, hosts, routers, the SPAN segment, IPv6 hosts), the host table,
-  a traffic overview (a per-protocol strip chart over the capture time with the answer-key events marked,
-  built by the `traffic` action from the capture and cached in `traffic.json`; the top conversations from
-  `siem/flows.jsonl`), the timeline, the answer key behind a "reveal answers" toggle, the files (download),
-  the students' submissions with the class results, and buttons for verify, SIEM / Zeek export, traffic,
-  grade, the debrief report (with the class results once graded), the student / instructor zips and the
-  CTFd export. Each section heading has its downloads: `hosts.csv`, `traffic.csv` (packets per protocol and
-  time bucket, once scanned), `flows.csv` (every flow, not only the top ones) and `flows.jsonl`,
-  `timeline.csv`, `answer-key.csv` (questions, answers, hints, tshark filters) and `answers.json`,
-  `submissions.zip`, `grades.csv` and `grades.json`, the capture, and the whole run as one zip; every
-  directory (`siem/`, `zeek/`, ...) downloads as a zip too. CSV files are UTF-8 with a byte order mark.
-
-`pcapforge ui --student [--show-score]` is the student side on the same output directory, and nothing else:
-students sign in, see their exercises (runs whose seed is their login, otherwise all runs), download the
-capture, `briefing.md` and `submission_template.yaml`, read the briefing and answer the questions in a form
-(hints with their cost, as in the template). The pages follow the exercise's language (en, pl, de). A
-submission is saved as `<run>/submissions/<login>.yaml` in the format `pcapforge grade` reads; resubmitting
-overwrites it. With `--show-score` students see their score per question right away, never the expected
-answers. The instructor's `grade` action writes `<run>/grades.json` (same as `pcapforge grade --json`).
-
-Access: on the instructor's **students** page, paste the class list (`login` or `login, Display Name` per
-line; the same logins can be the seed list of a batch). Each new student gets a random access code, shown
-once on a printable page; `<out>/roster.json` keeps only salted PBKDF2 hashes, and codes can be reset or
-students removed. With a roster, students sign in with login + code and get a signed 12-hour session
-(secret in `<out>/.ui-secret`); each student sees and overwrites only their own submission. Without a
-roster the student side is honour-system: any name is accepted.
-
-Standard library only, no extra dependency. It listens on 127.0.0.1 and refuses other `Host` headers and
-cross-origin form posts. `--host 0.0.0.0` makes it reachable from the network over plain HTTP: in
-instructor mode anyone who reaches it can start jobs and read the answer keys, so expose only the student
-mode to a class network, preferably with a roster.
-
-## Grading and packaging
-
-`pcapforge package` splits a run into what students get and what stays with the instructor:
-
-```console
-$ pcapforge package out/ot-modbus-write-manipulation_easy_42 --out handouts
-handouts/ot-modbus-write-manipulation_easy_42-student.zip
-handouts/ot-modbus-write-manipulation_easy_42-instructor.zip
-```
-
-- `<run>-student.zip`: the capture, `briefing.md` and `submission_template.yaml`, nothing else.
-- `<run>-instructor.zip`: the whole run directory, including `answers.json`, `siem/` and `detections/`.
-
-Without `--out` the zips are written next to the run directory. Several run directories can be packaged at
-once (`pcapforge package out/*/ --out handouts`). The zips are byte-identical for the same run.
-
-Students fill in `submission_template.yaml` (one file per student, named after the student), e.g.
-`jane-doe.yaml` for the easy run above:
-
-```yaml
-# 1. Which IP address issued the unauthorized Modbus write requests?
-#    (10 points; answer: an IP address)
-source_ip: 10.241.35.219
-# 2. Which MAC address did the sensor see on the frames carrying those write requests?
-#    (5 points; answer: a MAC address)
-source_mac: B8-27-EB-23-26-6D
-target_ip: 10.241.35.159
-first_write: 2025-03-22 11:45:36.4
-points_changed: [pid_level_ti, level_high_alarm, level_low_alarm]
-values_written: {pid_level_ti: 1587, level_high_alarm: 635, level_low_alarm: 0, chlorine_dose_sp: 8.45}
-functions_used: [6, 16]
-discovery: Rockwell Automation 2080-LC50-24QWB
-impact: [chlorine_residual, level_high, level_low]
-joined_host_name: raspberrypi
-technique: T0831
-```
-
-A whole class can also hand in one CSV with the columns `student,question,answer`. Repeat a row to give
-several elements of a list (`alice,points_changed,pid_level_ti`), or write them in one cell separated by
-commas; map answers are `name=value` pairs (`pid_level_ti=1587; level_low_alarm=0`).
-
-```console
-$ pcapforge grade out/ot-modbus-write-manipulation_easy_42/answers.json submissions/jane-doe.yaml
-jane-doe: 85/100 (85 %)   [submissions/jane-doe.yaml]
-question          type       score     result   given
-----------------  ---------  --------  -------  ----------------------------------------
-source_ip         ip         10/10     correct  10.241.35.219
-source_mac        mac        5/5       correct  B8-27-EB-23-26-6D
-target_ip         ip         10/10     correct  10.241.35.159
-first_write       timestamp  10/10     correct  2025-03-22 11:45:36.4
-points_changed    set        11.25/15  partial  ["pid_level_ti", "level_high_alarm", "l…
-values_written    map        11.25/15  partial  {"pid_level_ti": "1587", "level_high_al…
-functions_used    set        2.5/5     partial  ["6", "16"]
-discovery         text       10/10     correct  Rockwell Automation 2080-LC50-24QWB
-impact            set        10/10     correct  ["chlorine_residual", "level_high", "le…
-joined_host_name  text       5/5       correct  raspberrypi
-technique         text       0/5       wrong    T0831
-
-$ pcapforge grade answers.json submissions/*.yaml class.csv --json > grades.json
-```
-
-`first_write` is 0.38 s off but inside the key's `tolerance_s: 1`; `points_changed` names 3 of the 4 points
-(3/4 × 15); `values_written` has 3 of 4 values within 0.5 % (8.45 is 1.1 % off 8.36); `functions_used` has
-one correct and one extra code (1/2 × 5).
-
-Each question is scored by its `type` in `answers.json`:
-
-| type | correct when | partial credit |
-|---|---|---|
-| `ip` | same address; whitespace and leading zeros (`10.241.035.219`) ignored | - |
-| `mac` | same 12 hex digits; case and `:` `-` `.` separators ignored | - |
-| `number` | equal, or within `tolerance` when the key has one | - |
-| `timestamp` | within `tolerance_s`; ISO 8601 with `T` or space, any fractional digits, `Z` or an offset; times without a zone are UTC | - |
-| `set` | same elements, any order, case-insensitive | \|correct ∩ given\| / \|correct ∪ given\| × points: missing and extra elements both cost |
-| `map` | every key present with the right value (numbers within 0.5 %) | matched keys / \|answer keys ∪ given keys\| × points |
-| `text` | the answer or any `accept` alternative, ignoring case and repeated whitespace | - |
-
-Blank answers score 0. Question ids that are not in the key are listed under the student and not scored.
-With more than one student the report ends with a class summary (one column per question, numbered as
-in `briefing.md`). `--json` prints every student's score, percentage, per-question result
-(`correct`, `partial`, `wrong`, `blank`), given and expected answer. `grade` always exits 0 once the files
-could be read.
-
-## SIEM export and detection content
-
-`--siem` (or `pcapforge export <run dir>` later) turns a run into a detection-engineering lab:
-
-```console
-$ pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42 --siem
-$ pcapforge export out/ot-modbus-write-manipulation_easy_42
-out/ot-modbus-write-manipulation_easy_42/detections/hunting.md
-out/ot-modbus-write-manipulation_easy_42/detections/sigma/*.yml  (4 rules)
-out/ot-modbus-write-manipulation_easy_42/detections/suricata.rules
-out/ot-modbus-write-manipulation_easy_42/siem/arp.jsonl  (25 records)
-out/ot-modbus-write-manipulation_easy_42/siem/dhcp.jsonl  (4 records)
-out/ot-modbus-write-manipulation_easy_42/siem/dns.jsonl  (0 records)
-out/ot-modbus-write-manipulation_easy_42/siem/flows.jsonl  (40 records)
-out/ot-modbus-write-manipulation_easy_42/siem/modbus.jsonl  (3975 records)
-out/ot-modbus-write-manipulation_easy_42/siem/name_resolution.jsonl  (0 records)
-out/ot-modbus-write-manipulation_easy_42/siem/ntp.jsonl  (33 records)
-```
-
-`siem/` holds one JSON event per line, decoded by a single tshark pass:
-
-| file | one record per | main fields |
-|---|---|---|
-| `flows.jsonl` | TCP connection / UDP 5-tuple exchange / other IP pair | `src`, `dest`, `src_port`, `dest_port`, `transport`, `app`, `duration`, `packets_out/in`, `bytes_out/in` (IP bytes), `state` (`established`, `mid_session` = no SYN seen, `closed` = FIN, `reset`; UDP `bidirectional` / `one_way`) |
-| `modbus.jsonl` | request/response transaction | `unit_id`, `trans_id`, `function_code`, `function`, `write`, `table`, `address`, `quantity`, `values` (written raw registers for writes, read raw registers/bits for successful reads), `exception`, `response_time_ms`, `request_frame`; for writes to a PLC with a known register map, per point the write covers completely (a FLOAT32 takes two registers; a list when there are several): `point`, `register` (vendor number, e.g. 40009, or a pair such as 40003-40004), `desc`, `unit`, `value` (engineering, UINT16 / scale or the decoded FLOAT32), `in_normal_band` |
-| `dns.jsonl` | query/response | `query`, `qtype`, `rcode`, `answers`, `ttl`, `response_time_ms` |
-| `ntp.jsonl` | client request/server response | `version`, `stratum`, `refid`, `server_time`, `offset_ms`, `response_time_ms` |
-| `name_resolution.jsonl` | LLMNR / NBNS / mDNS / SSDP / browser datagram | `app`, `message`, `query`, `qtype`, `answers` |
-| `arp.jsonl` | ARP packet | `operation`, `src`, `src_mac`, `dest`, `dest_mac`, `gratuitous`, `probe` (RFC 5227 address conflict probe from 0.0.0.0) |
-| `dhcp.jsonl` | DHCPv4 message | `message` (`discover`, `offer`, `request`, `ack`, `inform`, `release`, ...), `xid`, `client_mac`, `client_addr`, `assigned_addr`, `requested_addr`, `server_id`, `host_name`, `client_fqdn`, `vendor_class`, `lease_time_s`, `router`, `dns_servers`, `domain` |
-| `iec104.jsonl` | IEC 60870-5-104 APDU (I, S or U frame) | `apci`, `u_function`, `send_seq`, `recv_seq`, `type_id`, `type`, `category` (`monitor`, `control`, `system`, ...), `cot`, `cause`, `negative`, `test`, `originator`, `common_address`, `ioa`, `objects` (decoded values, quality, time tags), `select` |
-| `dnp3.jsonl` | DNP3 application fragment | `link_src`, `link_dst`, `function_code`, `function`, `response`, `fir`, `fin`, `con`, `uns`, `seq`, `iin`, `iin_flags`, `objects`, `controls`, `analog_outputs`, `point_index` |
-| `bacnet.jsonl` | BACnet/IP message | `bvlc`, `bvlc_result`, `ttl_s`, `orig_src` (Forwarded-NPDU), `apdu_type`, `service`, `invoke_id`, `write`, `object_type`, `instance`, `objects`, `device`, `property`, `value`, `priority`, `relinquish`, error / reject / abort codes |
-| `enip.jsonl` | EtherNet/IP encapsulation message, or per minute and direction a class 0/1 I/O summary (`message: io_summary`) | `command`, `session`, `status`, `response`, `connection_id`, `sequence`, `service`, `services`, `class`, `instance`, `attribute`, `tags`, `general_status`, `write`, `identity`; I/O: `packets`, `bytes`, `first_seq` / `last_seq`, `seq_missing`, `seq_repeated`, `interval_ms_mean/min/max` |
-
-Every record has `ts` (ISO-8601 UTC, microseconds, `Z`) for Splunk `_time` / Elastic `@timestamp`
-and `epoch`; field names follow the Splunk CIM (`src`, `dest`, `src_port`, `dest_port`, `transport`, `app`).
-A write from the easy run above:
-
-```json
-{"ts": "2025-03-22T11:45:36.016219Z", "src": "10.241.35.219", "src_port": 37312, "dest": "10.241.35.159", "dest_port": 502,
- "src_mac": "b8:27:eb:23:26:6d", "function_code": 6, "function": "write_single_register", "write": true, "table": "holding",
- "address": 8, "quantity": 1, "values": [1587], "response_time_ms": 5.318, "request_frame": 7209,
- "point": "pid_level_ti", "unit": "s", "value": 1587.0, "in_normal_band": false, ...}
-```
-
-Loading: in Splunk use sourcetype `pcapforge:<file stem>` (e.g. `pcapforge:modbus`) with
-`INDEXED_EXTRACTIONS = json`, `TIMESTAMP_FIELDS = ts`, `TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%6NZ`; in Elastic
-use one index per file (`pcapforge-modbus`, ...) with `ts` as the timestamp field.
-
-`detections/` is generated from the site model in `answers.json`:
-- `suricata.rules` (sids 9100000+): any Modbus write to a PLC from a host that is not an approved writer
-  (hosts of `modbus.operator` actors), device identification (function 43) from a host that is not a
-  SCADA client, and per writable holding register with a normal band, writes above / below the band
-  (raw register units; a FLOAT32 setpoint is matched with `byte_test` on the IEEE 754 bit pattern of a
-  Write Multiple Registers request that starts at the point). When the site runs them (sids 9101000+):
-  IEC 104 commands, interrogations and reset process from a host other than the SCADA master; DNP3
-  select / operate / direct operate, write, restarts and disable unsolicited from a non-master; BACnet
-  WriteProperty(Multiple), DeviceCommunicationControl, ReinitializeDevice and Register-Foreign-Device from
-  a host other than the BMS workstations, and BBMD table changes from anyone; CIP writes, resets and
-  Forward_Open from a host other than the EtherNet/IP originators. Suricata's Modbus, DNP3 and ENIP
-  parsers are off by default: `suricata -r capture.pcap -S suricata.rules --set
-  app-layer.protocols.modbus.enabled=true --set app-layer.protocols.dnp3.enabled=yes --set
-  app-layer.protocols.enip.enabled=yes -k none -l logs`.
-- `sigma/*.yml`: SIEM-agnostic [Sigma](https://sigmahq.io) rules over the JSON-lines export
-  (`logsource: {product: pcapforge, service: <dataset>}`): the unapproved-writer and device-identification
-  rules (same roles as the Suricata ones), an out-of-band write rule keyed on the export's `in_normal_band`
-  field, a connection-from-an-unexpected-host rule over the `flows` dataset, reads rejected with Illegal
-  Data Address (register-map enumeration), an alarm-acknowledge / reset coil write and an alarm threshold
-  written out of band (alarm suppression, from the PLC register map), and, when a `dhcp.client` runs, a
-  new-host-on-the-control-LAN rule. Over the telecontrol, building and packaging datasets: IEC 104 commands
-  and interrogations, DNP3 controls / writes and polls, BACnet writes and foreign-device registrations, and
-  CIP writes and Forward_Open from hosts other than the approved masters, plus BBMD table changes. Two
-  Sigma 2.0 correlation rules ship with their base rules in the same file: a port-502 sweep (one source,
-  at least three hosts in ten minutes) and the same point set to the same value by two hosts within four
-  hours (command replay). Convert with
-  [sigma-cli](https://github.com/SigmaHQ/sigma-cli), e.g. `sigma convert -t splunk detections/sigma/`
-  (correlations need a backend that supports them, e.g. `splunk` or `esql`; checked with sigma-cli 3.1).
-  Every rule is evaluated against the export in the tests: each fires on its scenario's incident and
-  none fires on `ot-baseline-operations`.
-- `hunting.md`: per question, the answer, the verified Wireshark filters from the answer key, and a
-  Splunk SPL search and Kibana KQL filter over the export with a "what to look for" note. The SPL/KQL
-  are templates from the scenario's `hunt` blocks and are not machine-verified.
-
-On the hard level the unauthorized writes come from the approved engineering workstation, so only
-the out-of-band rules fire; the unapproved-writer rule fires on easy and medium.
-
-### Zeek logs
-
-`--zeek` (on `generate` or `export`) runs [Zeek](https://zeek.org) over the capture and keeps its logs in
-`zeek/`, one JSON object per line (`LogAscii::use_json`): `conn.log`, `dns.log`, `ntp.log`, `dhcp.log`,
-`modbus.log`, `dnp3.log` and, from the policy scripts pcapforge loads, `known_hosts.log`,
-`known_services.log`, `known_modbus.log` (Modbus masters and slaves) and `modbus_register_change.log`.
-`Site::local_nets` is set to the scenario's subnets, so `local_orig` / `local_resp` and the `known_*`
-logs describe the site. Zeek runs with `-D` (deterministic mode), so the same capture always gives
-byte-identical logs; `packet_filter.log` (wall-clock start time only) is not kept. Zeek has no default
-analyzer for S7comm, OPC UA, IEC 104, BACnet or EtherNet/IP; those flows appear in `conn.log` only.
-
-Zeek is found as `PCAPFORGE_ZEEK` (path to the binary), `zeek` on `PATH` or `/opt/zeek/bin/zeek`, and on Windows
-in the default WSL distribution (`zeek` on its `PATH` or `/opt/zeek/bin/zeek`, run through `wsl.exe`); otherwise
-the official `zeek/zeek:lts` Docker image is used (`PCAPFORGE_ZEEK_IMAGE` overrides it; the container has
-no network). Zeek does not run natively on Windows. In WSL Ubuntu 24.04 the packages CI uses install it to
-`/opt/zeek` (`zeek-lts-core` from the `security:zeek` repository, see `.github/workflows/ci.yml`). When no Zeek
-is found, the error message includes the install command for the platform (WSL Ubuntu 24.04 on Windows,
-Ubuntu 24.04, Homebrew on macOS).
-
-```console
-$ pcapforge generate -s ot-baseline-operations -d medium --seed zeek-smoke --duration 10m --siem --zeek
-$ pcapforge export out/ot-baseline-operations_medium_zeek-smoke --zeek
-...
-out/ot-baseline-operations_medium_zeek-smoke/zeek/conn.log  (215 records)
-out/ot-baseline-operations_medium_zeek-smoke/zeek/dns.log  (193 records)
-out/ot-baseline-operations_medium_zeek-smoke/zeek/known_hosts.log  (5 records)
-out/ot-baseline-operations_medium_zeek-smoke/zeek/known_modbus.log  (6 records)
-out/ot-baseline-operations_medium_zeek-smoke/zeek/known_services.log  (7 records)
-out/ot-baseline-operations_medium_zeek-smoke/zeek/modbus.log  (14892 records)
-out/ot-baseline-operations_medium_zeek-smoke/zeek/modbus_register_change.log  (5 records)
-out/ot-baseline-operations_medium_zeek-smoke/zeek/ntp.log  (28 records)
-```
+`pcapforge <command> --help` lists every option; the documentation site has the same as a CLI reference.
 
 ## Scenarios
 
-| id | line | techniques | what happens |
-|---|---|---|---|
-| `ot-modbus-write-manipulation` | OT | T0855, T0836 (+T0888, T0861 with discovery) | An HMI and a historian poll the water-treatment PLCs (medium/hard: also a SCADA/OPC UA server, an S7comm-monitored S7-1500, a telecontrol outstation for the drawn process — IEC 60870-5-104, DNP3 or BACnet/IP — and EtherNet/IP tag reads from a CompactLogix). A host outside the approved change path writes setpoints outside their normal band. |
-| `ot-modbus-discovery` | OT | T0846, T0888, T0861 | An HMI and a historian poll the PLCs. A host that is not a normal Modbus client sweeps the control subnet for port 502, then reads each PLC's device identification (function 43) and enumerates its register map (oversized reads rejected with illegal_data_address). Reconnaissance only — nothing is written. |
-| `ot-modbus-command-replay` | OT | T0855, T0831 | An HMI and a historian poll the PLCs and the engineering workstation makes approved setpoint changes. An unapproved host re-sends copies of those operator commands (same register, same value) off-cycle, so every written value is inside the normal band — the tell is the source and the timing, not the value. |
-| `ot-modbus-coil-manipulation` | OT | T0855, T0831 (+T0878 with ack) | An HMI and a historian poll the PLCs. An unapproved host writes Modbus coils (function 5 / 15) to force actuators out of their normal state — stop a pump, open a breaker, disable a fan — and on medium/hard acknowledges the resulting alarm to clear it. The status discretes that mirror each command flip. |
-| `ot-modbus-alarm-masking` | OT | T0878, T0836, T0855 | An HMI and a historian poll the PLCs. An unapproved host first moves an alarm threshold out of band so it can no longer trip, then pushes the setpoint that threshold was guarding out of its normal band — so the harmful change raises no alarm. The order of the two writes is the tell. |
-| `ot-baseline-operations` | OT | none (no incident) | Normal operations only: polling, OPC UA/S7 monitoring, telecontrol (IEC 104 / DNP3 / BACnet by process) and EtherNet/IP (medium/hard), approved operator changes, NTP/DNS/Windows chatter. Process drawn per seed on every level. For baselining exercises, false-positive tuning and anomaly-detection datasets. |
+| id | techniques | what happens |
+|---|---|---|
+| `ot-modbus-write-manipulation` | T0855, T0836 (+T0888, T0861 with discovery) | A host outside the approved change path writes setpoints outside their normal band. |
+| `ot-modbus-discovery` | T0846, T0888, T0861 | A port-502 sweep, device identification and register-map enumeration; nothing is written. |
+| `ot-modbus-command-replay` | T0855, T0831 | An unapproved host re-sends operator commands off-cycle; every value is in band. |
+| `ot-modbus-coil-manipulation` | T0855, T0831 (+T0878 with ack) | Coil writes force actuators out of their normal state; medium/hard also acknowledge the alarm. |
+| `ot-modbus-alarm-masking` | T0878, T0836, T0855 | An alarm threshold is moved out of band first, then the setpoint it was guarding. |
+| `ot-baseline-operations` | none | Normal operations only, for baselining and false-positive tuning. |
 
-Difficulty levels of `ot-modbus-write-manipulation`:
-
-| | easy | medium | hard |
-|---|---|---|---|
-| length | 15 min, ~14k packets | 45 min, ~199k packets | 2 h, ~694k packets |
-| process | drinking water | drawn per seed: drinking water, wastewater, building HVAC or power substation | drawn per seed (same four) |
-| PLCs | 2 | 2–4 Modbus (per seed) + 1 Siemens S7-1500 | 3–5 Modbus (per seed) + 1 Siemens S7-1500 |
-| writer | unknown Raspberry Pi plugged into the control LAN during the capture (leases its address from the firewall's DHCP pool) | laptop on the IT subnet, routed through the firewall (gateway MAC) | the legitimate engineering workstation |
-| discovery | identity read + register enumeration | yes | none |
-| changes | burst of extreme values | spread over 20 min, moderate values | spread over 1 h, values just outside the band, mixed with 6 legitimate operator changes |
-| OT background | HMI and historian poll the PLCs (Modbus/TCP) | + SCADA server polls the PLCs and serves them over OPC UA to the historian (one subscription per PLC: Publish every 2 s, ServerStatus Read every 5 s); HMI and historian read the S7-1500 over S7comm; the HMI is the telecontrol master of the process' outstation (IEC 60870-5-104 RTU at a substation with counter interrogations and in-band setpoint / switching commands, DNP3 RTAC at a water or wastewater plant reporting events unsolicited, two BACnet/IP controllers in a building with approved setpoint overrides and a BMS server on the plant IT network registered with the BBMD as a foreign device); HMI and historian read a CompactLogix over EtherNet/IP, which scans a PowerFlex 525 drive with class 1 I/O (UDP 2222, 100 ms) | + OPC UA secure-channel renewals |
-| noise | NTP, ARP | + a vendor service laptop that joins over DHCP (DORA, ARP probes, DHCPINFORM) and releases its lease before leaving, DNS, Windows chatter (LLMNR, NBNS, mDNS, SSDP, browser announcements), IPv6 baseline of the Windows hosts (link-local DAD, Router Solicitation, MLDv2, LLMNR/mDNS over IPv6, DHCPv6 Solicit; the firewall's Router Advertisements with a ULA prefix, SLAAC stable and temporary addresses, unicast Neighbor Discovery), retransmissions, capture starts mid-session, SPAN artefacts (VLAN 20, 0.2 % duplicated frames, 0.05 % sensor drops) | + a dual-stack site: the firewall advertises a global prefix (2001:db8::/32) and the DC as IPv6 DNS server (RDNSS), the DNS answers AAAA for the Windows PCs and servers, and their name lookups, NTP to the DC and the historian's OPC UA session run over IPv6 (from temporary to stable addresses, MSS 1440, Neighbor Unreachability Detection); PLC traffic stays IPv4. More retransmissions, twice the Windows chatter, VLAN 120, 0.5 % duplicates, 0.1 % drops |
+Every scenario has easy, medium and hard. In `ot-modbus-write-manipulation`, easy is 15 minutes with two
+PLCs and a rogue Raspberry Pi; hard is 2 hours with 3 to 5 Modbus PLCs, an S7-1500, OPC UA, a telecontrol
+outstation (IEC 104, DNP3 or BACnet/IP), EtherNet/IP, Windows and IPv6 background traffic, and the writes come
+from the legitimate engineering workstation. Level tables, languages, actor types, process profiles and how
+to write a scenario: [docs/scenarios.md](docs/scenarios.md).
 
 ## How it works
 
@@ -391,108 +133,22 @@ flowchart LR
   F --> G
 ```
 
-1. **Plan.** The seed decides the site (name, domain, devices), the actions on a virtual timeline, and the facts the answer key is built from.
-2. **Record.** Each host gets its own loopback address. pymodbus PLCs run a physical-process model (see [Process profiles](#process-profiles) below), so polled values evolve over the virtual timeline, and a written setpoint visibly drives the measurements and alarms that follow it. OPC UA tags of a SCADA server and S7 data blocks read the same models. Clients run back-to-back, which captures hours of activity in seconds; payload timestamps (NTP, OPC UA) come from the virtual clock. A UDP marker before each action ties packets to actions. Recordings are cached by plan hash.
-3. **Compose.** Packets keep their recorded order and bytes. Timing is rebuilt causally from device profiles: per-host link latency, PLC processing time, the OS delayed-ACK behaviour and retransmission timeouts. The rest of the realism layer:
-   - IP/MAC/port rewrite with ephemeral ports per OS
-   - ISN remap, TTL by OS minus routed hops, IP-ID behaviour per OS
-   - TCP options and window per OS, recomputed checksums
-   - DNS A records mapped to the final topology
-   - multicast and broadcast discovery traffic gets its group or subnet broadcast address, the matching Ethernet group MAC and the sender OS's TTL, and is seen only from hosts on the sensor segment
-   - only packets visible from the SPAN port are kept
-   - routed traffic carries the gateway MAC
-   - ARP is synthesized
-4. **Answer key and verification.** Facts resolve to frames and timestamps. tshark checks:
-   - no malformed frames, bad checksums or expert errors
-   - no loopback addresses leak (127.0.0.0/8, ::1)
-   - every question's filter matches the capture
+PLCs run a physical-process model, so a written setpoint visibly drives the measurements and alarms that
+follow it. Every answer resolves to frames and is checked with tshark before the run is written. Details,
+reproducibility and long captures (24 h works): [docs/how-it-works.md](docs/how-it-works.md).
 
-### Reproducibility
+## Documentation
 
-- Same `--seed` gives the same plan and the same `answers.json`. With a cached recording, the capture is byte-identical too.
-- A live re-recording on another machine gives the same answers. The capture can differ only in low-level stack details.
-- On medium and hard the seed also draws the story structure: the physical process (four profiles, each with its own register map, units and physical effects) and the number of PLCs. Scenario authors get this through `vars` values `{choose: [...]}` and `{range: [lo, hi]}`.
-- `--base-seed` shares one recording between many `--seed`s. Students then get different IPs, MACs, ports and timing jitter on the same story. Without it, every seed is a fully independent variant.
+- [Web UI](docs/web-ui.md): generation, run pages, downloads, student mode and access codes
+- [Grading and packaging](docs/grading.md): handouts, scoring rules, CTFd, debrief report
+- [SIEM export and detections](docs/siem.md): JSON-lines datasets, Suricata and Sigma rules, Zeek logs
+- [Scenarios](docs/scenarios.md): scenario and level tables, actor types, process profiles, writing a scenario
+- [How it works](docs/how-it-works.md): pipeline, reproducibility, long captures, tests, platform notes
+- [CONTRIBUTING.md](CONTRIBUTING.md), [ROADMAP.md](ROADMAP.md), [design notes](docs/DESIGN.md)
 
-### Long captures
-
-`--duration` takes any length (`24h` works). The composer, the verification and the SIEM export
-stream through the capture with a window of a few minutes, so memory does not grow with the
-capture; what stays is the plan itself (about 0.15 KB per action). Measured on
-`ot-baseline-operations` hard in WSL 2 (Ryzen 7 7700, cached recording for the later stages):
-
-| duration | actions | packets | capture | record | compose | verify | export | peak RSS |
-|---|---|---|---|---|---|---|---|---|
-| 2 h | 0.27 M | 1.05 M | 116 MB | 2.2 min | 15 s | 20 s | 30 s | 0.19 GB |
-| 6 h | 0.82 M | 3.15 M | 348 MB | 6.7 min | 46 s | 64 s | 95 s | 0.33 GB |
-| 24 h | 3.27 M | 12.6 M | 1.4 GB | 23 min | 3.1 min | 4.6 min | 6.9 min | 0.93 GB |
-
-Recording time grows linearly (about 2,000-2,300 actions per second, no capture drops). Before
-streaming, composing alone peaked at 1.3 GB (2 h) and 3.5 GB (6 h), and 24 h ran out of a 13 GB limit.
-
-## Writing a scenario
-
-Scenarios are YAML files under `scenarios/<line>/<id>/scenario.yaml` (CC-BY-4.0). They are validated by
-[`scenario.schema.json`](src/pcapforge/scenario/scenario.schema.json); add the
-`# yaml-language-server: $schema=...` header line for editor completion. The full authoring guide
-(topology, actors, `${}` references and `when`, difficulty knobs, questions, testing checklist) is in
-[CONTRIBUTING.md](CONTRIBUTING.md#writing-a-scenario). The main sections:
-
-```yaml
-schema: pcapforge/scenario@1
-id: ot-modbus-write-manipulation
-line: ot
-mitre:
-  - {framework: ics, id: T0836, name: Modify Parameter}
-topology:
-  sensor: control                               # SPAN port location
-  subnets: [{id: control, pool: 10.0.0.0/8, prefix: 24}]
-  hosts:
-    - {id: plc, count: "${vars.plc_count}", device: [schneider-m340, siemens-s7-1200], subnet: control}
-actors:
-  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: water_treatment}}
-  - {id: change, type: modbus.writer, hosts: "${vars.writer_host}", incident: true, params: {...}}
-difficulty:
-  easy: {duration: 15m, impairments: {retransmit_rate: 0}, vars: {plc_count: 2, writer_host: rogue}}
-questions:
-  - id: source_ip
-    text: Which IP address issued the unauthorized Modbus write requests?
-    answer: "${facts.change.source.ip}"
-    check: {filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip}", expect: {min: 1}}
-    hunt:                                       # optional, rendered into detections/hunting.md
-      dataset: modbus
-      spl: "index=* sourcetype=pcapforge:modbus write=true | stats count BY src, dest"
-      kql: "write : true"
-      look_for: Writers other than the engineering workstation.
-```
-
-Built-in actor types:
-- `modbus.server`
-- `modbus.poller`
-- `modbus.operator`
-- `modbus.writer`
-- `dns.server`, `dns.client`
-- `ntp.server`, `ntp.client`
-- `s7.server`, `s7.client` (Siemens S7comm on ISO-TSAP port 102, optional extra `s7`): an S7-1200/1500 CPU whose data blocks mirror its process model (DB1 measurements and DB2 setpoints as REAL, DB3 status bits) and whose SZL identity (order code, firmware, module name, serial) follows the device profile; the client keeps one session per PLC (COTP connect, setup communication, SZL identification), reads the DBs with cyclic multi-item Read Var jobs and the CPU state (SZL 0x0424) every `szl_interval` seconds. `params: {process, rack, slot}` / `{targets, interval, jitter, dbs, identify, szl_interval}`
-- `opcua.server`, `opcua.client` (OPC UA binary on port 4840, SecurityPolicy None, optional extra `opcua`): a SCADA / OPC UA server that publishes the process points of the PLCs in `sources` (hosts of a `modbus.server`) as tags `ns=2;s=PLC01.clearwell_level`, grouped per PLC into `Measurements`, `Setpoints`, `Commands` and `Status`, with values from the PLC's process model at the request's virtual time and its BuildInfo from the device profile's `identity`; the client (historian / MES collector) opens one long-lived session (Hello, OpenSecureChannel, CreateSession, ActivateSession, NamespaceArray read, browse of the tag tree), creates one subscription per PLC with monitored items per tag group, sends Publish requests every `publishing_interval`, reads ServerStatus State/CurrentTime every `keepalive_interval` and renews the secure channel at 75 % of `token_lifetime`. `params: {sources}` / `{server, publishing_interval, keepalive_interval, token_lifetime, jitter, application, product_uri}`
-- `dhcp.server`, `dhcp.client` (DHCPv4, RFC 2131): the server (e.g. the firewall) leases addresses from `pool` on one subnet and hands out router, DNS, domain and NTP; static hosts on that subnet stay outside the pool. A client either holds a lease from before the capture and renews it at T1, or joins at `join` (DISCOVER / OFFER / REQUEST / ACK from 0.0.0.0 to 255.255.255.255, ARP address conflict detection, then a DHCPINFORM on Windows) and can leave at `leave` with a DHCPRELEASE. Message formats follow the OS client (`style`: `windows`, `dhcpcd`). `params: {subnet, pool, lease, dns, ntp}` / `{server, join, leave, release, style}`
-- `iec104.server`, `iec104.client` (IEC 60870-5-104 on port 2404): a substation RTU whose information objects mirror its process (single points 1001+, measured short floats 2001+, setpoint feedback 3001+, integrated totals for totaliser points, single commands for writable coils and short-float setpoint commands for writable setpoints); it answers STARTDT / TESTFR, general interrogation (ACTCON, COT 20 data, ACTTERM), counter interrogation (freeze, then read: COT 37 totals with sequence numbers) and clock sync, executes commands on its process (select-before-operate for single commands; ACTCON, ACTTERM and the state change as return information), sends measured values periodically (COT 1, `cyclic_s`) and spontaneously with CP56Time2a time tags when a value moves beyond `deadband` (COT 3), and holds I-frames once k = 12 are unacknowledged. The master (SCADA) keeps one session per RTU: STARTDT, clock sync, GI, then S-frame acknowledgements about every `t2_s`, TESTFR after `t3_s` of silence, a periodic GI (`gi_interval_s`), counter interrogations (`counter_interval_s`) and in-band operator commands: setpoint changes (`setpoint_interval_s`) and switching (`switching_interval_s`; 0 disables either).
-- `dnp3.server`, `dnp3.client` (DNP3 over TCP port 20000, polled by default): an RTAC outstation with binary inputs (g1v2, events g2v2), analog inputs (g30v5 float, events g32v7), counters (g20v1), binary output and analog output status (g10v2, g40v3) from its process, link-layer CRCs, IIN bits (restart, need time, class events) and event confirms. The master disables unsolicited, runs an integrity poll, clears the restart bit, synchronises time (record current time + write g50v3), then polls events every `event_s` and integrity every `integrity_s`. With `unsolicited: true` on both: the outstation opens each session with a null unsolicited response, the master enables unsolicited reporting of classes 1-3 after its startup, and the outstation scans its process every `scan_s` and reports events in unsolicited responses (own sequence numbers, each confirmed by the master; repeated after `confirm_timeout_s` without a confirm); event and integrity polls stay as a slow backstop.
-- `bacnet.server`, `bacnet.client` (BACnet/IP on UDP 47808): building controllers (Siemens PXC) with analog-input / analog-value / binary-input / binary-value objects for the process points (BACnet engineering units, descriptions) and a device object from the device profile; Who-Is / I-Am broadcasts, ReadProperty and ReadPropertyMultiple, SubscribeCOV and unconfirmed COV notifications when a value moves by `cov_increment`, WriteProperty on commandable values (16-slot priority array over the relinquish default; the winner drives the process). The workstation discovers the controllers, reads the device and point database, subscribes to `cov` analog inputs, polls present values every `poll_s` and makes `writes` approved setpoint overrides at `write_priority` (read back, relinquished after `relinquish_s`). A client with `bbmd` sits on another subnet and registers as a foreign device with that controller (Register-Foreign-Device every `fd_ttl_s`, broadcasts via Distribute-Broadcast-To-Network, Forwarded-NPDUs both ways).
-- `enip.server`, `enip.client` (EtherNet/IP explicit messaging on TCP/UDP 44818): a CompactLogix whose controller-scoped tags (REAL / DINT / BOOL) mirror its process; ListIdentity, ListServices, RegisterSession, Identity Get_Attribute_All, Forward_Open / Forward_Close (class 3) and connected Multiple Service Packet Read Tag requests with sequence counts. The HMI browses with a ListIdentity broadcast, opens one connection per controller and reads every tag each `interval`.
-- `enip.scanner`, `enip.adapter` (EtherNet/IP class 1 implicit I/O on UDP 2222): the Logix (scanner) opens a point-to-point class 1 connection to a PowerFlex 525 drive's embedded adapter at a time drawn from `open_at` (seconds; RegisterSession, Forward_Open to the Assembly object), then O->T (Logic Command, speed reference from the controller's process) and T->O (Logic Status, feedback, Datalinks) run cyclically every `rpi_ms`; the composer continues the cyclic stream after the recorded first exchange.
-- `windows.chatter` (names the site DNS does not know: NXDOMAIN, then LLMNR, NBNS and mDNS fallback; SSDP; browser host announcements; `params: {rate}`)
-
-Device and OS-stack profiles are in [`profiles/devices.yaml`](src/pcapforge/profiles/devices.yaml). Their OUIs are checked against Wireshark's manufacturer database. Process models are in [`profiles/processes/`](src/pcapforge/profiles/processes/). New actors go in `src/pcapforge/actors/` and implement `plan()`, plus `serve()` for servers or `execute()` for clients. Actors that send one-way multicast or broadcast datagrams list the recording sinks they use in `sinks` (see `topology.SINKS`). Actors built on a third-party library declare it as an optional extra in `requires` and import it lazily. [CONTRIBUTING.md](CONTRIBUTING.md#extending-the-engine) has the details.
-
-### Process profiles
-
-A `modbus.server` actor serves one process profile (`params: {process: <id>}`) from `src/pcapforge/profiles/processes/`. Each is a register map with normal bands and a deterministic process model, so polled values move over the virtual day and a written setpoint drives the measurements and alarm bits that depend on it:
-
-- `water_treatment`: drinking-water clearwell and chlorination (level, chlorine residual, pH, pump speed, daily inlet/outlet flow).
-- `wastewater_treatment`: activated-sludge aeration basin and clarifier. The DO setpoint and the daily influent curve drive blower speed, dissolved oxygen and effluent ammonia; return-sludge flow sets the sludge blanket level; plus pH, MLSS and alarm bits.
-- `hvac_building`: AHU, three fan-coil zones and a chiller. A daily occupancy curve and outdoor temperature load the zones; zone temperatures track their setpoints while the fan-coil valves, CO2-driven outdoor-air damper, chilled-water return and chiller load absorb the load; plus fan and chiller status bits.
-- `power_substation`: 33/11 kV transformer with on-load tap changer and four feeders. Feeder breaker commands (coils) are mirrored by status bits (discretes). The load curve drives feeder currents, power factor, Mvar and transformer oil/winding temperature. The tap-position setpoint moves the busbar voltage (1.25 % per step) and can trip the voltage alarms.
+The documentation site (these pages plus reference pages generated from the code: CLI, actor types,
+device and process profiles, scenario schema, answers.json keys) builds with MkDocs:
+`pip install -e .[docs]` then `mkdocs build --strict` (or `mkdocs serve`).
 
 ## Development
 
@@ -501,57 +157,8 @@ $ pip install -e .[test,opcua,s7]
 $ pytest
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the defensive policy, the setup on Windows and Linux, and the
-checklist for pull requests.
-
-The documentation site (this README, CONTRIBUTING, ROADMAP, the design notes and reference pages generated from
-the code: CLI, actor types and their params, device and process profiles, scenario schema, answers.json keys)
-builds with MkDocs: `pip install -e .[docs]` then `mkdocs build --strict` (or `mkdocs serve`). The generator
-is `scripts/gen_docs.py`, loaded as a MkDocs hook; CI builds the site on every push.
-
-The end-to-end tests record real traffic, so they need tshark 4.4+, dumpcap (or tcpdump) and loopback capture rights; they are skipped otherwise. Medium and hard also need the `opcua` and `s7` extras. `tests/test_grade.py` (grading rules, the student zip holds no answer material) needs neither. The end-to-end tests check that:
-- every capture passes the tshark integrity checks and all answer-key filters;
-- every write in the key points at a frame with the right source, target, function, register and value;
-- Scapy recomputes the same checksums;
-- the same seed gives byte-identical output;
-- `siem/modbus.jsonl` flags exactly the incident writes as out of band and the operator writes as in band, and `siem/flows.jsonl` accounts for every IP packet and byte;
-- with `suricata` on PATH (CI installs it), the generated rules alert on every incident write and on no operator write, and the unapproved-writer rule fires on easy/medium but not hard;
-- OPC UA runs only between the historian and the SCADA server (medium/hard: mid-session Publish and watchdog Read; easy: none), every message fits one Ethernet segment, every payload timestamp is on the scenario clock and the published tag values follow the process model (`tests/test_opcua.py`, which also records a full session from Hello to subscriptions and secure-channel renewals);
-- S7comm sessions decode and their data blocks mirror the process (`tests/test_s7.py`);
-- recording without an optional extra stops before capturing, with the install command.
-
-Platform notes:
-- **Windows:** Npcap's `\Device\NPF_Loopback` adapter is used; administrator rights are not needed.
-- **Linux:** recording uses `lo`. Docker is not required. Linux delays loopback ACKs and piggybacks them on
-  the next segment; before recording, pcapforge adds a `quickack 1` route for `127.77.0.0/16` so every
-  segment is acknowledged at once, as on Windows, and the composer models each device's delayed ACK.
-  Without it a Linux capture would lose most pure ACKs (easy: ~8k instead of ~14k packets). The rootless
-  way needs neither sudo nor setcap:
-
-  ```console
-  $ unshare -rn pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42
-  $ unshare -rn pytest
-  ```
-
-  `unshare -rn` runs the command as root of a new user and network namespace with its own `lo`:
-  dumpcap/tcpdump can capture it, and pcapforge brings it up and adds the route there. Both disappear when
-  the command exits. This needs unprivileged user namespaces (WSL 2 and most distributions allow them;
-  Ubuntu 23.10+ can restrict them with AppArmor, `kernel.apparmor_restrict_unprivileged_userns`). Without a
-  namespace, give dumpcap capture rights and add the route once per boot (see Requirements). tshark warns
-  about running as root inside the namespace; the warning is harmless.
-- **macOS:** add loopback aliases for `127.77.0.0/16` first.
-
-## Roadmap
-
-The full, prioritised plan is in [ROADMAP.md](ROADMAP.md). Highlights:
-
-- IT line, using benign equivalents only:
-  - HTTPS beaconing to a local test server
-  - DNS tunnelling against a local resolver
-  - port scan followed by authentication failures against local test services
-  - volumetric floods against a local sink
-- More OT incident scenarios over the telecontrol protocols (IEC 104, DNP3, BACnet, EtherNet/IP).
-- Optional LLM "director" that drafts scenario YAML from a text description. It will never generate packets.
+The end-to-end tests record real traffic and are skipped without tshark 4.4+ and capture rights. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the setup on Windows and Linux and the pull request checklist.
 
 ## License
 
