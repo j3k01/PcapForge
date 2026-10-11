@@ -284,8 +284,9 @@ NICE_STEPS = (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 108
 
 def section(name: str, directory: Path, answers: dict) -> str:
     """The run page's traffic block: strip chart (or the scan button) and top conversations."""
-    body = ["<h2>traffic</h2>"]
     data = load(directory, answers)
+    run_href = f"/runs/{quote(name)}"
+    body = [views.heading("traffic", *([(f"{run_href}/csv/traffic.csv", "traffic.csv")] if data else []))]
     if data is None:
         stale = (directory / CACHE).is_file()
         body.append('<div class="traffic-note">' + _scan_button(name, "scan") + '<span class="dim">'
@@ -302,7 +303,10 @@ def section(name: str, directory: Path, answers: dict) -> str:
     flows = directory / "siem" / "flows.jsonl"
     if flows.is_file():
         total, top = top_flows(flows)
-        body.append(f"<h2>top conversations ({len(top)} of {total:,} flows)</h2>" + views.scroll(_flows_table(top)))
+        body.append(views.heading(f"top conversations ({len(top)} of {total:,} flows)",
+                                  (f"{run_href}/csv/flows.csv", "flows.csv"),
+                                  (f"{run_href}/files/siem/flows.jsonl", "flows.jsonl"))
+                    + views.scroll(_flows_table(top)))
     return "".join(body)
 
 

@@ -170,6 +170,16 @@ svg.traffic { width: 100%; height: auto; margin: 6px 0 2px; font: 12px "Cascadia
 .traffic-note { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
 .traffic-note form { margin: 0; }
 
+.sec { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 16px; margin: 28px 0 8px; }
+.sec h2 { margin: 0; }
+.dls { display: flex; flex-wrap: wrap; gap: 0 10px; font-size: 12px; }
+a.dl { white-space: nowrap; padding: 1px 4px; }
+a.dl::before { content: "[ \2193  "; color: var(--dim); }
+a.dl::after { content: " ]"; color: var(--dim); }
+a.dl:hover, a.dl:focus-visible { background: var(--hi); color: var(--bg); text-decoration: none; outline: none; }
+a.dl:hover::before, a.dl:hover::after, a.dl:focus-visible::before, a.dl:focus-visible::after { color: var(--bg); }
+.files a.dl { font-size: 12px; }
+
 @media (max-width: 640px) {
   header .bar { gap: 2px 18px; }
   .meta { margin-left: 0; flex-basis: 100%; padding: 0; }
@@ -184,13 +194,14 @@ svg.traffic { width: 100%; height: auto; margin: 6px 0 2px; font: 12px "Cascadia
     border-bottom: 1px dashed var(--line); }
   .actions th, .actions td { padding: 0; }
   .actions td:last-child { flex-basis: 100%; }
+  a.dl { padding: 6px 4px; }
   .scroll > table.grid:has(thead th:nth-child(5)) { min-width: 720px; }
 }
 
 @media print {
   :root { --bg: #fff; --panel: #fff; --fg: #000; --hi: #000; --dim: #444; --line: #999; --line-hi: #000;
     --amber: #000; --red: #000; color-scheme: light; }
-  header, form, button, details > summary::before { display: none; }
+  header, form, button, .dls, a.dl, details > summary::before { display: none; }
   main { max-width: none; padding: 0; }
   .grid th, .grid td { border-bottom: 1px solid #999; }
   .scroll { overflow: visible; }

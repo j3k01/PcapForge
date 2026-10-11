@@ -4,8 +4,10 @@ headers, and escapes run content."""
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import threading
+import zipfile
 
 import pytest
 
@@ -71,11 +73,23 @@ def test_run_page_escapes_run_content_and_serves_its_files(ui):
     f"/runs/{RUN}/files/..%2fsecret.txt",
     "/runs/../files/secret.txt",
     "/runs/..%2f/files/secret.txt",
+    f"/runs/{RUN}/zip/../",
+    f"/runs/{RUN}/zip/%2e%2e/",
+    f"/runs/{RUN}/zip/..%2f",
 ])
 def test_files_outside_the_run_directory_are_not_served(ui, path):
     _app, port = ui
     status, body = _request(port, "GET", path)
     assert status == 404 and b"outside the run" not in body
+
+
+def test_run_zip_streams_every_file_of_the_run_under_its_name(ui):
+    _app, port = ui
+    status, body = _request(port, "GET", f"/runs/{RUN}/zip/")
+    assert status == 200
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        assert sorted(zf.namelist()) == [f"{RUN}/answers.json", f"{RUN}/capture.pcap"]
+        assert zf.read(f"{RUN}/capture.pcap") == b"\xd4\xc3\xb2\xa1"
 
 
 def test_foreign_host_and_cross_origin_posts_are_refused(ui):

@@ -124,7 +124,11 @@ It works on the same output directory as `generate` (`--out`, default `out`):
   `siem/flows.jsonl`), the timeline, the answer key behind a "reveal answers" toggle, the files (download),
   the students' submissions with the class results, and buttons for verify, SIEM / Zeek export, traffic,
   grade, the debrief report (with the class results once graded), the student / instructor zips and the
-  CTFd export.
+  CTFd export. Each section heading has its downloads: `hosts.csv`, `traffic.csv` (packets per protocol and
+  time bucket, once scanned), `flows.csv` (every flow, not only the top ones) and `flows.jsonl`,
+  `timeline.csv`, `answer-key.csv` (questions, answers, hints, tshark filters) and `answers.json`,
+  `submissions.zip`, `grades.csv` and `grades.json`, the capture, and the whole run as one zip; every
+  directory (`siem/`, `zeek/`, ...) downloads as a zip too. CSV files are UTF-8 with a byte order mark.
 
 `pcapforge ui --student [--show-score]` is the student side on the same output directory, and nothing else:
 students sign in, see their exercises (runs whose seed is their login, otherwise all runs), download the

@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from pcapforge.i18n import LANGS
 from pcapforge.scenario import ScenarioError, discover
-from pcapforge.ui import batch, roster, views
+from pcapforge.ui import batch, downloads, roster, views
 from pcapforge.ui.jobs import Job, Jobs
 
 _NAME = re.compile(r"[A-Za-z0-9._-]+")
@@ -233,6 +233,10 @@ class Handler(BaseHTTPRequestHandler):
                 if m.group(2) not in zips:
                     return self._not_found()
                 return self._send_file(zips[m.group(2)], "application/zip", attachment=True)
+            if m := re.fullmatch(r"/runs/([^/]+)/csv/([a-z-]+)\.csv", path):
+                return self._run_csv(m.group(1), m.group(2))
+            if m := re.fullmatch(r"/runs/([^/]+)/zip/(.*)", path):
+                return self._run_zip(m.group(1), m.group(2))
             if path == "/students":
                 return self._students()
             if path == "/jobs":
@@ -338,6 +342,37 @@ class Handler(BaseHTTPRequestHandler):
             mimetypes.guess_type(target.name)[0] or "application/octet-stream")
         self._send_file(target, kind, attachment=True)
 
+    def _run_csv(self, name: str, kind: str) -> None:
+        directory = self.app.run_dir(name)
+        if directory is None or kind not in downloads.CSV:
+            return self._not_found()
+        answers = json.loads((directory / "answers.json").read_text(encoding="utf-8"))
+        body = downloads.CSV[kind](directory, answers)
+        if body is None:  # the section has no data yet (no timeline, no scan, no flows.jsonl, not graded)
+            return self._not_found()
+        self._headers(HTTPStatus.OK, "text/csv; charset=utf-8", len(body))
+        self.send_header("Content-Disposition", f'attachment; filename="{name}_{kind}.csv"')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _run_zip(self, name: str, rel: str) -> None:
+        """A directory of the run (``rel`` empty: the whole run) as a zip, streamed without a length."""
+        directory = self.app.run_dir(name)
+        if directory is None:
+            return self._not_found()
+        root = directory.resolve()
+        target = (root / rel).resolve()
+        if not target.is_relative_to(root) or not target.is_dir():
+            return self._not_found()
+        sub = target.relative_to(root).as_posix()
+        filename = name if target == root else f"{name}_{sub.replace('/', '_')}"
+        self._headers(HTTPStatus.OK, "application/zip", None)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}.zip"')
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        downloads.write_zip(target, root, self.wfile)
+
     # -- helpers ------------------------------------------------------------------------
     def _host_ok(self) -> bool:
         if self.allowed_hosts is None or (self.headers.get("Host") or "").lower() in self.allowed_hosts:
@@ -375,10 +410,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _headers(self, status: HTTPStatus, content_type: str, length: int) -> None:
+    def _headers(self, status: HTTPStatus, content_type: str, length: int | None) -> None:
+        """``length`` None: the body ends when the connection closes (a streamed zip)."""
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(length))
+        if length is not None:
+            self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy",

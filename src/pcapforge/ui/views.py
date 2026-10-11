@@ -226,15 +226,33 @@ def run(name: str, directory: Path, answers: dict, packages: dict[str, Path], ac
     if active:
         body.append("<p class=\"busy\">" + " ".join(
             f'<a href="/jobs/{j.id}">{e(j.kind)} {e(j.state)}</a>' for j in active) + "</p>")
+    run_href = f"/runs/{quote(name)}"
     body += ["<h2>actions</h2>", scroll(_actions(name, directory, packages)),
-             "<h2>network</h2>", scroll(topology_svg(topo)), _hosts_table(topo)]
+             heading("network", (f"{run_href}/csv/hosts.csv", "hosts.csv")), scroll(topology_svg(topo)),
+             _hosts_table(topo)]
     from pcapforge.ui.traffic import section as traffic_section  # traffic imports views
     body.append(traffic_section(name, directory, answers))
     timeline = answers.get("timeline", [])
     if timeline:
-        body += [f"<h2>timeline ({len(timeline)})</h2>", _timeline(timeline, capture)]
-    body += [f"<h2>answer key ({len(answers.get('questions', []))} questions)</h2>", _questions(answers)]
-    body += [_submissions(name, directory), "<h2>files</h2>", _files(name, directory)]
+        body += [heading(f"timeline ({len(timeline)})", (f"{run_href}/csv/timeline.csv", "timeline.csv")),
+                 _timeline(timeline, capture)]
+    body += [heading(f"answer key ({len(answers.get('questions', []))} questions)",
+                     (f"{run_href}/csv/answer-key.csv", "answer-key.csv"),
+                     (f"{run_href}/files/answers.json", "answers.json")),
+             _questions(answers)]
+    body += [_submissions(name, directory),
+             heading("files", (f"{run_href}/files/{quote(capture['file'])}", capture["file"]),
+                     (f"{run_href}/zip/", f"{name}.zip")),
+             _files(name, directory)]
+    return "".join(body)
+
+
+def heading(title: str, *downloads: tuple[str, str]) -> str:
+    """``<h2>`` of a run page section with its downloads, (href, file name) each, next to it."""
+    if not downloads:
+        return f"<h2>{e(title)}</h2>"
+    links = "".join(f'<a class="dl" href="{e(href)}" download>{e(label)}</a>' for href, label in downloads)
+    return f'<div class="sec"><h2>{e(title)}</h2><span class="dls">{links}</span></div>'
     return "".join(body)
 
 
@@ -278,11 +296,15 @@ def _submissions(name: str, directory: Path) -> str:
     rows = "".join(f'<tr><td><a href="/runs/{quote(name)}/files/submissions/{quote(p.name)}">{e(p.stem)}</a>'
                    f'{_display(p.stem, known)}</td>'
                    f'<td class="dim nw">{stamp(p.stat().st_mtime)}</td></tr>' for p in paths)
-    body = [f"<h2>submissions ({len(paths)})</h2>",
+    run_href = f"/runs/{quote(name)}"
+    zipped = (f"{run_href}/zip/submissions/", "submissions.zip")
+    body = [heading(f"submissions ({len(paths)})", *([zipped] if paths else [])),
             scroll('<table class="grid">' + head("student", "submitted") + "<tbody>" + rows + "</tbody></table>")
             if paths else '<p class="dim">No files in submissions/.</p>']
     if grades_path.is_file():
-        body += ["<h2>class results</h2>", _class_table(grades_path, paths, known)]
+        body += [heading("class results", (f"{run_href}/csv/grades.csv", "grades.csv"),
+                         (f"{run_href}/files/grades.json", "grades.json")),
+                 _class_table(grades_path, paths, known)]
     return "".join(body)
 
 
@@ -371,8 +393,11 @@ def _entries(name: str, directory: Path, rel: str) -> str:
             size = f"{len(inner)} files, {_size(sum(p.stat().st_size for p in inner))}"
         else:
             size = _size(path.stat().st_size)
+        download = (f'<a class="dl" href="/runs/{quote(name)}/zip/{quote(sub)}" download>zip</a>' if path.is_dir()
+                    else f'<a class="dl" href="/runs/{quote(name)}/files/{quote(sub)}" download>file</a>')
         rows.append(f'<tr><td><a href="/runs/{quote(name)}/files/{quote(sub)}">{e(path.name)}'
-                    f'{"/" if path.is_dir() else ""}</a></td><td class="num">{e(size)}</td></tr>')
+                    f'{"/" if path.is_dir() else ""}</a></td><td class="num">{e(size)}</td>'
+                    f'<td class="num">{download}</td></tr>')
     if not rows:
         return '<p class="dim">Empty directory.</p>'
     return '<table class="grid files"><tbody>' + "".join(rows) + "</tbody></table>"
@@ -380,7 +405,10 @@ def _entries(name: str, directory: Path, rel: str) -> str:
 
 def listing(name: str, directory: Path, rel: str) -> str:
     """Index of a sub-directory of a run (``rel`` ends with a slash)."""
-    return (f'<h1><a href="/runs/{quote(name)}">{e(name)}</a> / {e(rel)}</h1>' + _entries(name, directory, rel))
+    zipped = f'{rel.rstrip("/").replace("/", "_")}.zip'
+    return (f'<h1><a href="/runs/{quote(name)}">{e(name)}</a> / {e(rel)}</h1>'
+            f'<p class="dls"><a class="dl" href="/runs/{quote(name)}/zip/{quote(rel)}" download>{e(zipped)}</a></p>'
+            + _entries(name, directory, rel))
 
 
 # -- topology --------------------------------------------------------------------------
