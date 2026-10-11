@@ -11,6 +11,7 @@ hosts / services are loaded.
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import subprocess
@@ -35,13 +36,31 @@ class ZeekError(RuntimeError):
 
 
 def find_zeek() -> list[str]:
-    """Command prefix that runs Zeek: ``PCAPFORGE_ZEEK``, ``zeek`` on PATH or under /opt/zeek,
-    else empty (the caller falls back to Docker)."""
+    """Command prefix that runs Zeek: ``PCAPFORGE_ZEEK``, ``zeek`` on PATH or under /opt/zeek, on Windows
+    a Zeek in the default WSL distribution, else empty (the caller falls back to Docker)."""
     if env := os.environ.get("PCAPFORGE_ZEEK"):
         return [env]
     if found := shutil.which("zeek"):
         return [found]
-    return [path for path in LOCATIONS if Path(path).is_file()][:1]
+    if local := [path for path in LOCATIONS if Path(path).is_file()][:1]:
+        return local
+    return _wsl_zeek() if os.name == "nt" else []
+
+
+@functools.cache
+def _wsl_zeek() -> list[str]:
+    """``wsl.exe -e <zeek>`` when the default WSL distribution has Zeek on PATH or under /opt/zeek."""
+    wsl = shutil.which("wsl")
+    if wsl is None:
+        return []
+    probe = 'command -v zeek || for p in "$@"; do [ -x "$p" ] && echo "$p" && break; done'
+    try:
+        proc = subprocess.run([wsl, "-e", "sh", "-c", probe, "sh", *LOCATIONS],
+                              capture_output=True, timeout=120, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    found = proc.stdout.decode("utf-8", "replace").strip().splitlines()
+    return [wsl, "-e", found[0]] if proc.returncode == 0 and found and found[0].startswith("/") else []
 
 
 def site_script(subnets: list[str]) -> str:
@@ -56,8 +75,8 @@ def site_script(subnets: list[str]) -> str:
 def require_zeek() -> None:
     """Fail fast when neither a local Zeek nor Docker is available."""
     if not find_zeek() and shutil.which("docker") is None:
-        raise ToolNotFound("'zeek' not found: install Zeek (zeek on PATH, /opt/zeek/bin/zeek or PCAPFORGE_ZEEK) "
-                           "or Docker for the zeek/zeek image")
+        raise ToolNotFound("'zeek' not found: install Zeek (zeek on PATH, /opt/zeek/bin/zeek or PCAPFORGE_ZEEK; "
+                           "on Windows in WSL) or Docker for the zeek/zeek image")
 
 
 def _command(pcap: Path, out_dir: Path) -> list[str]:
@@ -65,7 +84,13 @@ def _command(pcap: Path, out_dir: Path) -> list[str]:
     require_zeek()
     local = find_zeek()
     if local:
-        return [*local, "-D", "-r", str(pcap.resolve()), SITE_SCRIPT]
+        # Relative to the working directory, so a Zeek in WSL (which maps the Windows working directory to
+        # /mnt/<drive>/...) reads the same file; absolute only when Windows puts them on different drives.
+        try:
+            target = Path(os.path.relpath(pcap.resolve(), out_dir.resolve())).as_posix()
+        except ValueError:
+            target = str(pcap.resolve())
+        return [*local, "-D", "-r", target, SITE_SCRIPT]
     docker = shutil.which("docker")
     run_dir = pcap.resolve().parent
     inner = out_dir.resolve().relative_to(run_dir).as_posix()

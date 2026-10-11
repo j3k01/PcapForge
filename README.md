@@ -327,9 +327,11 @@ logs describe the site. Zeek runs with `-D` (deterministic mode), so the same ca
 byte-identical logs; `packet_filter.log` (wall-clock start time only) is not kept. Zeek has no default
 analyzer for S7comm, OPC UA, IEC 104, BACnet or EtherNet/IP; those flows appear in `conn.log` only.
 
-Zeek is found as `PCAPFORGE_ZEEK` (path to the binary), `zeek` on `PATH` or `/opt/zeek/bin/zeek`; otherwise
+Zeek is found as `PCAPFORGE_ZEEK` (path to the binary), `zeek` on `PATH` or `/opt/zeek/bin/zeek`, and on Windows
+in the default WSL distribution (`zeek` on its `PATH` or `/opt/zeek/bin/zeek`, run through `wsl.exe`); otherwise
 the official `zeek/zeek:lts` Docker image is used (`PCAPFORGE_ZEEK_IMAGE` overrides it; the container has
-no network). Zeek does not run natively on Windows: use Docker Desktop or run pcapforge under WSL.
+no network). Zeek does not run natively on Windows. In WSL Ubuntu 24.04 the packages CI uses install it to
+`/opt/zeek` (`zeek-lts-core` from the `security:zeek` repository, see `.github/workflows/ci.yml`).
 
 ```console
 $ pcapforge generate -s ot-baseline-operations -d medium --seed zeek-smoke --duration 10m --siem --zeek
