@@ -34,12 +34,21 @@ jobs:
             done
           done
           pcapforge package runs/*/ --out dist
+      - name: Release notes (this version's CHANGELOG section and the sample captures)
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '/^## /{p = ($2 == v); next} p' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no '## $version' section" >&2; exit 1; }
+          cat >> notes.md <<'EOF'
+
+          ### Sample captures
+          Generated with `--seed release`, two zips per scenario and difficulty:
+          - `<run>-student.zip`: `capture.pcap`, `briefing.md` (handout) and `submission_template.yaml`
+            (fill it in, then grade it with `pcapforge grade answers.json <submission>`).
+          - `<run>-instructor.zip`: the whole run, including `answers.json`, `siem/` and `detections/`.
+            Keep it away from students.
+          EOF
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
-          body: |
-            Sample captures generated with `--seed release`, two zips per scenario and difficulty:
-            - `<run>-student.zip`: `capture.pcap`, `briefing.md` (handout) and `submission_template.yaml`
-              (fill it in, then grade it with `pcapforge grade answers.json <submission>`).
-            - `<run>-instructor.zip`: the whole run, including `answers.json`, `siem/` and `detections/`.
-              Keep it away from students.
+          body_path: notes.md

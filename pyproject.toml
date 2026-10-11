@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pcapforge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Generate realistic, labeled PCAPs with answer keys for blue-team and detection-engineering training"
 readme = "README.md"
 license = "Apache-2.0"

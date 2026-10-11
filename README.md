@@ -144,7 +144,7 @@ reproducibility and long captures (24 h works): [docs/how-it-works.md](docs/how-
 - [SIEM export and detections](docs/siem.md): JSON-lines datasets, Suricata and Sigma rules, Zeek logs
 - [Scenarios](docs/scenarios.md): scenario and level tables, actor types, process profiles, writing a scenario
 - [How it works](docs/how-it-works.md): pipeline, reproducibility, long captures, tests, platform notes
-- [CONTRIBUTING.md](CONTRIBUTING.md), [ROADMAP.md](ROADMAP.md), [design notes](docs/DESIGN.md)
+- [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md), [ROADMAP.md](ROADMAP.md), [design notes](docs/DESIGN.md)
 
 The documentation site (these pages plus reference pages generated from the code: CLI, actor types,
 device and process profiles, scenario schema, answers.json keys) builds with MkDocs:
