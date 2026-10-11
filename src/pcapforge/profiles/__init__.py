@@ -35,12 +35,14 @@ class LinkLocal:
 
 @dataclass(frozen=True)
 class Ipv6:
-    """IPv6 of a stack that has it enabled (randomized interface identifiers, SLAAC)."""
+    """IPv6 of a stack that has it enabled (SLAAC)."""
 
     multicast_hop_limit: dict[str, int]  # per link-local group the host sends to
     groups: tuple[str, ...]              # groups joined besides the solicited-node group (MLDv2)
     router_solicitations: int            # Router Solicitations when the interface comes up
     rs_interval_s: float
+    random_iid: bool = True              # randomized interface identifiers; False: modified EUI-64
+    temporary: bool = True               # an RFC 8981 temporary address next to the stable one
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,12 @@ class Device:
     browser: Browser | None = None  # None: the device sends no browser announcements
     link_mbps: int = 100            # NIC speed: spacing of back-to-back segments on the wire
     ipv6_router: Ipv6Router | None = None  # None: the device does not advertise itself as IPv6 router
+    ipv6_enabled: bool = True       # devices.yaml `ipv6: false`: IPv6 off although the stack has it
+
+    @property
+    def ipv6(self) -> Ipv6 | None:
+        """The device's IPv6 behaviour (None: no IPv6)."""
+        return self.stack.ipv6 if self.ipv6_enabled else None
 
 
 @cache
@@ -142,7 +150,9 @@ def stack(name: str) -> Stack:
         initial_window=raw["initial_window"],
         ipv6=Ipv6(multicast_hop_limit=dict(raw["ipv6"]["multicast_hop_limit"]), groups=tuple(raw["ipv6"]["groups"]),
                   router_solicitations=raw["ipv6"]["router_solicitations"],
-                  rs_interval_s=raw["ipv6"]["rs_interval_s"]) if "ipv6" in raw else None,
+                  rs_interval_s=raw["ipv6"]["rs_interval_s"],
+                  random_iid=raw["ipv6"].get("random_iid", True),
+                  temporary=raw["ipv6"].get("temporary", True)) if "ipv6" in raw else None,
         syn_rto_s=float(raw.get("syn_rto_s", 1.0)),
         drops_unsolicited=bool(raw.get("drops_unsolicited", False)),
     )
@@ -166,6 +176,7 @@ def device(name: str) -> Device:
         if "browser" in raw else None,
         link_mbps=raw["link_mbps"],
         ipv6_router=_ipv6_router(raw["ipv6_router"]) if "ipv6_router" in raw else None,
+        ipv6_enabled=bool(raw.get("ipv6", True)),
     )
 
 

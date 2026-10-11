@@ -264,8 +264,11 @@ def test_windows_hosts_and_the_router_show_an_ipv6_baseline_on_the_sensor_segmen
         return
     dual = mode == "dual"
     sensor = next(s for s in answers["topology"]["subnets"] if s["sensor"])
-    windows = {i["mac"] for h in answers["topology"]["hosts"] if device(h["device"]).stack.ipv6
-               for i in h["interfaces"] if i["subnet"] == sensor["id"]}
+    ipv6_hosts = [h for h in answers["topology"]["hosts"] if device(h["device"]).ipv6]
+    windows = {i["mac"] for h in ipv6_hosts for i in h["interfaces"] if i["subnet"] == sensor["id"]}
+    # Embedded Linux controllers (PLCnext, WAGO, RTAC): modified EUI-64 identifiers, no temporary address.
+    eui64 = {i["mac"] for h in ipv6_hosts if not device(h["device"]).ipv6.random_iid
+             for i in h["interfaces"] if i["subnet"] == sensor["id"]}
     router = next(i["mac"] for h in answers["topology"]["hosts"] for i in h["interfaces"]
                   if i["subnet"] == sensor["id"] and i["ip"] == sensor["gateway"])
     hop_limits = {"133": 255, "134": 255, "135": 255, "136": 255, "143": 1, "5355": 1, "5353": 255, "547": 1}
@@ -307,8 +310,18 @@ def test_windows_hosts_and_the_router_show_an_ipv6_baseline_on_the_sensor_segmen
     # (the sensor may miss one of the DAD solicitations). Dual-stack hosts were configured before.
     solicited = {r[1] for r in rows if r[6] == "133"}
     assert dual or solicited
-    assert all(1 <= len(slaac.get(mac, ())) <= 2 for mac in solicited)
-    assert sum(len(addresses) for addresses in slaac.values()) >= 2 * len(solicited) - 1
+    assert all(1 <= len(slaac.get(mac, ())) <= (1 if mac in eui64 else 2) for mac in solicited)
+    assert sum(len(addresses) for addresses in slaac.values()) >= sum(
+        1 if mac in eui64 else 2 for mac in solicited) - 1
+    for mac in eui64:
+        b = bytes.fromhex(mac.replace(":", ""))
+        iid = bytes((b[0] ^ 2,)) + b[1:3] + b"\xff\xfe" + b[3:]
+        assert address_of.get(mac, str(ipaddress.IPv6Address(b"\xfe\x80" + bytes(6) + iid))) == str(
+            ipaddress.IPv6Address(b"\xfe\x80" + bytes(6) + iid))
+        assert all(ipaddress.IPv6Address(a).packed[8:] == iid for a in slaac.get(mac, ()))
+    # Process traffic stays IPv4: the HMIs and SCADA address the controllers by their IPv4 address.
+    assert not tshark_fields(result.pcap, "ipv6 && (mbtcp || s7comm || enip || dnp3 || iec60870_104)",
+                             ["frame.number"])
     # LLMNR asks the same names over IPv6 as over IPv4.
     v4 = {r[0] for r in tshark_fields(result.pcap, "ip && llmnr", ["dns.qry.name"])}
     assert {r[9] for r in rows if r[7] == "5355"} == v4

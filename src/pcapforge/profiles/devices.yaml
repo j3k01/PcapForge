@@ -71,6 +71,16 @@ stacks:
     rto: {min_ms: 200, plus_rtt: true}    # srtt + max(rto_min, 4 * rttvar)
     initial_window: 10     # RFC 6928, Linux >= 2.6.39
     syn_rto_s: 1.0         # TCP_TIMEOUT_INIT (RFC 6298)
+    # Kernel defaults of an embedded controller: addr_gen_mode 0 (modified EUI-64 interface
+    # identifier for link-local and SLAAC), use_tempaddr 0 (no temporary address), no LLMNR /
+    # mDNS responder, RS: RFC 4861 defaults (max_rtr_solicitations 3, rtr_solicit_interval 4 s).
+    ipv6:
+      multicast_hop_limit: {}
+      groups: []
+      router_solicitations: 3
+      rs_interval_s: 4
+      random_iid: false
+      temporary: false
   vxworks:
     ttl: 64
     df: false
@@ -241,12 +251,14 @@ devices:
     stack: linux
     link_mbps: 1000
     processing_ms: {median: 0.6, sigma: 0.5}
+    ipv6: false  # not modelled: Raspberry Pi OS / desktop Linux use stable-privacy IIDs, temporary addresses, avahi
   linux-laptop:
     vendor: Dell
     ouis: ["70:B5:E8", "F0:1F:AF"]
     stack: linux
     link_mbps: 1000
     processing_ms: {median: 0.3, sigma: 0.5}
+    ipv6: false  # see raspberry-pi
   fortigate:
     vendor: Fortinet
     ouis: ["00:09:0F"]

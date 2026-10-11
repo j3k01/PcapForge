@@ -154,7 +154,10 @@ def test_slaac_addresses_use_the_advertised_prefix_and_pass_dad_before_use(defau
     for host_id, link_local in ipv6.address.items():
         host_mac = mac(ipv6.mac[host_id])
         dads = formed[host_mac]
-        assert len(dads) == 2 and dads[0][1] != dads[1][1], "a stable and a temporary address"
+        if plan.topology.by_id[host_id].device.ipv6.temporary:
+            assert len(dads) == 2 and dads[0][1] != dads[1][1], "a stable and a temporary address"
+        else:  # embedded Linux: one address, modified EUI-64 like the link-local one
+            assert [target.packed[8:] for _, target in dads] == [link_local[8:]]
         first_ra = min(t for t in advertised if t >= ipv6.valid[host_id])
         for t, target in dads:
             assert first_ra < t < first_ra + 0.2
@@ -222,7 +225,8 @@ def test_router_starting_inside_the_capture_runs_dad_joins_all_routers_and_sends
     assert len(solicits) == 3 * len(ipv6.address) and max(solicits) < t0 + 100.0
     dads = [t for t, p, _ in frames if ICMPv6ND_NS in p and p[IPv6].src == "::" and p.src != router.mac
             and not p[ICMPv6ND_NS].tgt.startswith("fe80::")]
-    assert len(dads) == 2 * len(ipv6.address) and min(dads) > advertised[0]
+    expected = sum(2 if plan.topology.by_id[h].device.ipv6.temporary else 1 for h in ipv6.address)
+    assert len(dads) == expected and min(dads) > advertised[0]
 
 
 def test_same_seed_gives_identical_frames_and_another_seed_another_prefix(default):

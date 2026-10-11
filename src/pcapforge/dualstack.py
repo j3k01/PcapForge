@@ -51,7 +51,7 @@ def hosts(plan: Plan) -> frozenset[str]:
     joining = {a.host for a in plan.actions if a.op == JOIN_OP}
     return frozenset(
         h.id for h in plan.topology.hosts
-        if h.device.stack.ipv6 is not None and h.device.browser is not None and not h.router
+        if h.device.ipv6 is not None and h.device.browser is not None and not h.router
         and h.id not in joining and routed_by_ipv6_router(plan, h.subnets[0]))
 
 

@@ -244,9 +244,12 @@ class Ipv6:
         self.address: dict[str, bytes] = {}
         if plan.vars.get("ipv6"):
             for host in topology.hosts:
-                if host.device.stack.ipv6 is not None and topology.sensor in host.subnets and not host.router:
-                    iid = rng.getrandbits(64) or 1
-                    self.address[host.id] = LINK_LOCAL + iid.to_bytes(8, "big")
+                if host.device.ipv6 is not None and topology.sensor in host.subnets and not host.router:
+                    if host.device.ipv6.random_iid:
+                        iid = (rng.getrandbits(64) or 1).to_bytes(8, "big")
+                    else:
+                        iid = eui64(mac_bytes(host.interface_on(topology.sensor).mac))
+                    self.address[host.id] = LINK_LOCAL + iid
         self.hosts = {h.id: h for h in topology.hosts if h.id in self.address}
         self.mac = {hid: mac_bytes(h.interface_on(topology.sensor).mac) for hid, h in self.hosts.items()}
         self.up: dict[str, float] = {}
@@ -287,7 +290,7 @@ class Ipv6:
         if host.id in self.valid:
             return []
         rng = self.rng
-        stack = host.device.stack.ipv6
+        stack = host.device.ipv6
         own, mac = self.address[host.id], self.mac[host.id]
         node_group = solicited_node(own)
         at = min(t, self.up.get(host.id, t))
@@ -402,8 +405,12 @@ class Ipv6:
         rmac, router = self.router_mac, self.router_ll
         joined = {solicited_node(own)}
         t = ra_t + rng.uniform(*RA_HANDLING)
-        for _ in ("stable", "temporary"):
-            address = self.prefix + (rng.getrandbits(64) or 1).to_bytes(8, "big")
+        config = self.hosts[host_id].device.ipv6
+        for kind in ("stable", "temporary") if config.temporary else ("stable",):
+            if config.random_iid or kind == "temporary":
+                address = self.prefix + (rng.getrandbits(64) or 1).to_bytes(8, "big")
+            else:
+                address = self.prefix + own[8:]  # modified EUI-64, as the link-local address
             group = solicited_node(address)
             if group not in joined:
                 joined.add(group)
@@ -487,5 +494,5 @@ class Ipv6:
             payload = rewrite_duid_mac(payload, self.mac[host.id])
         src, dst = self.address[host.id], ipaddress.IPv6Address(sink.group6).packed
         udp = _with_checksum(src, dst, UDP, struct.pack("!HHHH", sport, dport, 8 + len(payload), 0) + payload, 6)
-        hop = host.device.stack.ipv6.multicast_hop_limit.get(sink.group6, 1)
+        hop = host.device.ipv6.multicast_hop_limit.get(sink.group6, 1)
         return t, self._frame(self.mac[host.id], mac_bytes(group6_mac(sink.group6)), _ip6(src, dst, hop, UDP, udp))
