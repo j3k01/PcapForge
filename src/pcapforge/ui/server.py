@@ -24,14 +24,14 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from pcapforge.i18n import LANGS
 from pcapforge.scenario import ScenarioError, discover
-from pcapforge.ui import views
+from pcapforge.ui import batch, views
 from pcapforge.ui.jobs import Job, Jobs
 
 _NAME = re.compile(r"[A-Za-z0-9._-]+")
 STATIC = {"style.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8"}
 TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".jsonl", ".log", ".rules", ".txt", ".csv", ".kql", ".spl"}
 INLINE_TYPES = {".html": "text/html; charset=utf-8", ".json": "application/json; charset=utf-8"}
-RUN_ACTIONS = ("verify", "export", "report", "package", "ctfd")
+RUN_ACTIONS = ("verify", "export", "report", "package", "ctfd", "grade", "traffic")
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
@@ -68,15 +68,21 @@ class App:
                 if (path := self.out / f"{name}-{kind}.zip").is_file()}
 
     # -- jobs ---------------------------------------------------------------------------
-    def submit_generate(self, scenario, form: dict[str, str]) -> Job:
+    def submit_generate(self, scenario, form: dict[str, str]) -> list[Job]:
+        """One generate job per seed: the ``seeds`` list (one per line) if given, else ``seed``.
+        Everything is validated before the first job is queued."""
         from pcapforge.pipeline import generate
 
         difficulty = form.get("difficulty", "medium")
         if difficulty not in scenario.difficulties:
             raise ValueError(f"scenario {scenario.id} has no level {difficulty!r}")
-        seed = form.get("seed", "").strip() or "1"
-        if len(seed) > 64:
-            raise ValueError("seed: at most 64 characters")
+        if form.get("seeds", "").strip():
+            seeds = batch.parse_seeds(form["seeds"])
+            if not seeds:
+                raise ValueError("seeds: only comments and blank lines")
+        else:
+            seeds = [batch.parse_seed(form.get("seed", ""), "seed") or "1"]
+        base_seed = batch.parse_seed(form.get("base_seed", ""), "base seed") or None
         lang = form.get("lang", "en")
         if lang not in LANGS:
             raise ValueError(f"language {lang!r}: one of {', '.join(LANGS)}")
@@ -86,18 +92,31 @@ class App:
         duration = views.duration_or_none(form.get("duration", ""))
         siem, zeek = "siem" in form, "zeek" in form
 
-        def work(job: Job) -> str:
-            out = generate(scenario, difficulty, seed, self.out, fmt=fmt, duration=duration, lang=lang,
-                           siem=siem, zeek=zeek, progress=job.note)
-            job.run = out.directory.name
-            failed = [c for c in out.report.checks if not c["ok"]] if out.report else []
-            for check in failed:
-                job.note(f"FAIL {check['name']}: {check['detail']}")
-            verdict = "VERIFY FAILED" if failed else "verified"
-            return f"{out.packets} packets, {verdict}"
+        def work(seed: str):
+            def run(job: Job) -> str:
+                out = generate(scenario, difficulty, seed, self.out, base_seed=base_seed, fmt=fmt, duration=duration,
+                               lang=lang, siem=siem, zeek=zeek, progress=job.note)
+                job.run = out.directory.name
+                failed = [c for c in out.report.checks if not c["ok"]] if out.report else []
+                for check in failed:
+                    job.note(f"FAIL {check['name']}: {check['detail']}")
+                verdict = "VERIFY FAILED" if failed else "verified"
+                return f"{out.packets} packets, {verdict}"
+            return run
 
-        title = f"{scenario.id} {difficulty} seed {seed}" + (f" ({form['duration']})" if duration else "")
-        return self.jobs.submit("generate", title, work)
+        suffix = (f" base {base_seed}" if base_seed else "") + (f" ({form['duration']})" if duration else "")
+        return [self.jobs.submit("generate", f"{scenario.id} {difficulty} seed {seed}{suffix}", work(seed))
+                for seed in seeds]
+
+    def submit_package_all(self, scenario: str, level: str) -> list[Job]:
+        """A package job for every run of ``scenario`` at ``level``."""
+        if not scenario or not level:
+            raise ValueError("package all: scenario and level are required")
+        names = [r["name"] for r in batch.matching(self.runs(), scenario, level)]
+        dirs = [(name, directory) for name in names if (directory := self.run_dir(name)) is not None]
+        if not dirs:
+            raise ValueError(f"package all: no runs of {scenario} at level {level}")
+        return [self.submit_action("package", name, directory, {}) for name, directory in dirs]
 
     def submit_action(self, action: str, name: str, directory: Path, form: dict[str, str]) -> Job:
         def verify(job: Job) -> str:
@@ -121,7 +140,9 @@ class App:
         def report(job: Job) -> str:
             from pcapforge.report import write_report
 
-            return f"wrote {write_report(directory).name}"
+            grades = directory / "grades.json"
+            path = write_report(directory, grades_path=grades if grades.is_file() else None)
+            return f"wrote {path.name}" + (" with class results" if grades.is_file() else "")
 
         def package(job: Job) -> str:
             from pcapforge.package import package_run
@@ -133,7 +154,21 @@ class App:
 
             return f"{len(export_ctfd(directory))} challenges in ctfd/"
 
-        work = {"verify": verify, "export": export, "report": report, "package": package, "ctfd": ctfd}[action]
+        def grade(job: Job) -> str:
+            from pcapforge.ui.student import grade_run
+
+            report = grade_run(directory)
+            for s in report["students"]:
+                job.note(f"{s['student']}: {s['score']:g}/{s['max']} ({s['percent']:g} %)")
+            return f"{len(report['students'])} submissions graded, wrote grades.json"
+
+        def traffic(job: Job) -> str:
+            from pcapforge.ui.traffic import build
+
+            return build(directory, progress=lambda fraction: setattr(job, "progress", fraction))
+
+        work = {"verify": verify, "export": export, "report": report, "package": package, "ctfd": ctfd,
+                "grade": grade, "traffic": traffic}[action]
         return self.jobs.submit(action, name, work, run=name)
 
 
@@ -160,7 +195,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._not_found()
                 return self._page(sc.id, views.scenario(sc, app.runs()), "scenarios")
             if path == "/runs":
-                return self._page("runs", views.runs(app.runs()), "runs")
+                query = {k: v[-1].strip() for k, v in parse_qs(urlsplit(self.path).query).items()}
+                body = batch.runs_page(app.runs(), query.get("scenario", ""), query.get("level", ""))
+                return self._page("runs", body, "runs")
             if m := re.fullmatch(r"/runs/([^/]+)", path):
                 return self._run_page(m.group(1))
             if m := re.fullmatch(r"/runs/([^/]+)/files/(.*)", path):
@@ -175,6 +212,9 @@ class Handler(BaseHTTPRequestHandler):
             if m := re.fullmatch(r"/jobs/(\d+)", path):
                 job = app.jobs.get(int(m.group(1)))
                 return self._page(f"job {job.id}", views.job(job), "jobs") if job else self._not_found()
+            if path == "/api/jobs":
+                data = [views.job_row(j) for j in app.jobs.all()]
+                return self._send(HTTPStatus.OK, json.dumps(data).encode(), "application/json")
             if m := re.fullmatch(r"/api/jobs/(\d+)", path):
                 job = app.jobs.get(int(m.group(1)))
                 if job is None:
@@ -191,17 +231,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._page("error", views.error(str(exc)), status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_POST(self) -> None:  # noqa: N802
+        form = self._form()  # read the body first: refusing before it resets the client's connection
         if not self._host_ok() or not self._origin_ok():
             return
         path = unquote(urlsplit(self.path).path)
-        form = self._form()
         app = self.app
         try:
             if m := re.fullmatch(r"/scenarios/([^/]+)/generate", path):
                 sc = app.scenarios().get(m.group(1))
                 if sc is None:
                     return self._not_found()
-                return self._redirect(f"/jobs/{app.submit_generate(sc, form).id}")
+                jobs = app.submit_generate(sc, form)
+                return self._redirect(f"/jobs/{jobs[0].id}" if len(jobs) == 1 else "/jobs")
+            if path == "/package-all":
+                app.submit_package_all(form.get("scenario", ""), form.get("level", ""))
+                return self._redirect("/jobs")
             if m := re.fullmatch(r"/runs/([^/]+)/([a-z]+)", path):
                 directory = app.run_dir(m.group(1))
                 if directory is None or m.group(2) not in RUN_ACTIONS:
@@ -302,26 +346,36 @@ class Handler(BaseHTTPRequestHandler):
             shutil.copyfileobj(fh, self.wfile, 1 << 20)
 
 
-def make_server(app: App, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), Handler)
+def make_server(app, host: str = "127.0.0.1", port: int = 8765,
+                handler: type[BaseHTTPRequestHandler] | None = None) -> ThreadingHTTPServer:
+    """``handler``: the request handler class (default ``Handler``; ``student.StudentHandler`` in student mode)."""
+    base = handler or Handler
+    server = ThreadingHTTPServer((host, port), base)
     bound = server.server_address[1]
     allowed = None
     if host in LOOPBACK:
         allowed = {f"{name}:{bound}" for name in ("127.0.0.1", "localhost", "[::1]")}
-    handler = type("BoundHandler", (Handler,), {"app": app, "allowed_hosts": allowed})
+    handler = type("BoundHandler", (base,), {"app": app, "allowed_hosts": allowed})
     server.RequestHandlerClass = handler
     server.daemon_threads = True
     return server
 
 
-def serve(out: Path, scenarios_dir: Path | None, host: str, port: int, open_browser: bool) -> int:
-    app = App(out, scenarios_dir)
-    server = make_server(app, host, port)
+def serve(out: Path, scenarios_dir: Path | None, host: str, port: int, open_browser: bool,
+          student: bool = False, show_score: bool = False) -> int:
+    if student:
+        from pcapforge.ui.student import StudentApp, StudentHandler
+
+        server = make_server(StudentApp(out, show_score), host, port, StudentHandler)
+    else:
+        server = make_server(App(out, scenarios_dir), host, port)
     url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{server.server_address[1]}/"
-    print(f"pcapforge ui on {url}  (output directory {out.resolve()}; Ctrl+C to stop)", file=sys.stderr)
+    mode = "student mode " if student else ""
+    print(f"pcapforge ui {mode}on {url}  (output directory {out.resolve()}; Ctrl+C to stop)", file=sys.stderr)
     if host not in LOOPBACK:
-        print("warning: listening beyond this machine; anyone who reaches it can run jobs and read answer keys",
-              file=sys.stderr)
+        print("warning: listening beyond this machine; " + (
+              "anyone who reaches it can download the captures and submit under any name" if student
+              else "anyone who reaches it can run jobs and read answer keys"), file=sys.stderr)
     if open_browser:
         webbrowser.open(url)
     try:

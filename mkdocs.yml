@@ -1,0 +1,42 @@
+site_name: pcapforge
+site_description: Realistic, labeled PCAPs with answer keys for blue-team and detection-engineering training
+repo_url: https://github.com/j3k01/PcapForge
+edit_uri: ""
+
+validation:
+  anchors: warn  # --strict then fails on links to missing headings too
+
+theme:
+  name: mkdocs
+  highlightjs: false  # no CDN scripts: the site works offline
+
+# README.md, CONTRIBUTING.md, ROADMAP.md and every page under reference/ are added at build time by
+# the hook from the repository root and the source code (single source of truth).
+hooks:
+  - scripts/gen_docs.py
+
+watch:
+  - README.md
+  - CONTRIBUTING.md
+  - ROADMAP.md
+  - scripts
+  - src/pcapforge
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - tables
+  - fenced_code
+
+nav:
+  - Home: index.md
+  - Contributing: contributing.md
+  - Design notes: DESIGN.md
+  - Roadmap: roadmap.md
+  - Reference:
+      - CLI: reference/cli.md
+      - Actor types: reference/actors.md
+      - Device profiles: reference/devices.md
+      - Process profiles: reference/processes.md
+      - Scenario schema: reference/scenario-schema.md
+      - answers.json: reference/answers.md

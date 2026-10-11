@@ -1,0 +1,21 @@
+name: docs
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # The reference pages are generated from the package (CLI parser, actor registry, profiles,
+      # schema), so the build installs pcapforge itself; no capture tools are needed.
+      - run: pip install -e .[docs]
+      - run: mkdocs build --strict

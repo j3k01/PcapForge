@@ -67,3 +67,44 @@
   }
   if (box.dataset.state === "queued" || box.dataset.state === "running") poll();
 })();
+
+(function jobsPage() {
+  const table = document.getElementById("jobs");
+  if (!table || !table.dataset.active) return;
+  const body = table.tBodies[0];
+  function cell(row, text, className, href) {
+    const td = row.insertCell();
+    if (className) td.className = className;
+    if (href) {
+      const a = document.createElement("a");
+      a.href = href;
+      a.textContent = text;
+      td.append(a);
+    } else {
+      td.textContent = text;
+    }
+  }
+  async function poll() {
+    let jobs;
+    try {
+      const response = await fetch("/api/jobs", { cache: "no-store" });
+      if (!response.ok) return;
+      jobs = await response.json();
+    } catch (_) {
+      setTimeout(poll, 3000);
+      return;
+    }
+    const rows = document.createElement("tbody");
+    for (const job of jobs) {
+      const row = rows.insertRow();
+      cell(row, `#${job.id}`, "num", `/jobs/${job.id}`);
+      cell(row, job.kind);
+      cell(row, job.title, "", job.run ? `/runs/${encodeURIComponent(job.run)}` : "");
+      cell(row, job.state, `state-${job.state}`);
+      cell(row, job.outcome, "dim");
+    }
+    body.replaceChildren(...rows.rows);
+    if (jobs.some((job) => job.state === "queued" || job.state === "running")) setTimeout(poll, 1000);
+  }
+  setTimeout(poll, 1000);
+})();

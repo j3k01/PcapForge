@@ -60,10 +60,10 @@ A class of 25 students, each with a unique variant, or one variant per login:
 ```console
 $ pcapforge generate -s ot-modbus-write-manipulation -d hard --seed course-2026 --count 25
 $ pcapforge generate -s ot-modbus-write-manipulation -d medium --seeds-file students.txt
-$ pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42 --lang pl   # Polish handout, questions and template
+$ pcapforge generate -s ot-modbus-write-manipulation -d easy --seed 42 --lang pl   # Polish handout, questions and template (also: de)
 ```
 
-`--lang pl` translates the student-facing prose: `briefing.md`, the question texts in `answers.json` and `submission_template.yaml`. Answers, filters and register names stay unchanged. Scenarios provide translations under `translations: {pl: {title, briefing, questions}}`; process profiles translate their title the same way. Register names and point descriptions are not translated.
+`--lang pl` (Polish) or `--lang de` (German) translates the student-facing prose: `briefing.md`, the question texts in `answers.json` and `submission_template.yaml`. Answers, filters and register names stay unchanged. Scenarios provide translations under `translations: {<lang>: {title, briefing, questions}}`; process profiles translate their title the same way. Register names and point descriptions are not translated.
 
 Other commands:
 - `pcapforge show <scenario>` describes the techniques, difficulty knobs and questions.
@@ -112,17 +112,31 @@ It works on the same output directory as `generate` (`--out`, default `out`):
 
 - **scenarios**: the catalog; per scenario its summary, ATT&CK techniques, questions and a level matrix
   (every knob per level, values that change from the level before highlighted), plus a generate form
-  (level, seed, length, language, format, SIEM / Zeek export).
-- **jobs**: generation and the run actions run one at a time in the background; the job page shows the
-  recording progress and the log, then links the run.
-- **runs**: per run the capture metadata, a network map (subnets, hosts, routers, the SPAN segment, IPv6
-  hosts), the host table, the timeline, the answer key behind a "reveal answers" toggle, the files
-  (download), and buttons for verify, SIEM / Zeek export, the debrief report, the student / instructor zips
-  and the CTFd export.
+  (level, seed, length, language, format, SIEM / Zeek export). Its "batch" section takes a seed list (one
+  per line, e.g. student logins; `#` comments and blanks skipped, at most 200, duplicates refused) and an
+  optional base seed that works like `--base-seed`; each seed becomes its own job.
+- **jobs**: generation and the run actions run one at a time in the background; the job list and the job
+  page update live with the recording progress and the log, then link the run.
+- **runs**: filterable by scenario and level, grouped with a "package all" button per group. Per run the
+  capture metadata, a network map (subnets, hosts, routers, the SPAN segment, IPv6 hosts), the host table,
+  a traffic overview (a per-protocol strip chart over the capture time with the answer-key events marked,
+  built by the `traffic` action from the capture and cached in `traffic.json`; the top conversations from
+  `siem/flows.jsonl`), the timeline, the answer key behind a "reveal answers" toggle, the files (download),
+  the students' submissions with the class results, and buttons for verify, SIEM / Zeek export, traffic,
+  grade, the debrief report (with the class results once graded), the student / instructor zips and the
+  CTFd export.
+
+`pcapforge ui --student [--show-score]` is the student side on the same output directory, and nothing else:
+students enter their name or login (honour system, no passwords), see their exercises (runs whose seed is
+their login, otherwise all runs), download the capture, `briefing.md` and `submission_template.yaml`,
+read the briefing and answer the questions in a form (hints with their cost, as in the template). A
+submission is saved as `<run>/submissions/<name>.yaml` in the format `pcapforge grade` reads; resubmitting
+overwrites it. With `--show-score` students see their score per question right away, never the expected
+answers. The instructor's `grade` action writes `<run>/grades.json` (same as `pcapforge grade --json`).
 
 Standard library only, no extra dependency. It listens on 127.0.0.1 and refuses other `Host` headers and
-cross-origin form posts. `--host 0.0.0.0` makes it reachable from the network: anyone who reaches it can
-start jobs and read the answer keys.
+cross-origin form posts. `--host 0.0.0.0` makes it reachable from the network: in instructor mode anyone
+who reaches it can start jobs and read the answer keys; in student mode anyone can submit under any name.
 
 ## Grading and packaging
 
@@ -473,6 +487,11 @@ $ pytest
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the defensive policy, the setup on Windows and Linux, and the
 checklist for pull requests.
+
+The documentation site (this README, CONTRIBUTING, ROADMAP, the design notes and reference pages generated from
+the code: CLI, actor types and their params, device and process profiles, scenario schema, answers.json keys)
+builds with MkDocs: `pip install -e .[docs]` then `mkdocs build --strict` (or `mkdocs serve`). The generator
+is `scripts/gen_docs.py`, loaded as a MkDocs hook; CI builds the site on every push.
 
 The end-to-end tests record real traffic, so they need tshark 4.4+, dumpcap (or tcpdump) and loopback capture rights; they are skipped otherwise. Medium and hard also need the `opcua` and `s7` extras. `tests/test_grade.py` (grading rules, the student zip holds no answer material) needs neither. The end-to-end tests check that:
 - every capture passes the tshark integrity checks and all answer-key filters;

@@ -77,7 +77,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
   - the questions with answers, and the class score summary from `pcapforge grade --json`.
 - [x] **Graded hints** (S): the submission template shows each hint with its cost (20 % of the points, rounded up, same as the CTFd export); students list the ids they used under `hints_used`, and `grade` deducts the cost (never below 0). Honour system for offline use.
 - [x] **CTF platform export** (S): `pcapforge export-ctfd <run>` writes ctfcli `challenge.yml` files with static/regex flags, hint costs, and the capture attached to the first challenge. Still open: tested only by unit tests, not yet imported into a live CTFd instance.
-- [ ] **More languages** (S per language): the UI strings in `i18n.py` and the scenario `translations`.
+- [~] **More languages** (S per language): the UI strings in `i18n.py` and the scenario `translations`. Done: Polish (`pl`) and German (`de`) for every scenario, UI string and process title; `tests/test_scenario.py` checks every non-English language for complete question translations with the same `${...}` references.
 
 ## 5. Detection engineering
 
@@ -91,9 +91,9 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 - [~] **Publish to PyPI** (S): the wheel now ships the scenarios (`pcapforge._scenarios`), and a manual trusted-publishing workflow exists (`.github/workflows/publish.yml`). Still open: the name `pcapforge` is taken on PyPI by an unrelated project, so a distribution name has to be chosen before publishing.
 - [ ] **Docker image** (M): Wireshark, Suricata and pcapforge with rootless capture, so Windows/macOS users don't need Npcap or WSL.
 - [ ] **macOS support check** (S): loopback aliases for 127.77.0.0/16 and a CI job on `macos-latest`.
-- [ ] **Docs site** (S): MkDocs with the scenario authoring guide, the actor/profile reference generated from code, and the answers.json schema.
+- [x] **Docs site** (S): MkDocs (`mkdocs.yml`, `pip install -e .[docs]`, `mkdocs build --strict` in CI). README, CONTRIBUTING and ROADMAP are included at build time (one source of truth); `scripts/gen_docs.py` (MkDocs hook) generates the CLI, actor (params by static analysis), device, process, scenario-schema and answers.json reference pages. Still open: GitHub Pages deployment.
 - [ ] **LLM "director"** (M, optional): turn a text description into a draft scenario YAML that a human reviews and that `pcapforge validate` checks. It never generates packets.
-- [~] **Web UI** (L): `pcapforge ui`, local, standard library only. Done: scenario catalog with level matrix, generation with live progress (background job queue), run pages with network map, timeline, answer key, files and the run actions (verify, export, report, package, CTFd). Still open: student mode (questions, submission and grading in the browser, without the answer key), flow / protocol timeline from the SIEM export, batch generation for a class (seeds file).
+- [x] **Web UI** (L): `pcapforge ui`, local, standard library only. Scenario catalog with level matrix; generation and batches (seed lists, base seed) with live progress (background job queue); run pages with network map, traffic strip chart (`traffic` action, cached `traffic.json`) and top conversations, timeline, answer key, files, submissions and class results, and the run actions (verify, export, traffic, grade, report, package, package all, CTFd). `pcapforge ui --student [--show-score]`: exercises, downloads, answer form with hints, submissions in the `pcapforge grade` format. Still open: real student authentication (identity is honour-system).
 - [~] **Repository housekeeping** (S; badges, Dependabot and issue templates done; GitHub description/topics and labels still open):
   - README badges (CI, release, license);
   - GitHub description and topics;

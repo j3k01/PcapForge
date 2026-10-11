@@ -83,18 +83,31 @@ button::after { content: " ]"; color: var(--dim); }
 button:hover, button:focus-visible { background: var(--hi); color: var(--bg); outline: none; }
 button:hover::before, button:hover::after, button:focus-visible::before, button:focus-visible::after { color: var(--bg); }
 
-input, select {
+input, select, textarea {
   font: inherit; color: var(--fg); background: #000; border: 1px solid var(--line-hi); padding: 2px 6px; border-radius: 0;
 }
-input:focus, select:focus { outline: 1px solid var(--hi); outline-offset: 0; }
+input:focus, select:focus, textarea:focus { outline: 1px solid var(--hi); outline-offset: 0; }
 input[type=checkbox] { accent-color: var(--hi); }
-input::placeholder { color: var(--dim); }
+input::placeholder, textarea::placeholder { color: var(--dim); }
 
 form.gen { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; padding: 12px 14px;
   border: 1px solid var(--line); background: var(--panel); }
 form.gen label { color: var(--dim); }
 form.gen label.check { color: var(--fg); }
 form.gen button { margin-left: auto; font-weight: 700; }
+form.gen details.batch { flex-basis: 100%; }
+form.gen details.batch .fields { display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: flex-start; }
+form.gen details.batch label { display: flex; gap: 10px; align-items: flex-start; }
+form.gen details.batch .fields > div { flex: 1; min-width: 30ch; }
+form.filter { margin: 8px 0 4px; }
+.group { display: flex; gap: 18px; align-items: baseline; }
+.group form { margin: 0; }
+form.inline { display: flex; gap: 10px; align-items: baseline; margin: 6px 0; }
+form.answers input[type=text], form.answers textarea { display: block; width: 100%; max-width: 92ch; }
+form.answers textarea { resize: vertical; }
+form.answers label.check { color: var(--dim); }
+form.answers > button { font-weight: 700; }
+pre.briefing { max-height: 360px; }
 
 details > summary { cursor: pointer; color: var(--hi); margin: 8px 0; list-style: none; }
 details > summary::before { content: "+ "; color: var(--dim); }
@@ -130,3 +143,22 @@ svg.topo { width: 100%; height: auto; margin: 6px 0 4px; font: 12px "Cascadia Mo
 .topo .host:hover rect { stroke: var(--hi); }
 .topo .wire { fill: none; stroke: var(--line-hi); }
 .topo .tiny { fill: var(--dim); font-size: 10px; }
+
+svg.traffic { width: 100%; height: auto; margin: 6px 0 2px; font: 12px "Cascadia Mono", Consolas, ui-monospace, monospace; }
+.traffic text { fill: var(--fg); }
+.traffic .count, .traffic .axis text { fill: var(--dim); }
+.traffic .bg { fill: var(--panel); }
+.traffic .axis line { stroke: var(--line-hi); }
+.traffic .l1, .traffic .l2, .traffic .l3, .traffic .l4, .traffic .l5 { fill: var(--hi); }
+.traffic .l1 { fill-opacity: .16; }
+.traffic .l2 { fill-opacity: .32; }
+.traffic .l3 { fill-opacity: .52; }
+.traffic .l4 { fill-opacity: .75; }
+.traffic .mark line { stroke: var(--dim); stroke-opacity: .8; }
+.traffic .mark rect { fill: var(--dim); }
+.traffic .mark.inc line { stroke: var(--amber); stroke-opacity: 1; }
+.traffic .mark.inc rect { fill: var(--amber); }
+.traffic .mark line.hit { stroke: transparent; stroke-width: 7; pointer-events: stroke; }
+.traffic .mark:hover line:not(.hit) { stroke: var(--fg); stroke-opacity: 1; }
+.traffic-note { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.traffic-note form { margin: 0; }

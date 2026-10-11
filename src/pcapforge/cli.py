@@ -190,8 +190,12 @@ def cmd_report(args) -> int:
 def cmd_ui(args) -> int:
     from pcapforge.ui.server import serve
 
+    if args.show_score and not args.student:
+        print("error: --show-score needs --student", file=sys.stderr)
+        return 2
     try:
-        return serve(Path(args.out), _scenarios_dir(args), args.host, args.port, not args.no_browser)
+        return serve(Path(args.out), _scenarios_dir(args), args.host, args.port, not args.no_browser,
+                     student=args.student, show_score=args.show_score)
     except OSError as exc:
         print(f"error: cannot listen on {args.host}:{args.port}: {exc}", file=sys.stderr)
         return 1
@@ -272,6 +276,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1", help="listen address (default: this machine only)")
     p.add_argument("--port", type=int, default=8765, help="0 = any free port")
     p.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
+    p.add_argument("--student", action="store_true",
+                   help="student mode: exercises, downloads and answer forms only (no answer keys, no jobs); "
+                        "submissions go to <run>/submissions/")
+    p.add_argument("--show-score", action="store_true", help="student mode: show the score after a submission")
     p.set_defaults(func=cmd_ui)
     return parser
 

@@ -5,6 +5,7 @@ __pycache__/
 out/
 build/
 dist/
+site/
 
 # ctfcli project config (contains the CTFd access token)
 .ctf/

@@ -263,6 +263,12 @@ subscription (`vars.opcua`), see below.
   feeds the job log, `recording i/n` lines drive the progress bar. Run files are served only from inside a
   run directory (resolved path check); `Host` is checked on loopback binds (DNS rebinding) and every POST's
   `Origin` must match it.
+  Student mode (`ui/student.py`, `--student`) is a separate handler class: no instructor route exists in
+  it; question views are built from an allow-list (id, text, type, points, hint), downloads are limited to
+  the student-zip files, submissions are written atomically as `<run>/submissions/<name>.yaml` in the
+  `grade` format. The traffic strip chart (`ui/traffic.py`) streams the capture once (memory-mapped, pcap /
+  pcapng, VLAN / QinQ, IPv6 extension headers, classification by `ports.WELL_KNOWN`) into 144 buckets and
+  caches them in `traffic.json` keyed by the capture's SHA-256 (about 1 s per million packets).
 Next: IT-line scenarios (README roadmap).
 
 ### Composer spec

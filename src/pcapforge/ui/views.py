@@ -19,9 +19,13 @@ def e(value) -> str:
     return escape(str(value), quote=True)
 
 
-def page(title: str, body: str, out_root: Path, active: str = "") -> str:
-    nav = "".join(f'<a href="{href}"{" class=on" if name == active else ""}>{name}</a>'
-                  for name, href in (("scenarios", "/"), ("runs", "/runs"), ("jobs", "/jobs")))
+NAV = (("scenarios", "/"), ("runs", "/runs"), ("jobs", "/jobs"))
+
+
+def page(title: str, body: str, out_root: Path, active: str = "", nav: tuple = NAV, meta: str | None = None) -> str:
+    """``nav``: (name, href) links of the header; ``meta``: header note instead of the output root."""
+    nav = "".join(f'<a href="{href}"{" class=on" if name == active else ""}>{name}</a>' for name, href in nav)
+    meta = e(meta) if meta is not None else f"out: {e(out_root)}"
     return (
         '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -29,7 +33,7 @@ def page(title: str, body: str, out_root: Path, active: str = "") -> str:
         '<link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script></head>'
         '<body><header><canvas id="rain" aria-hidden="true"></canvas><div class="bar">'
         f'<a class="brand" href="/">pcapforge</a><nav>{nav}</nav>'
-        f'<span class="meta">v{e(__version__)} &middot; out: {e(out_root)}</span></div></header>'
+        f'<span class="meta">v{e(__version__)} &middot; {meta}</span></div></header>'
         f'<main>{body}</main></body></html>\n')
 
 
@@ -141,14 +145,24 @@ def _generate_form(sc: Scenario) -> str:
     return (
         f'<form class="gen" method="post" action="/scenarios/{quote(sc.id)}/generate">'
         f'<label>level <select name="difficulty">{levels}</select></label>'
-        '<label>seed <input name="seed" value="1" maxlength="64" required></label>'
+        '<label>seed <input name="seed" value="1" maxlength="64"></label>'
         '<label>duration <input name="duration" placeholder="level default" size="11" '
         'title="e.g. 20m, 2h; empty = the level\'s duration"></label>'
         f'<label>language <select name="lang">{langs}</select></label>'
         '<label>format <select name="format"><option>pcap</option><option>pcapng</option></select></label>'
         '<label class="check"><input type="checkbox" name="siem" checked> siem + detections</label>'
         '<label class="check"><input type="checkbox" name="zeek"> zeek logs</label>'
-        '<button type="submit">generate</button></form>')
+        '<button type="submit">generate</button>'
+        '<details class="batch"><summary>batch: one run per seed</summary><div class="fields">'
+        '<label>seeds <textarea name="seeds" rows="6" cols="34" spellcheck="false" '
+        'placeholder="# one seed per line, e.g. student logins&#10;alice&#10;bob"></textarea></label>'
+        '<div><label>base seed <input name="base_seed" maxlength="64" size="12" placeholder="none"></label>'
+        '<p class="dim small">seeds: replaces the single seed; one job per seed, at most 200, '
+        "64 characters each; blank lines and # comments are skipped, duplicates refused.</p>"
+        '<p class="dim small">base seed: every seed shares the recorded behaviour of this seed '
+        "(like --base-seed): one recording for the whole batch (faster), the same story and incident "
+        "timing, but its own IPs, MACs, ports and timing jitter per seed. Empty: every seed is an "
+        "independent variant.</p></div></div></details></form>")
 
 
 # -- runs ------------------------------------------------------------------------------
@@ -169,12 +183,6 @@ def _runs_table(runs: list[dict]) -> str:
         for r in runs)
     return ('<table class="grid"><thead><tr><th>run</th><th>level</th><th>seed</th><th>packets</th>'
             "<th>length</th><th>lang</th><th>written</th></tr></thead><tbody>" + rows + "</tbody></table>")
-
-
-def runs(items: list[dict]) -> str:
-    if not items:
-        return '<h1>runs</h1><p>No runs yet. Pick a scenario and <a href="/">generate</a> one.</p>'
-    return "<h1>runs</h1>" + _runs_table(items)
 
 
 def run(name: str, directory: Path, answers: dict, packages: dict[str, Path], active: list[Job]) -> str:
@@ -200,11 +208,13 @@ def run(name: str, directory: Path, answers: dict, packages: dict[str, Path], ac
             f'<a href="/jobs/{j.id}">{e(j.kind)} {e(j.state)}</a>' for j in active) + "</p>")
     body += ["<h2>actions</h2>", _actions(name, directory, packages),
              "<h2>network</h2>", topology_svg(topo), _hosts_table(topo)]
+    from pcapforge.ui.traffic import section as traffic_section  # traffic imports views
+    body.append(traffic_section(name, directory, answers))
     timeline = answers.get("timeline", [])
     if timeline:
         body += [f"<h2>timeline ({len(timeline)})</h2>", _timeline(timeline, capture)]
     body += [f"<h2>answer key ({len(answers.get('questions', []))} questions)</h2>", _questions(answers)]
-    body += ["<h2>files</h2>", _files(name, directory)]
+    body += [_submissions(name, directory), "<h2>files</h2>", _files(name, directory)]
     return "".join(body)
 
 
@@ -228,9 +238,51 @@ def _actions(name: str, directory: Path, packages: dict[str, Path]) -> str:
                            for kind, path in packages.items()) or "student / instructor zips"),
         ("ctfd", _post("ctfd", name, "export"),
          link("ctfd/", "ctfd/") if (directory / "ctfd").is_dir() else "ctfcli challenge.yml per question"),
+        ("grade", _post("grade", name, "grade"),
+         link("grades.json", "grades.json") if (directory / "grades.json").is_file()
+         else "score submissions/*.yaml (from pcapforge ui --student)"),
     ]
     return ('<table class="actions">' + "".join(f"<tr><th>{e(k)}</th><td>{form}</td><td>{note}</td></tr>"
                                                 for k, form, note in rows) + "</table>")
+
+
+def _submissions(name: str, directory: Path) -> str:
+    """``submissions/*.yaml`` of the student mode and, once graded, the class table of ``grades.json``."""
+    paths = sorted((directory / "submissions").glob("*.yaml"))
+    grades_path = directory / "grades.json"
+    if not paths and not grades_path.is_file():
+        return ""
+    rows = "".join(f'<tr><td><a href="/runs/{quote(name)}/files/submissions/{quote(p.name)}">{e(p.stem)}</a></td>'
+                   f'<td class="dim">{dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")}'
+                   "</td></tr>" for p in paths)
+    body = [f"<h2>submissions ({len(paths)})</h2>",
+            '<table class="grid"><thead><tr><th>student</th><th>submitted</th></tr></thead><tbody>' + rows
+            + "</tbody></table>" if paths else '<p class="dim">No files in submissions/.</p>']
+    if grades_path.is_file():
+        body += ["<h2>class results</h2>", _class_table(grades_path, paths)]
+    return "".join(body)
+
+
+def _class_table(path: Path, submissions: list[Path]) -> str:
+    try:
+        students = json.loads(path.read_text(encoding="utf-8"))["students"]
+        ids = [q["id"] for q in students[0]["questions"]] if students else []
+        rows = []
+        for s in students:
+            cells = "".join(
+                f'<td class="num{"" if q["result"] == "correct" else " alert" if q["result"] == "partial" else " dim"}"'
+                f' title="{e(q["id"])}: {e(q["result"])}">{q["score"]:g}</td>' for q in s["questions"])
+            rows.append(f'<tr><td>{e(s["student"])}</td><td class="num">{s["score"]:g}/{e(s["max"])}</td>'
+                        f'<td class="num">{s["percent"]:g}</td>{cells}</tr>')
+    except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
+        return f'<pre class="err">{e(path.name)}: {e(type(exc).__name__)}: {e(exc)}</pre>'
+    stale = submissions and max(p.stat().st_mtime for p in submissions) > path.stat().st_mtime
+    head = "".join(f'<th class="num" title="{e(qid)}">Q{i}</th>' for i, qid in enumerate(ids, 1))
+    return ((f'<p class="alert">submissions changed after {e(path.name)} was written; run grade again.</p>'
+             if stale else "")
+            + '<table class="grid"><thead><tr><th>student</th><th class="num">score</th><th class="num">%</th>'
+            + head + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+            + '<p class="dim small">' + " &middot; ".join(f"Q{i} = {e(qid)}" for i, qid in enumerate(ids, 1)) + "</p>")
 
 
 def _hosts_table(topo: dict) -> str:
@@ -362,15 +414,29 @@ def _host_box(h: dict, x: float, y: float, router: bool = False, show_ip: bool =
 
 # -- jobs ------------------------------------------------------------------------------
 
+def job_row(j: Job) -> dict:
+    """One row of the jobs page (also its JSON for the live update): while a job runs, its
+    outcome is the progress bar or the last log line."""
+    if j.state == "running":
+        outcome = progress_bar(j.progress) or (j.log[-1] if j.log else "")
+    else:
+        outcome = j.result or j.error or ""
+    return {"id": j.id, "kind": j.kind, "title": j.title, "run": j.run, "state": j.state, "outcome": outcome}
+
+
 def jobs(items: list[Job]) -> str:
     if not items:
         return "<h1>jobs</h1><p>Nothing ran yet in this session.</p>"
-    rows = "".join(
-        f'<tr><td class="num"><a href="/jobs/{j.id}">#{j.id}</a></td><td>{e(j.kind)}</td><td>{e(j.title)}</td>'
-        f'<td class="state-{e(j.state)}">{e(j.state)}</td><td class="dim">{e(j.result or j.error or "")}</td></tr>'
-        for j in items)
-    return ('<h1>jobs</h1><table class="grid"><thead><tr><th></th><th>kind</th><th>what</th><th>state</th>'
-            "<th>outcome</th></tr></thead><tbody>" + rows + "</tbody></table>")
+    rows = []
+    for r in map(job_row, items):
+        what = f'<a href="/runs/{quote(r["run"])}">{e(r["title"])}</a>' if r["run"] else e(r["title"])
+        rows.append(f'<tr><td class="num"><a href="/jobs/{r["id"]}">#{r["id"]}</a></td><td>{e(r["kind"])}</td>'
+                    f'<td>{what}</td><td class="state-{e(r["state"])}">{e(r["state"])}</td>'
+                    f'<td class="dim">{e(r["outcome"])}</td></tr>')
+    active = any(j.state in ("queued", "running") for j in items)
+    return (f'<h1>jobs</h1><table class="grid" id="jobs" data-active="{"1" if active else ""}"><thead><tr>'
+            "<th></th><th>kind</th><th>what</th><th>state</th><th>outcome</th></tr></thead><tbody>"
+            + "".join(rows) + "</tbody></table>")
 
 
 def job(j: Job) -> str:
