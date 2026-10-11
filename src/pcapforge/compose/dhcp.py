@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from pcapforge import ports
-from pcapforge.actors.dhcp import ACK, BROADCAST_FLAG, CLIENT_ID, INFORM, option_spans, parse
+from pcapforge.actors.dhcp import ACK, BROADCAST_FLAG, CLIENT_ID, INFORM, JOIN_OP, option_spans, parse
 from pcapforge.compose.link import arp_request, mac_bytes
 from pcapforge.compose.packets import UDP
 from pcapforge.topology import LIMITED_BROADCAST, UNSPECIFIED, Sink
@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
 UNSPECIFIED_BYTES = socket.inet_aton(UNSPECIFIED)
 BROADCAST_BYTES = socket.inet_aton(LIMITED_BROADCAST)
-JOIN_OP = "dhcp.discover"                  # a host that sends a DISCOVER joins during the capture
 ADDRESS_FIELDS = (12, 16, 20, 24)          # ciaddr, yiaddr, siaddr, giaddr
 # Options whose value is a list of IPv4 addresses (RFC 2132): router, time, name, DNS, log, LPR,
 # NTP, NetBIOS name / datagram servers, requested address, server identifier.

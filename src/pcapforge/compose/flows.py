@@ -6,7 +6,7 @@ import socket
 import struct
 from typing import TYPE_CHECKING, Iterable, Iterator
 
-from pcapforge import ports
+from pcapforge import dualstack, ports
 from pcapforge.compose.packets import (
     ACK, FIN, K_ACK, K_DATA, K_FIN, K_RST, K_SYN, K_SYNACK, RST, SYN, TCP, UDP, ComposeError, Flow,
     Packet,
@@ -53,6 +53,7 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> Iterator[Packet]:
     mid_session = bool(plan.impairments.get("mid_session"))
     current = None
     live: dict[tuple, Flow] = {}
+    dual = dualstack.hosts(plan)
 
     for order, ip in enumerate(records):
         ihl = (ip[0] & 0x0F) * 4
@@ -87,6 +88,7 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> Iterator[Packet]:
         here, there = (src, sport), (dst, dport)
         key = (proto, here, there) if here < there else (proto, there, here)
         flow = live.get(key)
+        known = flow
         if proto == TCP:
             if flags & SYN and not flags & ACK:
                 if flow is None or flow.endpoints[0] != here or flow.isn[0] != seq:
@@ -98,6 +100,8 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> Iterator[Packet]:
             # Every client datagram of a new action is a new exchange (new client socket),
             # unless the action retransmits on the socket of an earlier one.
             flow = live[key] = _guess_flow(UDP, src_host, dst_host, here, there)
+        if flow is not known and dual:
+            flow.v6 = dualstack.carries(dual, flow.hosts[0], flow.hosts[1], flow.server_port)
 
         side = 0 if flow.endpoints[0] == here else 1
         kind = _kind(proto, flags, payload)

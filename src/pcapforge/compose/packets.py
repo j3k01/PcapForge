@@ -127,6 +127,7 @@ class Flow:
     isn: list[int | None] = field(default_factory=lambda: [None, None])  # recorded ISNs (TCP)
     sent: list[tuple[int, int] | None] = field(default_factory=lambda: [None, None])  # last (seq, ack)
     action: Action | None = None                    # action the flow is currently bound to
+    v6: bool = False                                # carried over IPv6 (dual-stack site, ``dualstack``)
     # Per-flow state of the composer stages, kept on the flow so it goes away with it.
     clock: object = None                            # retime._Clock
     agreed: object = None                           # headers.Negotiated (TCP)

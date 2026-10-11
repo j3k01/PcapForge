@@ -1,7 +1,9 @@
 """DNS client and an authoritative site DNS server over real UDP sockets.
 
 Address records carry the *recording* (loopback) address of the host; the composer maps
-them to the final topology like every IP header.
+them to the final topology like every IP header. On a dual-stack site (``dualstack``) the
+server also answers AAAA for the dual-stack hosts, with the IPv4-mapped form of the loopback
+address (``::ffff:127.77.x.y``); the composer writes the host's global address there.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ import socket
 
 from scapy.layers.dns import DNS, DNSQR, DNSRR, DNSRRSRV
 
-from pcapforge import ports
+from pcapforge import dualstack, ports
 from pcapforge.actors import register
 from pcapforge.actors.base import Actor
 from pcapforge.plan import host_ref
@@ -48,6 +50,7 @@ class _DnsServerProtocol(asyncio.DatagramProtocol):
         self.domain = topology.domain
         self.zone = zone_records(topology)
         self.dc_fqdn = next(f for f, hid in self.zone.items() if hid == dc_id)
+        self.dual = dualstack.hosts(rt.plan)
 
     def connection_made(self, transport) -> None:
         self.transport = transport
@@ -70,6 +73,9 @@ class _DnsServerProtocol(asyncio.DatagramProtocol):
             elif question.qtype == QTYPES["SRV"] and qname.startswith("_ldap._tcp.dc._msdcs."):
                 reply.an = DNSRRSRV(rrname=question.qname, ttl=600, priority=0, weight=100, port=389,
                                     target=self.dc_fqdn + ".")
+            elif question.qtype == QTYPES["AAAA"] and self.zone.get(qname) in self.dual:
+                host = self.topology.by_id[self.zone[qname]]
+                reply.an = DNSRR(rrname=question.qname, type="AAAA", ttl=1200, rdata=f"::ffff:{host.loopback}")
             elif qname in self.zone:
                 pass  # NOERROR, no data (e.g. AAAA for an IPv4-only host)
             else:

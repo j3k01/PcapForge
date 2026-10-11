@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: ot-modbus-write-manipulation
 title: Unauthorized Modbus/TCP setpoint changes on a process PLC
 line: ot
-version: 3
+version: 4
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [modbus, ics, setpoint, ot, water, wastewater, hvac, power]
@@ -311,7 +311,7 @@ difficulty:
       chatter_rate: 2
       s7: true
       opcua: true
-      ipv6: true
+      ipv6: dual
       service_laptop: true
       telecontrol: true
       enip: true

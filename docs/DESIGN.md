@@ -237,6 +237,19 @@ subscription (`vars.opcua`), see below.
   5 s later). Hosts never send from the SLAAC addresses, as on a real IPv4 site with a ULA-only RA: no AAAA
   records, and Windows' prefix policy (RFC 6724) ranks IPv4 above ULA, so nothing uses the router and no
   later NUD happens.
+- Dual-stack site (`dualstack.py`, `compose/ipv6.GlobalAddresses`, `vars.ipv6: dual` on hard of
+  `ot-baseline-operations` and `ot-modbus-write-manipulation`): a global /64 from 2001:db8::/32 (RFC 3849)
+  per subnet the IPv6 router serves, a stable and a temporary address per Windows PC / server (devices
+  with a `browser` profile), configured before the capture. The DNS server answers AAAA for them in the
+  recording with the IPv4-mapped loopback address and the composer writes the stable address there.
+  `assign_flows` marks a conversation between two dual-stack hosts `Flow.v6` unless it is DNS, BACnet/IP,
+  EtherNet/IP or DHCP: in the shipped scenarios NTP to the DC and the historian's OPC UA session. Such
+  flows get an IPv6 header (client temporary -> server stable address, hop limit from the stack TTL,
+  flow label 0), MSS 1440 in the handshake and in segmentation, Ethertype 86dd, and Neighbor
+  Unreachability Detection instead of ARP: caches are warm at the capture start; a STALE entry
+  (reachability older than ReachableTime) probed 5 s after use with a unicast NS / NA, except by a
+  Windows endpoint of a TCP connection (forward progress confirms). The router probes the hosts it
+  forwards to the same way. PLCs (also embedded Windows ones) stay IPv4.
 - FLOAT32 registers: profile points may be `type: float32` (two registers, profile `word_order` big = ABCD or
   little = CDAB); `power_substation` and `hvac_building` use them. `Point.encode` returns the register words,
   `ProcessProfile.decode_block` decodes whole points from a read/write block (half a float is skipped), and a

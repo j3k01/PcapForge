@@ -199,6 +199,10 @@ difficulty:
 - `vars.ipv6` (passed to `windows.chatter` as `ipv6`): IPv6 baseline of the Windows hosts on the sensor
   segment (link-local DAD, Router Solicitation, MLDv2, LLMNR/mDNS over IPv6, DHCPv6 Solicit) and, when the
   segment's router device has `ipv6_router`, its Router Advertisements, SLAAC addresses and unicast ND.
+  `ipv6: dual` makes the site dual-stack (`dualstack.py`): a global prefix on every subnet the IPv6 router
+  serves, AAAA records for the Windows PCs and servers, and their conversations with each other (not DNS,
+  not BACnet / EtherNet/IP) over IPv6. Bump the scenario `version` when you change it: the DNS server's
+  answers are part of the recording.
 - `vars`: everything else, consumed through `${vars.*}` and `when`. Good knobs make the incident harder
   to *find*, not just bigger: a source that blends in (approved host, routed host behind a gateway MAC),
   values just outside the normal band, events spread over a longer window, legitimate look-alike activity,

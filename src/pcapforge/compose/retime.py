@@ -25,7 +25,7 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
 
-from pcapforge.compose.headers import M32, Negotiated, negotiate
+from pcapforge.compose.headers import IPV6_MSS_DELTA, M32, Negotiated, negotiate
 from pcapforge.compose.packets import (
     ACK, FIN, K_ACK, K_DATA, K_FIN, K_RST, K_SYNACK, PSH, TCP, ComposeError, Packet,
 )
@@ -260,7 +260,7 @@ class Retimer:
             agreed = p.flow.agreed
             if agreed is None:
                 client, server = p.flow.hosts
-                agreed = p.flow.agreed = negotiate(client.device.stack, server.device.stack)
+                agreed = p.flow.agreed = negotiate(client.device.stack, server.device.stack, p.flow.v6)
             if len(p.payload) > agreed.mss:
                 return self._segments(clock, p, t, agreed)
         self._emit(clock, p, t)
@@ -281,7 +281,7 @@ class Retimer:
         window = agreed.windows[1 - p.side]
         cwnd = p.src.device.stack.initial_window * mss
         rate = self.net.link_bps[p.src.id]
-        overhead = WIRE_OVERHEAD + (12 if agreed.ts else 0)
+        overhead = WIRE_OVERHEAD + (12 if agreed.ts else 0) + (IPV6_MSS_DELTA if p.flow.v6 else 0)
         acks: list[tuple[float, int]] = []  # (sender has it and can send again, bytes acknowledged)
         acked = unacked = 0
         last: Packet | None = None

@@ -35,7 +35,7 @@ from pcapforge.compose.enip import CyclicIo
 from pcapforge.compose.firewall import HostFirewall
 from pcapforge.compose.flows import assign_flows
 from pcapforge.compose.headers import Headers
-from pcapforge.compose.ipv6 import Ipv6
+from pcapforge.compose.ipv6 import ETHERTYPE_IPV6, GlobalAddresses, Ipv6
 from pcapforge.compose.link import BROADCAST, Link, pad
 from pcapforge.compose.packets import FIN, SYN, ComposeError, Packet, read_ipv4
 from pcapforge.compose.retime import Network, Retimer
@@ -64,6 +64,8 @@ class ComposeResult:
     action_times: Mapping[int, float]   # action id -> epoch timestamp of that frame
     # Sensor clock error applied to every frame timestamp: offset (s) and drift (ppm).
     sensor_clock: dict[str, float] = field(default_factory=lambda: {"offset_s": 0.0, "drift_ppm": 0.0})
+    # Dual-stack site: host id -> its global IPv6 addresses (stable, temporary).
+    ipv6_addresses: dict[str, dict] = field(default_factory=dict)
 
 
 def _info(p: Packet) -> int:
@@ -179,10 +181,11 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
     if any(a.type == "enip.scanner" for a in plan.actors):
         stages.append(CyclicIo(plan, present.child("enip_io")))
     timeline = Retimer(plan, network, present, stages).stream(packets)
-    headers = Headers(plan, present.child("headers"))
+    global6 = GlobalAddresses(plan, present.child("ipv6").child("global"))
+    headers = Headers(plan, present.child("headers"), global6)
     leases = dhcp.Dhcp(plan, present.child("dhcp"))
     link = Link(plan, network, present.child("arp"), leases.joining)
-    ipv6 = Ipv6(plan, headers, present.child("ipv6"))
+    ipv6 = Ipv6(plan, headers, present.child("ipv6"), global6=global6)
     sorter = _Sorter()
 
     def frames() -> Iterator[Frame]:
@@ -197,7 +200,13 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
             eth, hops = view
             for t, frame in ipv6.start_before(p.time, p.src):
                 synthesized(t, frame)
-            if ipv4:
+            if p.flow.v6:
+                src6, dst6 = global6.endpoints(p)
+                for t, frame in ipv6.neighbor(p, dst6):
+                    synthesized(t, frame)
+                frame6 = eth[:12] + ETHERTYPE_IPV6 + headers.build6(p, hops, src6, dst6)
+                sorter.packet(p.time, pad(frame6), _info(p))
+            elif ipv4:
                 delivery = dhcp.delivery(p)
                 if delivery is None:
                     for t, arp in link.arp_before(p.time, p.src, p.dst):
@@ -243,6 +252,7 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
         action_frames=action_frames,
         action_times=action_times,
         sensor_clock={"offset_s": span.clock_offset, "drift_ppm": round(span.clock_drift * 1e6, 3)},
+        ipv6_addresses={hid: global6.describe(hid) for hid in sorted(global6.stable)},
     )
 
 

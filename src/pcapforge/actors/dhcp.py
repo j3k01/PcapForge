@@ -87,6 +87,7 @@ STYLES = {
                     max_size=1472, rapid_commit=True),
 }
 DEFAULT_STYLE = {"windows": "windows", "linux": "dhcpcd"}
+JOIN_OP = "dhcp.discover"   # a host that sends a DISCOVER joins the network during the capture
 
 
 # -- wire format -------------------------------------------------------------------------
@@ -332,7 +333,7 @@ class DhcpClient(Actor):
                 raise ScenarioError(f"{self.type} '{self.id}': '{host.id}' leaves before it joins")
             if joined_at is not None:
                 xid = rng.getrandbits(32)
-                joined = plan.add(joined_at, self.id, host.id, "dhcp.discover", xid=xid, **common)
+                joined = plan.add(joined_at, self.id, host.id, JOIN_OP, xid=xid, **common)
                 bound = joined_at + rng.uniform(*DORA_GAP)
                 # The REQUEST answers the OFFER on the same socket: one exchange with the DISCOVER.
                 plan.add(bound, self.id, host.id, "dhcp.request", xid=xid, state="selecting", resend=True, **common)
@@ -376,7 +377,7 @@ class DhcpClient(Actor):
         # What the host has: the lease it got when joining, else the address it already holds.
         address, server_id = self._leases.get(action.host, (socket.inet_aton(loopback), socket.inet_aton(server)))
         flags, ciaddr = 0, address
-        if action.op == "dhcp.discover":
+        if action.op == JOIN_OP:
             kind, ciaddr = DISCOVER, bytes(4)
             options = [(MESSAGE_TYPE, bytes((DISCOVER,))), (CLIENT_ID, client_id)]
             if style.rapid_commit:

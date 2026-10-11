@@ -63,6 +63,8 @@ class _Expander:
             "observed_mac": observed,
             "vendor": host.device.vendor,
             "device": host.device.name,
+            # Dual-stack site: the global address the site DNS publishes (AAAA), else None.
+            "ipv6": (getattr(self.result, "ipv6_addresses", {}).get(host.id) or {}).get("stable"),
         }
 
     def action(self, action: Action) -> dict:
@@ -200,7 +202,7 @@ def build_answers(plan: Plan, result: ComposeResult) -> dict:
             "site_name": topo.site_name,
             "domain": topo.domain,
             "subnets": topo.describe_subnets(),
-            "hosts": topo.describe(),
+            "hosts": [{**h, "ipv6": getattr(result, "ipv6_addresses", {}).get(h["id"])} for h in topo.describe()],
         },
         "actors": [{"id": a.id, "type": a.type, "incident": a.incident, "hosts": [h.id for h in a.hosts]}
                    for a in plan.actors],

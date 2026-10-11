@@ -252,13 +252,17 @@ def test_flow_totals_account_for_every_ip_packet_and_byte(generated):
 
 def test_windows_hosts_and_the_router_show_an_ipv6_baseline_on_the_sensor_segment(generated):
     result, answers = generated
-    rows = tshark_fields(result.pcap, "ipv6", ["frame.time_epoch", "eth.src", "eth.dst", "ipv6.src", "ipv6.dst",
-                                               "ipv6.hlim", "icmpv6.type", "udp.dstport",
-                                               "dhcpv6.duidllt.link_layer_addr", "dns.qry.name",
-                                               "icmpv6.nd.ns.target_address", "icmpv6.opt.prefix"])
-    if not find(SCENARIO).level(answers["scenario"]["difficulty"])["vars"].get("ipv6"):
+    # Neighbor Discovery, MLD and the multicast datagrams (the dual-stack conversations have their own test).
+    rows = tshark_fields(result.pcap, "ipv6 && (icmpv6 || ipv6.dst == ff00::/8)",
+                         ["frame.time_epoch", "eth.src", "eth.dst", "ipv6.src", "ipv6.dst",
+                          "ipv6.hlim", "icmpv6.type", "udp.dstport",
+                          "dhcpv6.duidllt.link_layer_addr", "dns.qry.name",
+                          "icmpv6.nd.ns.target_address", "icmpv6.opt.prefix"])
+    mode = find(SCENARIO).level(answers["scenario"]["difficulty"])["vars"].get("ipv6")
+    if not mode:
         assert not rows
         return
+    dual = mode == "dual"
     sensor = next(s for s in answers["topology"]["subnets"] if s["sensor"])
     windows = {i["mac"] for h in answers["topology"]["hosts"] if device(h["device"]).stack.ipv6
                for i in h["interfaces"] if i["subnet"] == sensor["id"]}
@@ -266,9 +270,10 @@ def test_windows_hosts_and_the_router_show_an_ipv6_baseline_on_the_sensor_segmen
                   if i["subnet"] == sensor["id"] and i["ip"] == sensor["gateway"])
     hop_limits = {"133": 255, "134": 255, "135": 255, "136": 255, "143": 1, "5355": 1, "5353": 255, "547": 1}
     prefixes = {r[11] for r in rows if r[6] == "134"}
-    assert len(prefixes) == 1, "the firewall advertises one ULA prefix"
+    assert len(prefixes) == 1, "the firewall advertises one prefix"
     prefix = ipaddress.IPv6Network(f"{prefixes.pop()}/64")
-    assert prefix.subnet_of(ipaddress.IPv6Network("fd00::/8"))
+    # A ULA prefix, or on a dual-stack site a global one from the documentation range.
+    assert prefix.subnet_of(ipaddress.IPv6Network("2001:db8::/32" if dual else "fd00::/8"))
     link_local = ipaddress.IPv6Network("fe80::/64")
     address_of: dict[str, str] = {}
     dad: dict[str, float] = {}  # tentative address -> DAD Neighbor Solicitation
@@ -279,9 +284,9 @@ def test_windows_hosts_and_the_router_show_an_ipv6_baseline_on_the_sensor_segmen
         group = ipaddress.IPv6Address(dst)
         if group.is_multicast:
             assert eth_dst == "33:33:" + ":".join(f"{b:02x}" for b in group.packed[-4:])
-        else:  # unicast Neighbor Discovery between a host and the router
+        else:  # unicast Neighbor Discovery between a host and the router (NUD of a global address when dual)
             assert icmp_type in ("135", "136") and {mac, eth_dst} <= windows | {router} and router in {mac, eth_dst}
-            assert group in link_local
+            assert group in link_local or (dual and group in prefix)
         if icmp_type == "134":
             assert (mac, dst) == (router, "ff02::1")
         if src == "::":  # interface start / SLAAC: MLD join of the solicited-node group, then DAD
@@ -291,15 +296,18 @@ def test_windows_hosts_and_the_router_show_an_ipv6_baseline_on_the_sensor_segmen
                     slaac.setdefault(mac, set()).add(target)
             continue
         assert float(epoch) >= dad.get(src, 0.0) + 0.999, "an address is used before DAD completes"
-        assert ipaddress.IPv6Address(src) in link_local, "hosts send from their link-local address"
-        assert address_of.setdefault(mac, src) == src, "one link-local address per host"
+        if ipaddress.IPv6Address(src) in link_local:
+            assert address_of.setdefault(mac, src) == src, "one link-local address per host"
+        else:  # a dual-stack host answering the router's probe of its global address
+            assert dual and icmp_type == "136" and ipaddress.IPv6Address(src) in prefix
         if duid_mac:
             assert duid_mac == mac
-    assert {r[6] for r in rows} >= {"133", "134", "135", "136", "143"} and {r[7] for r in rows} >= {"5355", "5353", "547"}
+    assert {r[6] for r in rows} >= {"134", "143"} and {r[7] for r in rows} >= {"5355", "5353", "547"}
     # Every host that solicited a router formed a stable and a temporary address in the prefix
-    # (the sensor may miss one of the DAD solicitations).
+    # (the sensor may miss one of the DAD solicitations). Dual-stack hosts were configured before.
     solicited = {r[1] for r in rows if r[6] == "133"}
-    assert solicited and all(1 <= len(slaac.get(mac, ())) <= 2 for mac in solicited)
+    assert dual or solicited
+    assert all(1 <= len(slaac.get(mac, ())) <= 2 for mac in solicited)
     assert sum(len(addresses) for addresses in slaac.values()) >= 2 * len(solicited) - 1
     # LLMNR asks the same names over IPv6 as over IPv4.
     v4 = {r[0] for r in tshark_fields(result.pcap, "ip && llmnr", ["dns.qry.name"])}
@@ -308,13 +316,19 @@ def test_windows_hosts_and_the_router_show_an_ipv6_baseline_on_the_sensor_segmen
 
 def test_opcua_background_runs_only_between_the_historian_and_the_scada_server(generated):
     result, answers = generated
-    rows = tshark_fields(result.pcap, "tcp.port == 4840 || opcua", ["ip.src", "ip.dst", "opcua.servicenodeid.numeric"])
+    rows = tshark_fields(result.pcap, "tcp.port == 4840 || opcua",
+                         ["ip.src", "ip.dst", "ipv6.src", "ipv6.dst", "opcua.servicenodeid.numeric"])
     if answers["scenario"]["difficulty"] == "easy":
         assert not rows
         return
     collector = answers["facts"]["historian_opcua"]
-    assert {frozenset(r[:2]) for r in rows} == {frozenset((collector["hosts"][0]["ip"], collector["server"]["ip"]))}
-    services = Counter(int(r[2]) for r in rows if r[2])
+    client, server = collector["hosts"][0], collector["server"]
+    hosts = {h["id"]: h for h in answers["topology"]["hosts"]}
+    # Over IPv4, or on a dual-stack site from the historian's temporary to the server's stable address.
+    v6 = hosts[client["id"]]["ipv6"]
+    pair = frozenset((v6["temporary"], server["ipv6"])) if v6 else frozenset((client["ip"], server["ip"]))
+    assert {frozenset(r[2:4] if v6 else r[:2]) for r in rows} == {pair}
+    services = Counter(int(r[4]) for r in rows if r[4])
     # Messages the sensor missed show up as a gap before the sender's next segment.
     missed = len(tshark_fields(result.pcap, "tcp.port == 4840 && tcp.analysis.lost_segment", ["frame.number"]))
     # The session predates the capture: watchdog Reads (631/634) and Publish (826/829) only.
@@ -447,3 +461,36 @@ def test_zeek_sees_the_modbus_traffic_of_the_export_and_every_incident_write(gen
     again = write_zeek_logs(result.pcap, answers, tmp_path / "zeek2")
     assert {name: path.read_bytes() for name, path in again.items()} == {
         name: path.read_bytes() for name, path in logs.items()}
+
+
+def test_dual_stack_site_carries_only_windows_to_windows_services_over_ipv6(generated):
+    result, answers = generated
+    hosts = {h["id"]: h for h in answers["topology"]["hosts"]}
+    dual = {h["id"] for h in hosts.values() if h["ipv6"]}
+    if answers["scenario"]["difficulty"] != "hard":
+        assert not dual  # ULA-only or no IPv6: no global addresses, nothing but ND / MLD / multicast
+        assert not tshark_fields(result.pcap, "(tcp || udp) && ipv6 && !(ipv6.dst == ff00::/8)", ["frame.number"])
+        return
+    # Only Windows PCs and servers are dual-stack; PLCs (also on embedded Windows) stay IPv4.
+    assert dual and all(hosts[h]["device"] in ("windows-workstation", "windows-server-vm", "hp-workstation",
+                                               "scada-server-vm") for h in dual)
+    by_address = {a: h for h in dual for a in hosts[h]["ipv6"].values()}
+    rows = tshark_fields(result.pcap, "(tcp || udp) && ipv6 && !(ipv6.dst == ff00::/8)",
+                         ["ipv6.src", "ipv6.dst", "tcp.dstport", "tcp.srcport", "udp.dstport", "udp.srcport",
+                          "ipv6.hlim", "tcp.options.mss_val"])
+    assert rows, "the historian's OPC UA session runs over IPv6"
+    for src, dst, tdport, tsport, udport, usport, hlim, mss in rows:
+        # Between two dual-stack hosts, from a client's temporary to a server's stable address.
+        assert src in by_address and dst in by_address
+        ports = {int(p) for p in (tdport, tsport, udport, usport) if p}
+        assert ports & {123, 4840}, ports
+        assert not ports & {502, 102, 44818, 2404, 20000, 53}
+        assert int(hlim) in (127, 128)   # Windows hop limit 128, one less across the router
+        if mss:
+            assert int(mss) == 1440      # MSS of an IPv6 SYN on Ethernet
+    # No Modbus or other PLC traffic over IPv6.
+    assert not tshark_fields(result.pcap, "ipv6 && (mbtcp || s7comm || enip || cip)", ["frame.number"])
+    # AAAA answers name the hosts' stable addresses; the IPv4-mapped recording form never leaks.
+    stable = {hosts[h]["ipv6"]["stable"] for h in dual}
+    answered = {a for (row,) in tshark_fields(result.pcap, "dns.aaaa", ["dns.aaaa"]) for a in row.split(",")}
+    assert answered <= stable

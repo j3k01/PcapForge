@@ -61,9 +61,10 @@ import math
 import struct
 from typing import TYPE_CHECKING
 
-from pcapforge import ports
+from pcapforge import dualstack, ports
 from pcapforge.compose.headers import checksum
 from pcapforge.compose.link import mac_bytes, pad
+from pcapforge.compose.packets import TCP
 from pcapforge.topology import Sink, group6_mac
 
 if TYPE_CHECKING:
@@ -173,10 +174,63 @@ def rewrite_duid_mac(payload: bytes, mac: bytes) -> bytes:
     return payload
 
 
+DOCUMENTATION_PREFIX = bytes.fromhex("20010db8")   # 2001:db8::/32 (RFC 3849): the fictional site's global prefix
+REACHABLE_S = 30.0                                  # BaseReachableTime (RFC 4861)
+REACHABLE_FACTOR = (0.5, 1.5)                       # MIN_RANDOM_FACTOR, MAX_RANDOM_FACTOR
+
+
+class GlobalAddresses:
+    """Dual-stack site (``dualstack``): a global /64 per subnet with an IPv6 router,
+    ``2001:db8:<site>:<subnet>::/64`` (the subnet part is the IPv4 subnet's third octet read as hex
+    digits, like the ULA prefix), and per dual-stack host a stable and a temporary address
+    (randomized interface identifiers, configured before the capture). Windows clients connect
+    from their temporary address (RFC 8981 preference) to the server's stable address, the one the
+    site DNS publishes as AAAA."""
+
+    def __init__(self, plan: Plan, rng: Rng) -> None:
+        topology = plan.topology
+        self.hosts = dualstack.hosts(plan)
+        self.prefix: dict[str, bytes] = {}
+        self.stable: dict[str, bytes] = {}
+        self.temporary: dict[str, bytes] = {}
+        if not self.hosts:
+            return
+        site = rng.getrandbits(16)
+        used: set[int] = set()
+        for sid, subnet in topology.subnets.items():
+            if not dualstack.routed_by_ipv6_router(plan, sid):
+                continue
+            number = int(str(subnet.network.network_address.packed[2]), 16)
+            while number in used:
+                number = (number + 0x100) & 0xFFFF
+            used.add(number)
+            self.prefix[sid] = DOCUMENTATION_PREFIX + struct.pack("!HH", site, number)
+        for host in topology.hosts:
+            if host.id in self.hosts:
+                draw = rng.child(host.id)
+                prefix = self.prefix[host.subnets[0]]
+                self.stable[host.id] = prefix + (draw.getrandbits(64) or 1).to_bytes(8, "big")
+                self.temporary[host.id] = prefix + (draw.getrandbits(64) or 1).to_bytes(8, "big")
+
+    def endpoints(self, p: Packet) -> tuple[bytes, bytes]:
+        """(source, destination) address of a packet of an IPv6 flow."""
+        client, server = p.flow.hosts
+        here, there = self.temporary[client.id], self.stable[server.id]
+        return (here, there) if p.side == 0 else (there, here)
+
+    def describe(self, host_id: str) -> dict | None:
+        if host_id not in self.stable:
+            return None
+        return {"stable": str(ipaddress.IPv6Address(self.stable[host_id])),
+                "temporary": str(ipaddress.IPv6Address(self.temporary[host_id]))}
+
+
 class Ipv6:
-    def __init__(self, plan: Plan, headers: Headers, rng: Rng, router_up: float | None = None) -> None:
+    def __init__(self, plan: Plan, headers: Headers, rng: Rng, router_up: float | None = None,
+                 global6: GlobalAddresses | None = None) -> None:
         """``router_up``: epoch at which the router's interface comes up inside the capture
-        (None: it is up before the capture starts)."""
+        (None: it is up before the capture starts). ``global6``: the dual-stack site's global
+        addresses; their hosts were configured before the capture (no interface start, no SLAAC)."""
         topology = plan.topology
         self.start = plan.start_epoch
         self.headers = headers
@@ -195,7 +249,9 @@ class Ipv6:
                 self.up[action.host] = self.start + action.args["up"]
         self.valid: dict[str, float] = {}  # host -> when its link-local address is usable
         self.solicits: dict[str, list[float]] = {}  # host -> its Router Solicitations if no RA comes first
+        self.configured: set[str] = set()  # hosts that have their addresses from the router already
         self.router: Host | None = None
+        self.sensor = topology.sensor
         router = topology.subnets[topology.sensor].router if self.address else None
         if router is not None and router.device.ipv6_router is not None:
             self.router = router
@@ -204,6 +260,15 @@ class Ipv6:
             third_octet = topology.subnets[topology.sensor].network.network_address.packed[2]
             self.prefix = ula_prefix(rng.child("ula").getrandbits(40), int(str(third_octet), 16))
         self.router_up = router_up
+        self.global6 = global6
+        if global6 is not None and global6.hosts:
+            self.prefix = global6.prefix[topology.sensor]
+            for host_id in self.address:
+                if host_id in global6.hosts:
+                    self.valid[host_id] = -math.inf
+                    self.configured.add(host_id)
+        self.confirmed: dict[tuple[str, str], float] = {}  # (sender, neighbour) -> last reachability confirmation
+        self.reachable: dict[str, float] = {}
 
     def _frame(self, src_mac: bytes, dst_mac: bytes, packet: bytes) -> bytes:
         return pad(dst_mac + src_mac + ETHERTYPE_IPV6 + packet)
@@ -276,7 +341,7 @@ class Ipv6:
             next_ra = router_valid + rng.uniform(0.0, MAX_RA_DELAY_S)
         pending: float | None = None  # solicited RA
         last_ra = -math.inf
-        configured: set[str] = set()
+        configured: set[str] = set(self.configured)
         index = 0
         while True:
             rs_t = queue[index][0] if index < len(queue) else math.inf
@@ -353,6 +418,46 @@ class Ipv6:
         answered = probe + rng.uniform(*ND_REPLY)
         frames.append((answered, self._icmp(mac, own, router, neighbor_advertisement(
             own, NA_SOLICITED | NA_OVERRIDE, mac), rmac)))
+
+    # -- neighbours of IPv6 conversations (dual-stack site) ---------------------------------------
+    def neighbor(self, p: Packet, dst: bytes) -> list[tuple[float, bytes]]:
+        """Neighbor Unreachability Detection before a frame of an IPv6 flow leaves its sender on the
+        sensor segment (the host itself, or the router forwarding for an off-segment host). Caches
+        are warm when the capture starts, so nothing is resolved by multicast; an entry whose
+        reachability is older than the sender's ReachableTime is STALE, and using it starts DELAY:
+        DELAY_FIRST_PROBE_TIME (5 s) later a unicast NS probe, answered by an NA (RFC 4861 7.3.3).
+        A Windows endpoint of a TCP connection takes the connection's progress as confirmation
+        (upper-layer hint), so busy TCP sessions never probe; datagrams and the router (which only
+        forwards) do. ``dst``: the frame's destination address."""
+        sender = p.src if self.sensor in p.src.subnets else self.router
+        target = p.dst if self.sensor in p.dst.subnets else self.router
+        if sender is None or target is None or sender is target:
+            return []
+        key = (sender.id, target.id)
+        if p.flow.proto == TCP and sender is p.src:
+            self.confirmed[key] = p.time
+            return []
+        reachable = self.reachable.get(sender.id)
+        if reachable is None:
+            reachable = self.reachable[sender.id] = REACHABLE_S * self.rng.child("nud").child(sender.id).uniform(
+                *REACHABLE_FACTOR)
+        if p.time - self.confirmed.get(key, -math.inf) <= reachable:
+            return []
+        rng = self.rng.child("nud").child(f"{key[0]}>{key[1]}").child(f"{p.time:.6f}")
+        if sender is self.router:
+            s_mac, s_addr = self.router_mac, self.router_ll
+        else:
+            s_mac, s_addr = self.mac[sender.id], self.address[sender.id]
+        if target is self.router:
+            t_mac, t_addr, flags, tlla = self.router_mac, self.router_ll, NA_ROUTER | NA_SOLICITED, None
+        else:
+            t_mac, t_addr, flags = self.mac[target.id], dst, NA_SOLICITED | NA_OVERRIDE
+            tlla = t_mac
+        probe = p.time + DELAY_FIRST_PROBE_S + rng.uniform(*TIMER_SLACK)
+        answered = probe + rng.uniform(*ND_REPLY)
+        self.confirmed[key] = answered
+        return [(probe, self._icmp(s_mac, s_addr, t_addr, neighbor_solicitation(t_addr, s_mac), t_mac)),
+                (answered, self._icmp(t_mac, t_addr, s_addr, neighbor_advertisement(t_addr, flags, tlla), s_mac))]
 
     # -- datagrams ----------------------------------------------------------------------
     def datagram(self, p: Packet) -> tuple[float, bytes] | None:

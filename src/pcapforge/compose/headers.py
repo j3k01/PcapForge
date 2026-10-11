@@ -1,4 +1,4 @@
-"""IPv4 / TCP / UDP header rebuild with the final addressing and per-OS stack behaviour."""
+"""IPv4 / IPv6 / TCP / UDP header rebuild with the final addressing and per-OS stack behaviour."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from pcapforge.compose.packets import ACK, SYN, TCP, UDP, Flow, Packet
 from pcapforge.topology import LIMITED_BROADCAST, Sink
 
 if TYPE_CHECKING:
+    from pcapforge.compose.ipv6 import GlobalAddresses
     from pcapforge.plan import Plan
     from pcapforge.profiles import Stack
     from pcapforge.rng import Rng
@@ -64,11 +65,14 @@ def _option_list(stack: Stack, offered: set[str] | None, ts_ok: bool) -> list[st
 _OPTION_SIZE = {"mss": 4, "nop": 1, "ws": 3, "sack_perm": 2, "ts": 10}
 
 
-def _encode_options(names: list[str], stack: Stack, tsval: int, tsecr: int) -> bytes:
+IPV6_MSS_DELTA = 20   # an IPv6 header is 20 bytes longer than an IPv4 one: MSS 1440 on Ethernet
+
+
+def _encode_options(names: list[str], stack: Stack, tsval: int, tsecr: int, ipv6: bool = False) -> bytes:
     out = bytearray()
     for name in names:
         if name == "mss":
-            out += struct.pack("!BBH", 2, 4, stack.mss)
+            out += struct.pack("!BBH", 2, 4, stack.mss - (IPV6_MSS_DELTA if ipv6 else 0))
         elif name == "nop":
             out.append(1)
         elif name == "ws":
@@ -92,12 +96,12 @@ class Negotiated:
     windows: tuple[int, int]  # receive window in bytes of client, server
 
 
-def negotiate(client: Stack, server: Stack) -> Negotiated:
+def negotiate(client: Stack, server: Stack, ipv6: bool = False) -> Negotiated:
     offered = frozenset(_option_list(client, None, False))
     ws = "ws" in offered and "ws" in server.syn_options and server.window_scale is not None
     ts = client.timestamps and server.timestamps and "ts" in offered and "ts" in server.syn_options
     # Each side sends at most the peer's announced MSS, minus the 12-byte timestamp option.
-    mss = min(client.mss, server.mss) - (12 if ts else 0)
+    mss = min(client.mss, server.mss) - (IPV6_MSS_DELTA if ipv6 else 0) - (12 if ts else 0)
     windows = tuple((s.window << s.window_scale) if ws else s.syn_window for s in (client, server))
     return Negotiated(offered, ws, ts, mss, windows)
 
@@ -114,8 +118,12 @@ def _skip_name(data: bytes, offset: int) -> int:
         offset += length + 1
 
 
-def rewrite_a_records(payload: bytes, remap) -> bytes:
-    """Replace A-record addresses for which ``remap(rdata) -> bytes | None`` has a mapping."""
+_MAPPED = bytes(10) + b"\xff\xff"   # ::ffff:0:0/96 (IPv4-mapped)
+
+
+def rewrite_a_records(payload: bytes, remap, remap6=None) -> bytes:
+    """Replace A-record addresses for which ``remap(rdata) -> bytes | None`` has a mapping, and
+    AAAA records for which ``remap6(rdata) -> bytes | None`` has one."""
     try:
         qdcount, ancount, nscount, arcount = struct.unpack_from("!HHHH", payload, 4)
         offset = 12
@@ -126,11 +134,14 @@ def rewrite_a_records(payload: bytes, remap) -> bytes:
             offset = _skip_name(payload, offset)
             rtype, rclass, _ttl, rdlength = _DNS_RR.unpack_from(payload, offset)
             offset += _DNS_RR.size
+            new = None
             if rtype == 1 and rclass == 1 and rdlength == 4:
                 new = remap(payload[offset:offset + 4])
-                if new is not None:
-                    out = out if out is not None else bytearray(payload)
-                    out[offset:offset + 4] = new
+            elif rtype == 28 and rclass == 1 and rdlength == 16 and remap6 is not None:
+                new = remap6(payload[offset:offset + 16])
+            if new is not None:
+                out = out if out is not None else bytearray(payload)
+                out[offset:offset + rdlength] = new
             offset += rdlength
     except (IndexError, struct.error):
         return payload
@@ -168,10 +179,11 @@ class _FlowHeaders:
 class Headers:
     """Builds final IPv4 packets in capture-time order (IP-ID / TS clocks advance with time)."""
 
-    def __init__(self, plan: Plan, rng: Rng) -> None:
+    def __init__(self, plan: Plan, rng: Rng, global6: GlobalAddresses | None = None) -> None:
         self.topology = plan.topology
         self.start = plan.start_epoch
         self.rng = rng
+        self.global6 = global6   # dual-stack site: hosts' global IPv6 addresses (AAAA answers)
         self.host_ipid: dict[str, int] = {}
         self.port_cursor: dict[str, int] = {}
         self.ports_used: dict[str, set[int]] = {}
@@ -283,9 +295,29 @@ class Headers:
 
     # -- packets ----------------------------------------------------------------------
     def skip(self, p: Packet) -> None:
-        """Account for a packet the sensor does not see (it still uses ports and IP-IDs)."""
+        """Account for a packet the sensor does not see (it still uses ports and, over IPv4, IP-IDs)."""
         state = self._flow(p.flow)
-        self._ipid(state, p.side, p.src)
+        if not p.flow.v6:
+            self._ipid(state, p.side, p.src)
+
+    def build6(self, p: Packet, hops: int, src: bytes, dst: bytes) -> bytes:
+        """IPv6 packet of a flow carried over IPv6 (dual-stack site): no IP-ID, hop limit from the
+        stack's TTL, flow label 0 (Windows), checksum over the IPv6 pseudo-header."""
+        flow = p.flow
+        state = self._flow(flow)
+        side = p.side
+        sport, dport = state.ports[side], state.ports[1 - side]
+        if flow.proto == TCP:
+            l4 = self._tcp(p, state, sport, dport)
+        else:
+            l4 = _UDP.pack(sport, dport, 8 + len(p.payload), 0) + p.payload
+        csum = checksum(src + dst + len(l4).to_bytes(4, "big") + bytes((0, 0, 0, flow.proto)) + l4)
+        if flow.proto == UDP and csum == 0:
+            csum = 0xFFFF
+        offset = 16 if flow.proto == TCP else 6
+        l4 = l4[:offset] + csum.to_bytes(2, "big") + l4[offset + 2:]
+        hop = max(state.stacks[side].ttl - hops, 1)
+        return struct.pack("!IHBB", 0x60000000, len(l4), flow.proto, hop) + src + dst + l4
 
     def build(self, p: Packet, hops: int, delivery: dhcp.Delivery | None = None) -> bytes:
         flow = p.flow
@@ -306,7 +338,7 @@ class Headers:
         else:
             payload = p.payload
             if side == 1 and flow.server_port == ports.DNS:
-                payload = rewrite_a_records(payload, lambda rdata: self._dns_address(rdata, flow))
+                payload = rewrite_a_records(payload, lambda rdata: self._dns_address(rdata, flow), self._dns_address6)
             elif side == 0 and flow.server_port == ports.NBDGM:
                 payload = rewrite_nbdgm_source(payload, lambda ip: self._own_address(ip, flow))
             elif dhcp.is_dhcp(p):
@@ -343,7 +375,7 @@ class Headers:
         if p.flags & SYN:
             window = stack.syn_window
             names = _option_list(stack, state.offered if side == 1 else None, state.ts)
-            options = _encode_options(names, stack, tsval, tsecr)
+            options = _encode_options(names, stack, tsval, tsecr, flow.v6)
         else:
             window = stack.window if state.ws else stack.syn_window
             options = struct.pack("!BBBBII", 1, 1, 8, 10, tsval, tsecr) if state.ts else b""
@@ -367,6 +399,13 @@ class Headers:
     def _dns_address(self, rdata: bytes, flow: Flow) -> bytes | None:
         host = self.loopback.get(rdata)
         return None if host is None else self.address(host, flow.hosts[0])
+
+    def _dns_address6(self, rdata: bytes) -> bytes | None:
+        """Global address of the host an AAAA answer names by its IPv4-mapped loopback address."""
+        if rdata[:12] != _MAPPED or self.global6 is None:
+            return None
+        host = self.loopback.get(rdata[12:])
+        return None if host is None else self.global6.stable.get(host.id)
 
     def _own_address(self, ip: bytes, flow: Flow) -> bytes | None:
         """Final address of the host whose loopback ``ip`` is, as the flow's server sees it."""
