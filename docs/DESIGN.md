@@ -256,6 +256,13 @@ subscription (`vars.opcua`), see below.
   little = CDAB); `power_substation` and `hvac_building` use them. `Point.encode` returns the register words,
   `ProcessProfile.decode_block` decodes whole points from a read/write block (half a float is skipped), and a
   write covering one word of a float replaces only that word. S7 DBs lay out one REAL per point (index-based).
+- Web UI (`ui/`, `pcapforge ui`): `http.server` with a thread per request; HTML rendered server-side
+  (`views.py`, everything escaped), one stylesheet and one script (header rain, job polling) as package data,
+  no frontend build and no extra dependency. Long work runs in `jobs.Jobs`, a single worker thread in
+  submission order (recordings share the loopback range and the cache); `generate`'s progress callback
+  feeds the job log, `recording i/n` lines drive the progress bar. Run files are served only from inside a
+  run directory (resolved path check); `Host` is checked on loopback binds (DNS rebinding) and every POST's
+  `Origin` must match it.
 Next: IT-line scenarios (README roadmap).
 
 ### Composer spec

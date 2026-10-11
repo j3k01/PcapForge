@@ -1,4 +1,4 @@
-"""Command-line interface: `pcapforge list|show|validate|generate|verify|export|grade|package|report`."""
+"""Command-line interface: `pcapforge list|show|validate|generate|verify|export|grade|package|report|ui`."""
 
 from __future__ import annotations
 
@@ -187,6 +187,16 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_ui(args) -> int:
+    from pcapforge.ui.server import serve
+
+    try:
+        return serve(Path(args.out), _scenarios_dir(args), args.host, args.port, not args.no_browser)
+    except OSError as exc:
+        print(f"error: cannot listen on {args.host}:{args.port}: {exc}", file=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pcapforge", description=(
         "Generate realistic, labeled PCAPs with answer keys for blue-team training."))
@@ -256,6 +266,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--grades", help="JSON from `pcapforge grade --json` to add class results")
     p.add_argument("--out", "-o", help="output file (default: <run_dir>/report.html)")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("ui", help="local web UI: scenarios, generation with progress, runs and their answer keys")
+    p.add_argument("--out", "-o", default="out", help="output directory of the runs (as for generate)")
+    p.add_argument("--host", default="127.0.0.1", help="listen address (default: this machine only)")
+    p.add_argument("--port", type=int, default=8765, help="0 = any free port")
+    p.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
+    p.set_defaults(func=cmd_ui)
     return parser
 
 

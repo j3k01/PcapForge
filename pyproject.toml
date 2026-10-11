@@ -35,10 +35,11 @@ packages = [
     "pcapforge.profiles",
     "pcapforge.scenario",
     "pcapforge._scenarios",
+    "pcapforge.ui",
 ]
 
 [tool.setuptools.package-data]
-pcapforge = ["**/*.json", "**/*.yaml"]
+pcapforge = ["**/*.json", "**/*.yaml", "ui/static/*.css", "ui/static/*.js"]
 "pcapforge._scenarios" = ["**/*.yaml", "LICENSE"]
 
 [tool.pytest.ini_options]

@@ -347,8 +347,8 @@ questions:
     type: ip
     points: 10
     hint: The firewall's Router Advertisements carry it in an RDNSS option (icmpv6.opt.rdnss).
-    check:
-      filter: "icmpv6.type == 134 && icmpv6.opt.rdnss == ${facts.dns_service.hosts[0].ipv6}"
+    check:  # an RA may not fall into a short capture; the queries to the resolver always do
+      filter: "icmpv6.opt.rdnss == ${facts.dns_service.hosts[0].ipv6} || (udp.dstport == 53 && ipv6.dst == ${facts.dns_service.hosts[0].ipv6})"
       expect: {min: 1}
 
 translations:

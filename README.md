@@ -74,6 +74,7 @@ Other commands:
 - `pcapforge grade answers.json <submissions>` scores student answers. Hints listed under `hints_used` cost 20 % of the question's points (rounded up).
 - `pcapforge export-ctfd <run dir>` writes one CTFd challenge per question in the `ctfcli` format (`ctfd/qNN-<id>/challenge.yml`). Install each with `ctf challenge install <dir>`. The first challenge carries the capture and the briefing. Sets, maps and timestamps use a canonical flag format that each challenge description states.
 - `pcapforge report <run dir> [--grades grades.json]` writes `report.html` for the debrief: one self-contained page (inline SVG, no external resources) with the incident timeline and frame numbers, before/after charts of the changed setpoints and affected measurements (needs `siem/`, i.e. `--siem` or `pcapforge export`), the answers with their tshark checks, and optional class results from `pcapforge grade --json`.
+- `pcapforge ui [--out out] [--port 8765]` starts the local web UI (see below).
 
 ### What the analyst sees (easy, seed 42)
 
@@ -103,6 +104,25 @@ And the matching entry in `answers.json`:
               "expect": {"count": 1}}]
 }
 ```
+
+## Web UI
+
+`pcapforge ui` serves a small local web interface on `http://127.0.0.1:8765/` and opens it in the browser.
+It works on the same output directory as `generate` (`--out`, default `out`):
+
+- **scenarios**: the catalog; per scenario its summary, ATT&CK techniques, questions and a level matrix
+  (every knob per level, values that change from the level before highlighted), plus a generate form
+  (level, seed, length, language, format, SIEM / Zeek export).
+- **jobs**: generation and the run actions run one at a time in the background; the job page shows the
+  recording progress and the log, then links the run.
+- **runs**: per run the capture metadata, a network map (subnets, hosts, routers, the SPAN segment, IPv6
+  hosts), the host table, the timeline, the answer key behind a "reveal answers" toggle, the files
+  (download), and buttons for verify, SIEM / Zeek export, the debrief report, the student / instructor zips
+  and the CTFd export.
+
+Standard library only, no extra dependency. It listens on 127.0.0.1 and refuses other `Host` headers and
+cross-origin form posts. `--host 0.0.0.0` makes it reachable from the network: anyone who reaches it can
+start jobs and read the answer keys.
 
 ## Grading and packaging
 

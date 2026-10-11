@@ -93,7 +93,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 - [ ] **macOS support check** (S): loopback aliases for 127.77.0.0/16 and a CI job on `macos-latest`.
 - [ ] **Docs site** (S): MkDocs with the scenario authoring guide, the actor/profile reference generated from code, and the answers.json schema.
 - [ ] **LLM "director"** (M, optional): turn a text description into a draft scenario YAML that a human reviews and that `pcapforge validate` checks. It never generates packets.
-- [ ] **Web UI** (L, optional): pick scenario, difficulty and seeds, then download the class packages.
+- [~] **Web UI** (L): `pcapforge ui`, local, standard library only. Done: scenario catalog with level matrix, generation with live progress (background job queue), run pages with network map, timeline, answer key, files and the run actions (verify, export, report, package, CTFd). Still open: student mode (questions, submission and grading in the browser, without the answer key), flow / protocol timeline from the SIEM export, batch generation for a class (seeds file).
 - [~] **Repository housekeeping** (S; badges, Dependabot and issue templates done; GitHub description/topics and labels still open):
   - README badges (CI, release, license);
   - GitHub description and topics;
