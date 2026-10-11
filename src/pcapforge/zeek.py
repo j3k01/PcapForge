@@ -15,6 +15,7 @@ import functools
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from pcapforge.tools import ToolNotFound
@@ -72,11 +73,28 @@ def site_script(subnets: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Zeek LTS from the security:zeek OBS packages into /opt/zeek, as in CI (Ubuntu 24.04, also the default WSL distribution).
+_APT_INSTALL = ("echo 'deb http://download.opensuse.org/repositories/security:/zeek/xUbuntu_24.04/ /' "
+                "> /etc/apt/sources.list.d/security:zeek.list && curl -fsSL "
+                "https://download.opensuse.org/repositories/security:zeek/xUbuntu_24.04/Release.key "
+                "| gpg --dearmor > /etc/apt/trusted.gpg.d/security_zeek.gpg && apt-get update "
+                "&& apt-get install -y zeek-lts-core")
+
+
+def install_hint() -> str:
+    """One command that installs Zeek on this platform."""
+    if os.name == "nt":
+        return f'Windows, in WSL Ubuntu 24.04: wsl -u root -e sh -c "{_APT_INSTALL}"'
+    if sys.platform == "darwin":
+        return "macOS: brew install zeek"
+    return f'Ubuntu 24.04: sudo sh -c "{_APT_INSTALL}"'
+
+
 def require_zeek() -> None:
     """Fail fast when neither a local Zeek nor Docker is available."""
     if not find_zeek() and shutil.which("docker") is None:
         raise ToolNotFound("'zeek' not found: install Zeek (zeek on PATH, /opt/zeek/bin/zeek or PCAPFORGE_ZEEK; "
-                           "on Windows in WSL) or Docker for the zeek/zeek image")
+                           f"on Windows in WSL) or Docker for the zeek/zeek image. {install_hint()}")
 
 
 def _command(pcap: Path, out_dir: Path) -> list[str]:

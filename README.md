@@ -331,7 +331,9 @@ Zeek is found as `PCAPFORGE_ZEEK` (path to the binary), `zeek` on `PATH` or `/op
 in the default WSL distribution (`zeek` on its `PATH` or `/opt/zeek/bin/zeek`, run through `wsl.exe`); otherwise
 the official `zeek/zeek:lts` Docker image is used (`PCAPFORGE_ZEEK_IMAGE` overrides it; the container has
 no network). Zeek does not run natively on Windows. In WSL Ubuntu 24.04 the packages CI uses install it to
-`/opt/zeek` (`zeek-lts-core` from the `security:zeek` repository, see `.github/workflows/ci.yml`).
+`/opt/zeek` (`zeek-lts-core` from the `security:zeek` repository, see `.github/workflows/ci.yml`). When no Zeek
+is found, the error message includes the install command for the platform (WSL Ubuntu 24.04 on Windows,
+Ubuntu 24.04, Homebrew on macOS).
 
 ```console
 $ pcapforge generate -s ot-baseline-operations -d medium --seed zeek-smoke --duration 10m --siem --zeek
