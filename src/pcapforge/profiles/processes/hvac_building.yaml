@@ -31,7 +31,7 @@ register_style: {coils: 1, discrete: 10001, input: 30001, holding: 40001}
 word_order: little
 
 holding:
-  - {address: 0, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: Control mode (1 manual, 2 auto)}
+  - {address: 0, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: "Control mode (1 manual, 2 auto)"}
   - {address: 1, name: duct_static_pressure_sp, unit: Pa, scale: 1, nominal: 250, normal: [200, 320], writable: true, desc: Duct static-pressure setpoint}
   - {address: 2, name: zone1_temp_sp, type: float32, unit: degC, nominal: 22.0, normal: [20.0, 24.0], writable: true, desc: Zone 1 temperature setpoint}
   - {address: 4, name: zone2_temp_sp, type: float32, unit: degC, nominal: 22.5, normal: [20.0, 24.0], writable: true, desc: Zone 2 temperature setpoint}
@@ -97,3 +97,4 @@ operator_adjustable:
 
 translations:
   pl: {title: "HVAC budynku — centrala wentylacyjna, strefy klimakonwektorów i agregat wody lodowej"}
+  de: {title: "Gebäudetechnik (HLK) — Lüftungszentrale, Gebläsekonvektor-Zonen und Kaltwassersatz"}

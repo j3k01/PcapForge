@@ -30,7 +30,7 @@ holding:
   - {address: 6, name: chlorine_high_alarm, unit: mg/L, scale: 100, nominal: 4.0, normal: [3.5, 4.5], writable: true, desc: Chlorine residual high alarm threshold}
   - {address: 7, name: pid_level_kp, unit: "", scale: 100, nominal: 1.25, normal: [0.8, 2.0], writable: true, desc: Level PID proportional gain}
   - {address: 8, name: pid_level_ti, unit: s, scale: 1, nominal: 240, normal: [120, 400], writable: true, desc: Level PID integral time}
-  - {address: 9, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: Control mode (1 manual, 2 auto)}
+  - {address: 9, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: "Control mode (1 manual, 2 auto)"}
 
 input:
   - {address: 0, name: clearwell_level, unit: cm, scale: 1, nominal: 350, desc: Measured clearwell level, model: {type: follow, source: clearwell_level_sp, tau: 900, noise: 1.2}}
@@ -79,3 +79,4 @@ operator_adjustable:
 
 translations:
   pl: {title: "Uzdatnianie wody pitnej — zbiornik wody czystej i chlorowanie"}
+  de: {title: "Trinkwasseraufbereitung — Reinwasserbehälter und Chlorung"}

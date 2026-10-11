@@ -31,7 +31,7 @@ word_order: big
 
 holding:
   - {address: 0, name: tap_position_sp, unit: "", scale: 1, nominal: 9, normal: [5, 13], writable: true, desc: OLTC tap-position setpoint}
-  - {address: 1, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: Control mode (1 manual, 2 auto)}
+  - {address: 1, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: "Control mode (1 manual, 2 auto)"}
   - {address: 2, name: voltage_high_alarm, type: float32, unit: kV, nominal: 11.6, normal: [11.4, 11.8], writable: true, desc: Busbar overvoltage alarm threshold}
   - {address: 4, name: voltage_low_alarm, type: float32, unit: kV, nominal: 10.4, normal: [10.2, 10.6], writable: true, desc: Busbar undervoltage alarm threshold}
   - {address: 6, name: oil_temp_alarm, type: float32, unit: degC, nominal: 90, normal: [85, 95], writable: true, desc: Transformer oil high-temperature alarm threshold}
@@ -92,3 +92,4 @@ operator_adjustable:
 
 translations:
   pl: {title: "Stacja elektroenergetyczna SN — transformator 33/11 kV i pola odpływowe"}
+  de: {title: "MS-Umspannwerk — Transformator 33/11 kV und Abgangsfelder"}

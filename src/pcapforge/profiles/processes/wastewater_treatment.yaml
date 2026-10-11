@@ -34,7 +34,7 @@ holding:
   - {address: 5, name: ph_low_alarm, unit: pH, scale: 100, nominal: 6.5, normal: [6.3, 6.7], writable: true, desc: Low pH alarm threshold}
   - {address: 6, name: ph_high_alarm, unit: pH, scale: 100, nominal: 8.5, normal: [8.3, 8.7], writable: true, desc: High pH alarm threshold}
   - {address: 7, name: ammonia_high_alarm, unit: mg/L, scale: 100, nominal: 5.0, normal: [4.0, 6.0], writable: true, desc: High effluent-ammonia alarm threshold}
-  - {address: 8, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: Control mode (1 manual, 2 auto)}
+  - {address: 8, name: mode, unit: "", scale: 1, nominal: 2, normal: [1, 2], writable: true, desc: "Control mode (1 manual, 2 auto)"}
 
 input:
   - {address: 0, name: influent_flow, unit: m3/h, scale: 10, nominal: 850, normal: [550, 1150], model: {type: daily, amplitude: 220, phase_h: 7, noise: 12}, desc: Influent flow}
@@ -85,3 +85,4 @@ operator_adjustable:
 
 translations:
   pl: {title: "Oczyszczalnia ścieków — komora napowietrzania i osadnik wtórny"}
+  de: {title: "Kläranlage — Belebungsbecken und Nachklärbecken"}
