@@ -387,3 +387,38 @@ translations:
       ipv6_resolver:
         text: Hosty Windows rozwiązują nazwy po IPv6. Którego adresu IPv6 używają jako serwera DNS? Nie został skonfigurowany przez DHCP.
         hint: Ogłoszenia routera (Router Advertisement) z firewalla niosą go w opcji RDNSS (icmpv6.opt.rdnss).
+  de:
+    title: Baseline des Normalbetriebs im OT-Netz (kein Vorfall)
+    briefing: |
+      Sie verstärken das OT-SOC der Anlage {site_name} ({domain}), {process_title}.
+      Bevor Sie Auffälligkeiten erkennen können, brauchen Sie eine Baseline. Der beigefügte Mitschnitt
+      stammt vom SPAN-Port des Switches im Steuerungsnetz ({sensor_subnet}) während einer normalen Schicht.
+      Dokumentieren Sie, wer mit wem kommuniziert, wie oft, mit welchen Protokollen und Funktionscodes
+      und welche Änderungen zum Normalbetrieb gehören.
+    questions:
+      hmi_ip:
+        text: Welcher Host fragt am häufigsten alle SPS per Modbus/TCP ab (das SCADA-HMI)? Geben Sie seine IP-Adresse an.
+      poll_interval:
+        text: Wie lang ist der Abfragezyklus des HMI für eine einzelne SPS, in Sekunden?
+        hint: Prüfen Sie den Abstand zwischen aufeinanderfolgenden identischen Leseanfragen an eine SPS (Statistics > Conversations oder modbus.func_code mit frame.time_delta_displayed).
+      plc_count:
+        text: Wie viele SPS antworten in diesem Mitschnitt auf Modbus/TCP-Anfragen?
+      read_functions:
+        text: Welche Modbus-Funktionscodes verwendet die normale Abfrage?
+      approved_writes:
+        text: Wie viele Modbus-Schreibanfragen (Funktionscodes 5, 6, 15, 16) enthält der Mitschnitt? Alle sind freigegebene Bedieneränderungen.
+      approved_writer:
+        text: Welcher Host hat diese freigegebenen Änderungen vorgenommen? Geben Sie seine IP-Adresse an.
+      time_source:
+        text: Welche IP-Adresse stellt die Zeit (NTP) für das Steuerungsnetz bereit?
+      opcua_server:
+        text: Welcher Host stellt OPC UA (TCP 4840) bereit und welcher nutzt es? Geben Sie die IP-Adresse des Servers an.
+      opcua_server_v6:
+        text: Welcher Host stellt dem Historian OPC UA (TCP 4840) bereit? Geben Sie die IPv6-Adresse an, von der er antwortet.
+        hint: In dieser Dual-Stack-Anlage verbinden sich Windows-Hosts untereinander per IPv6; filtern Sie auf opcua und prüfen Sie ipv6.src.
+      ipv6_services:
+        text: Diese Anlage ist Dual-Stack. Zu welchen Serverports verbinden sich Windows-Hosts per IPv6 (alles andere, einschließlich des gesamten Verkehrs zu den SPS, bleibt bei IPv4)?
+        hint: Filtern Sie mit "ipv6 && !icmpv6 && !(ipv6.dst == ff00::/8)" und prüfen Sie die Zielports.
+      ipv6_resolver:
+        text: Windows-Hosts lösen Namen per IPv6 auf. Welche IPv6-Adresse verwenden sie als DNS-Server? Sie wurde nicht per DHCP konfiguriert.
+        hint: Die Router Advertisements der Firewall übertragen sie in der RDNSS-Option (icmpv6.opt.rdnss).

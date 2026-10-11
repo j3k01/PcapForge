@@ -259,3 +259,31 @@ translations:
         text: O której godzinie (UTC) wysłano pierwszy nieautoryzowany zapis (zmianę progu alarmu)?
       technique:
         text: Która technika MITRE ATT&CK for ICS opisuje wyłączenie alarmu przed szkodliwą zmianą?
+  de:
+    title: Maskierung einer Alarmgrenze vor einer Sollwertänderung außerhalb des Bereichs
+    briefing: |
+      Sie sind Analyst im OT-SOC der Anlage {site_name} ({domain}), {process_title}.
+      Der beigefügte Mitschnitt stammt vom SPAN-Port des Switches im Steuerungsnetz ({sensor_subnet}).
+      Nur das SCADA-HMI und der Historian fragen die SPS ab, und Sollwerte darf ausschließlich die
+      Engineering-Station ändern. Während der Schicht lief ein Prozesswert weit aus dem sicheren Bereich,
+      und dennoch wurde kein Alarm protokolliert. Klären Sie, warum der Alarm stumm blieb: Gehen Sie alle
+      Parameter-Schreibzugriffe der Reihe nach durch und finden Sie den, der den Alarm vor der schädlichen
+      Änderung ausgeschaltet hat.
+      Die Registertabelle der SPS finden Sie unten.
+    questions:
+      source_ip:
+        text: Von welcher IP-Adresse wurden die Parameteränderungen (Alarmgrenze und Sollwert) vorgenommen?
+        hint: Listen Sie jeden Host auf, der Modbus-Schreibzugriffe sendet (Funktionen 6, 16). Berechtigt ist nur die Engineering-Station; jeder andere Schreiber ist die Antwort.
+      masked_alarm:
+        text: Welche Alarmgrenze hat die Quelle zuerst geändert, um den Alarm zu blenden? (Name aus der Registertabelle)
+        hint: Der erste Schreibzugriff betrifft eine Alarmgrenze (Name endet auf _alarm). Liegt sie außerhalb des Bereichs, löst der Alarm nie aus.
+      changed_setpoint:
+        text: Welchen Sollwert hat die Quelle anschließend aus dem Normalbereich geschoben?
+        hint: Nach dem Verschieben der Grenze schiebt der zweite Schreibzugriff den geregelten Sollwert aus dem Bereich - die Änderung, die der Alarm erkannt hätte.
+      order:
+        text: Was kam zuerst - die Änderung der Alarmgrenze oder die Sollwertänderung? (antworten Sie "alarm" oder "setpoint")
+        hint: Sortieren Sie die Schreibzugriffe der Quelle nach Zeit. Der maskierende Schreibzugriff muss der schädlichen Änderung vorausgehen, damit der Alarm stumm bleibt.
+      first_write:
+        text: Um welche Uhrzeit (UTC) wurde der erste nicht autorisierte Schreibzugriff (die Änderung der Alarmgrenze) gesendet?
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das Abschalten eines Alarms vor einer schädlichen Änderung?

@@ -278,3 +278,31 @@ translations:
         hint: Poszukaj zapisu do cewki alarm_ack / alarm_reset od tego samego nadawcy po poleceniach siłowników.
       technique:
         text: Która technika MITRE ATT&CK for ICS najlepiej opisuje sterowanie siłownikami cewkami Modbus z nieuprawnionego hosta?
+  de:
+    title: Nicht autorisierte Modbus/TCP-Coil-Befehle erzwingen den Zustand von Aktoren
+    briefing: |
+      Sie sind Analyst im OT-SOC der Anlage {site_name} ({domain}), {process_title}.
+      Der beigefügte Mitschnitt stammt vom SPAN-Port des Switches im Steuerungsnetz ({sensor_subnet}).
+      Nur das SCADA-HMI und der Historian kommunizieren per Modbus/TCP mit den SPS, und Parameter darf
+      ausschließlich die Engineering-Station ändern. Die Bediener meldeten, dass Geräte von selbst ihren
+      Zustand wechselten und ein Alarm ohne Quittierung am HMI zurückgesetzt wurde. Modbus-Coil-Schreibzugriffe
+      (Funktion 5 / 15) steuern Aktoren direkt; klären Sie, wer sie gesendet hat, was erzwungen wurde und ob
+      ein Alarm unterdrückt wurde.
+      Die Registertabelle der SPS finden Sie unten.
+    questions:
+      source_ip:
+        text: Von welcher IP-Adresse wurden die nicht autorisierten Modbus-Coil-Befehle gesendet?
+        hint: Coil-Schreibzugriffe sind die Modbus-Funktionscodes 5 (Write Single Coil) und 15 (Write Multiple Coils). Finden Sie den Absender; SCADA-Clients lesen nur.
+      target_ip:
+        text: Welche SPS (IP-Adresse) hat die Coil-Befehle empfangen?
+      first_force:
+        text: Um welche Uhrzeit (UTC) wurde der erste nicht autorisierte Coil-Befehl gesendet?
+      coils_forced:
+        text: Welche Coils (Namen aus der Registertabelle) hat der Absender erzwungen? Zählen Sie sie auf.
+      functions_used:
+        text: Welche Modbus-Funktionscodes hat der Absender zum Steuern der Coils verwendet?
+      alarm_suppressed:
+        text: Hat der Absender nach dem Erzwingen der Coils Alarme quittiert oder zurückgesetzt? (antworten Sie "yes" oder "no")
+        hint: Suchen Sie nach einem Schreibzugriff auf die Coil alarm_ack / alarm_reset vom selben Absender nach den Aktorbefehlen.
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das Steuern von Aktoren über Modbus-Coils von einem nicht berechtigten Host am besten?

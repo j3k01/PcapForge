@@ -10,7 +10,7 @@ import copy
 
 from pcapforge.scenario import resolve
 
-LANGS = ("en", "pl")
+LANGS = ("en", "pl", "de")
 
 UI = {
     "en": {
@@ -91,6 +91,46 @@ UI = {
             "timestamp": "czas UTC, ISO 8601: RRRR-MM-DDTGG:MM:SS.ffffffZ",
             "set": "lista: [a, b, c]",
             "map": "mapa: {nazwa: wartość, nazwa: wartość}",
+        },
+    },
+    "de": {
+        "capture": "Mitschnitt: `{file}` ({packets} Pakete, SHA-256 `{sha256}`).",
+        "asset_inventory": "Anlageninventar",
+        "inventory_cols": ["Name", "Rolle", "IP", "Hersteller"],
+        "network": "Netzwerk",
+        "network_cols": ["Subnetz", "CIDR", "Gateway", "Mitschnittpunkt"],
+        "yes": "ja",
+        "no": "nein",
+        "register_map": "Registertabelle: {title}",
+        "regmap_note": "Modbus Unit-ID {unit}; bereitgestellt von {hosts}. {addressing}; "
+                       "physikalischer Wert eines UINT16 = Rohwert des Registers / Skalierung.",
+        "regmap_float_big": "Ein FLOAT32 ist ein IEEE-754-Wert einfacher Genauigkeit in zwei aufeinanderfolgenden "
+                            "Registern, höherwertiges Wort zuerst (ABCD).",
+        "regmap_float_little": "Ein FLOAT32 ist ein IEEE-754-Wert einfacher Genauigkeit in zwei aufeinanderfolgenden "
+                               "Registern, niederwertiges Wort zuerst (CDAB, Wörter vertauscht).",
+        "regmap_addr_zero": "Adressen beginnen bei 0",
+        "regmap_addr_vendor": "Registernummern folgen der Herstellerkonvention (z. B. 40001 = Holding-Register 0 "
+                              "auf der Leitung); Filter und Lösungsschlüssel verwenden die 0-basierte Leitungsadresse",
+        "regmap_cols": ["Tabelle", "Register", "Name", "Beschreibung", "Einheit", "Typ", "Skalierung",
+                        "Normalbereich", "Beschreibbar"],
+        "questions": "Fragen",
+        "points": "Pkt.",
+        "tmpl_title": "# pcapforge-Abgabe: {title}",
+        "tmpl_howto": [
+            "# Antwort jeweils nach dem Doppelpunkt eintragen; Antworten mit ': ' oder beginnend mit '[' oder '{' in Anführungszeichen setzen.",
+            "# Unter eigenem Namen speichern (z. B. max-mustermann.yaml); die Lehrkraft bewertet sie mit",
+            "#   pcapforge grade answers.json max-mustermann.yaml",
+        ],
+        "tmpl_answer": "Antwort",
+        "tmpl_hint": "Hinweis (Nutzung kostet {cost} Pkt.):",
+        "tmpl_hints_used": ["# Ehrensache: IDs aller Fragen auflisten, deren Hinweis gelesen wurde, z. B. [source_ip]."],
+        "formats": {
+            "ip": "eine IP-Adresse",
+            "mac": "eine MAC-Adresse",
+            "number": "eine Zahl",
+            "timestamp": "eine UTC-Zeit, ISO 8601: JJJJ-MM-TTThh:mm:ss.ffffffZ",
+            "set": "eine Liste: [a, b, c]",
+            "map": "eine Zuordnung: {Name: Wert, Name: Wert}",
         },
     },
 }

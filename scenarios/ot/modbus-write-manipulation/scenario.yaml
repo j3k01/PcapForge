@@ -527,3 +527,41 @@ translations:
         text: Która technika MITRE ATT&CK for ICS najlepiej opisuje zmiany nastaw?
       legit_vs_unauthorized:
         text: Stacja inżynierska zmieniała też nastawy legalnie. Ile żądań zapisu w nagraniu było legalnymi zmianami operatora?
+  de:
+    title: Nicht autorisierte Sollwertänderungen an der SPS über Modbus/TCP
+    briefing: |
+      Sie sind Analyst im OT-SOC der Anlage {site_name} ({domain}), {process_title}.
+      Die Instandhaltung meldete während der Schicht ungewöhnliches Prozessverhalten. Der beigefügte
+      Mitschnitt stammt vom SPAN-Port des Switches im Steuerungsnetz ({sensor_subnet}).
+      Im Normalbetrieb kommunizieren nur das SCADA-HMI, der SCADA-Server (falls die Anlage einen hat)
+      und der Historian per Modbus/TCP mit den SPS, und Sollwerte darf ausschließlich die
+      Engineering-Station ändern.
+      Die Registertabelle der SPS finden Sie unten.
+    questions:
+      source_ip:
+        text: Von welcher IP-Adresse wurden die nicht autorisierten Modbus-Schreibanfragen gesendet?
+        hint: Beginnen Sie mit den Modbus-Funktionscodes 5, 6, 15 und 16 und vergleichen Sie die Absender mit den erwarteten Rollen.
+      source_mac:
+        text: Welche MAC-Adresse sah der Sensor in den Frames, die diese Schreibanfragen transportierten?
+        hint: Gerouteter Verkehr kommt mit der MAC-Adresse des letzten Hops an, nicht mit der des Quellhosts.
+      target_ip:
+        text: Welche SPS (IP-Adresse) hat die nicht autorisierten Schreibzugriffe empfangen?
+      first_write:
+        text: Um welche Uhrzeit (UTC) wurde die erste nicht autorisierte Schreibanfrage gesendet?
+      points_changed:
+        text: Welche SPS-Datenpunkte (Namen aus der Registertabelle) wurden geändert? Zählen Sie sie auf.
+      values_written:
+        text: Geben Sie für jeden geänderten Datenpunkt den geschriebenen physikalischen Wert an.
+      functions_used:
+        text: Welche Modbus-Funktionscodes hat der Schreiber verwendet?
+      discovery:
+        text: Hat die Quelle vor dem Schreiben die Identifikation der SPS abgefragt? Wenn ja, welchen Hersteller/welches Produkt meldete die SPS?
+      impact:
+        text: Auf welche gemessenen Prozesswerte wirken sich die geänderten Sollwerte aus?
+      joined_host_name:
+        text: Das schreibende Gerät wurde während des Mitschnitts an das Steuerungsnetz angeschlossen. Welchen Hostnamen hat es bei der Anforderung einer IP-Adresse angegeben?
+        hint: Ein Host ohne Adresse bittet den DHCP-Server um eine Zuweisung (DHCP Discover / Request, Option 12).
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt die Sollwertänderungen am besten?
+      legit_vs_unauthorized:
+        text: Die Engineering-Station hat Sollwerte auch legitim geändert. Wie viele Schreibanfragen im Mitschnitt waren legitime Bedieneränderungen?

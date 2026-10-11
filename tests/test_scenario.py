@@ -1,7 +1,9 @@
 import copy
+import re
 
 import pytest
 
+from pcapforge.i18n import LANGS
 from pcapforge.process import ProcessProfile
 from pcapforge.plan import build_plan
 from pcapforge.scenario import ScenarioError, evaluate_when, find, parse_duration, resolve, validate
@@ -103,20 +105,30 @@ def test_threshold_direction_matches_the_alarm_it_defeats(scenario):
     assert seen == {"above", "below"}
 
 
-def test_polish_translation_covers_every_question_and_keeps_answers(scenario):
+@pytest.mark.parametrize("lang", [lang for lang in LANGS if lang != "en"])
+@pytest.mark.parametrize("scenario_id", [
+    "ot-baseline-operations", "ot-modbus-alarm-masking", "ot-modbus-coil-manipulation",
+    "ot-modbus-command-replay", "ot-modbus-discovery", "ot-modbus-write-manipulation"])
+def test_translation_covers_every_question_and_keeps_answers(scenario_id, lang):
     from pcapforge.grade import submission_template
-    from pcapforge.i18n import localize_answers
+    from pcapforge.i18n import UI, localize_answers
 
-    pl = scenario.doc["translations"]["pl"]["questions"]
+    scenario = find(scenario_id)
+    tr = scenario.doc["translations"][lang]
     ids = [q["id"] for q in scenario.doc["questions"]]
-    assert set(pl) == set(ids)
+    assert set(tr["questions"]) == set(ids)
+    assert set(UI[lang]) == set(UI["en"]) and set(UI[lang]["formats"]) == set(UI["en"]["formats"])
+    refs = lambda text: sorted(re.findall(r"\$\{[^}]*\}", text or ""))  # noqa: E731
+    for q in scenario.doc["questions"]:
+        for key in ("text", "hint"):
+            assert refs(tr["questions"][q["id"]].get(key)) == refs(q.get(key) if key in tr["questions"][q["id"]] else None)
     answers = {"scenario": {"title": scenario.title, "id": scenario.id},
                "questions": [{"id": q, "text": "x", "answer": f"a-{q}", "points": 1, "type": "ip"} for q in ids]}
-    localized = localize_answers(answers, scenario.doc, "pl", {"vars": {}, "facts": {}})
+    localized = localize_answers(answers, scenario.doc, lang, {"vars": {}, "facts": {}})
     assert [q["answer"] for q in localized["questions"]] == [q["answer"] for q in answers["questions"]]
-    assert localized["questions"][0]["text"] == pl[ids[0]]["text"]
+    assert localized["questions"][0]["text"] == tr["questions"][ids[0]]["text"]
     template = submission_template(localized)
-    assert "adres IP" in template and "jan-kowalski.yaml" in template
+    assert UI[lang]["formats"]["ip"] in template and UI[lang]["tmpl_howto"][2].split()[-1] in template
 
 
 def test_recording_key_changes_when_only_the_site_naming_changes(scenario):

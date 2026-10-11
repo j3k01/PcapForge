@@ -258,3 +258,29 @@ translations:
         text: Który host jest legalnym źródłem tych samych zmian nastaw (stacja inżynierska)?
       technique:
         text: Która technika MITRE ATT&CK for ICS najlepiej opisuje ponowne wysłanie przechwyconych legalnych poleceń?
+  de:
+    title: Wiedereinspielung legitimer Modbus/TCP-Befehle von einem nicht berechtigten Host
+    briefing: |
+      Sie sind Analyst im OT-SOC der Anlage {site_name} ({domain}), {process_title}.
+      Der beigefügte Mitschnitt stammt vom SPAN-Port des Switches im Steuerungsnetz ({sensor_subnet}).
+      Nur das SCADA-HMI und der Historian fragen die SPS ab, und Sollwerte darf ausschließlich die
+      Engineering-Station ändern. Der Betrieb bemerkte, dass Sollwerte auf frühere Werte zurücksprangen,
+      obwohl kein Bediener das HMI berührt hatte. Jeder verdächtige Schreibzugriff trägt einen völlig
+      normalen Wert innerhalb des Bereichs, Grenzwertalarme helfen also nicht - klären Sie, wer die Befehle
+      gesendet hat und wie sie sich von echten Bedieneränderungen unterscheiden.
+      Die Registertabelle der SPS finden Sie unten.
+    questions:
+      replay_source_ip:
+        text: Von welcher IP-Adresse wurden die wiedereingespielten Schreibbefehle gesendet?
+        hint: Listen Sie jeden Host auf, der Modbus-Schreibzugriffe sendet (Funktionen 5, 6, 15, 16). Nur die Engineering-Station ist berechtigt; vergleichen Sie die Schreiber mit ihren Rollen.
+      replay_count:
+        text: Wie viele wiedereingespielte Schreibanfragen hat dieser Host gesendet?
+      values_in_band:
+        text: Lagen die wiedereingespielten Werte innerhalb oder außerhalb der normalen Betriebsbereiche der SPS? (antworten Sie "inside" oder "outside")
+        hint: Dekodieren Sie jedes geschriebene Register in seinen physikalischen Wert und vergleichen Sie ihn mit dem Bereich in der Registertabelle. Die wiedereingespielten Werte sind Kopien legitimer Änderungen.
+      replayed_points:
+        text: Welche SPS-Datenpunkte (Namen aus der Registertabelle) hat die Wiedereinspielung beschrieben?
+      approved_writer_ip:
+        text: Welcher Host ist die legitime Quelle derselben Sollwertänderungen (die Engineering-Station)?
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das erneute Senden mitgeschnittener legitimer Befehle am besten?

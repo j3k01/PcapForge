@@ -269,3 +269,32 @@ translations:
         hint: Zbyt duży odczyt tabeli rejestrów jest odrzucany przez PLC. Jaki kod wyjątku (i nazwa) wraca?
       technique:
         text: Która technika MITRE ATT&CK for ICS najlepiej opisuje odczyt identyfikacji PLC i mapy rejestrów?
+  de:
+    title: Erkundung von Modbus/TCP-Geräten im Steuerungsnetz
+    briefing: |
+      Sie sind Analyst im OT-SOC der Anlage {site_name} ({domain}), {process_title}.
+      Der beigefügte Mitschnitt stammt vom SPAN-Port des Switches im Steuerungsnetz ({sensor_subnet}).
+      Im Normalbetrieb kommunizieren nur das SCADA-HMI und der Historian per Modbus/TCP mit den SPS
+      und senden zyklische Leseanfragen. Während dieser Schicht taucht im Steuerungsnetz etwas Neues
+      auf: ein Host, der nach Modbus-Diensten sucht und Geräteidentifikation sowie Registerlayout
+      ausliest. Es wurde nichts geschrieben, aber kartieren Sie diese Aktivität, um das Ausmaß des
+      Eindringens zu bestimmen.
+      Die Registertabelle der SPS finden Sie unten.
+    questions:
+      scanner_ip:
+        text: Von welcher IP-Adresse wurde die Erkundung der Modbus-Geräte durchgeführt?
+        hint: Read Device Identification ist der Modbus-Funktionscode 43. Finden Sie heraus, wer ihn sendet; normale SCADA-Clients tun das nicht.
+      scan_start:
+        text: Um welche Uhrzeit (UTC) begann die Erkundung (erste Sonde oder erste Identifikationsabfrage dieses Hosts)?
+      swept_port:
+        text: Der Host hat das Steuerungsnetz zunächst nach einem einzigen TCP-Port abgesucht. Nach welchem?
+        hint: Suchen Sie nach vielen kurzen TCP-Verbindungen (SYN) von einem Host zum selben Zielport an verschiedenen Adressen.
+      plcs_enumerated:
+        text: Von wie vielen SPS hat der Host die Geräteidentifikation ausgelesen?
+      functions_used:
+        text: Welche Modbus-Funktionscodes wurden bei der Erkundung verwendet (Identifikation und Lesezugriffe)?
+      enumeration_evidence:
+        text: Woran war die Enumeration der Register im Datenverkehr zu erkennen (welche Modbus-Exception liefern zu große Lesezugriffe)?
+        hint: Ein zu großer Lesezugriff auf eine Registertabelle wird von der SPS abgewiesen. Welcher Exception-Code (und Name) kommt zurück?
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das Auslesen der SPS-Identifikation und der Registertabelle am besten?
