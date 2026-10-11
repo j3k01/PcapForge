@@ -52,7 +52,7 @@ detection-engineering exercises. All traffic comes from benign services and clie
   set_values)` is async; mutate `regs[addr-start+i]` for live process values; for writes
   it is called with `set_values` then again with `None`. Writes to unmapped addresses →
   exception code 2. FC43 device identification works via `identity=`.
-  Pin `pymodbus~=3.15`.
+  Pin `pymodbus~=3.15.0`: 3.16.0 cannot be imported without pyserial (`NameError: name 'pyserial'`).
 
 ## Linux results (WSL 2 Ubuntu 24.04, kernel 6.18, pymodbus 3.15, tshark 4.6.6 from ppa:wireshark-dev/stable, Suricata 7.0.3)
 
