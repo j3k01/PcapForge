@@ -6,8 +6,8 @@ Current state:
   (`ot-modbus-command-replay`), coil manipulation (`ot-modbus-coil-manipulation`) and alarm masking
   (`ot-modbus-alarm-masking`); the process, PLC count and device pool are drawn per seed;
 - protocols: Modbus/TCP, OPC UA, S7comm, IEC 60870-5-104, DNP3, BACnet/IP, EtherNet/IP (CIP), DHCPv4,
-  DNS/NTP/ARP and Windows name-resolution chatter, plus an IPv6 baseline (link-local, Router Advertisements,
-  SLAAC, unicast Neighbor Discovery);
+  DNS/NTP/ARP, Windows name-resolution chatter and an Active Directory domain (Kerberos, LDAP, CLDAP, SMB 3
+  SYSVOL reads), plus an IPv6 baseline (link-local, Router Advertisements, SLAAC, unicast Neighbor Discovery);
 - composer realism: causal retiming with TCP segmentation, SPAN artefacts (duplicates, drops, VLAN,
   sensor clock), a host-firewall model (filtered vs closed ports), and RFC-correct DHCP delivery;
 - process models: per-point descriptions, a vendor (Modicon) register-numbering convention and
@@ -37,7 +37,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
   - sensor clock offset/drift: `impairments.clock_offset` and `clock_drift_ppm` (number or per-seed range); answers.json records the applied values under `capture.sensor_clock`.
 - [x] **DHCPv4** (M): `dhcp.server` / `dhcp.client` actors with Windows and dhcpcd message formats; joins (DORA, ARP address conflict detection, DHCPINFORM), renewals at T1 and releases; static hosts stay outside the pool. `siem/dhcp.jsonl` in the SIEM export. In `ot-modbus-write-manipulation` the rogue Raspberry Pi (easy) leases its address when it is plugged in, and a vendor service laptop joins and leaves on medium/hard. Still open: DHCP on the IT side (not visible from the control-LAN sensor in the current scenarios).
 - [x] **Firewalled / filtered ports** (M): the composer honours the stack's `drops_unsolicited` / `syn_rto_s` (`compose/firewall.HostFirewall`), so a port sweep of a host-firewalled machine (Windows default) shows a retransmitted SYN and no reply (filtered) instead of a RST (closed). In `ot-modbus-discovery` the swept Windows hosts read as filtered and the PLCs' closed/listening ports differ.
-- [ ] **Windows domain baseline** (L): Kerberos/LDAP/SMB to the DC using a *synthetic* local directory, e.g. a Samba AD container. Never the machine's real credentials.
+- [x] **Windows domain baseline** (L): `ad.dc` / `ad.member` simulate an Active Directory DC and its Windows members from a *synthetic* directory derived from the seed (names, GUIDs, keys; no real cipher, never real credentials): CLDAP DC-locator pings, Kerberos (AS exchange with pre-authentication and the UDP-to-TCP retry after KRB_ERR_RESPONSE_TOO_BIG, TGS for ldap/ and cifs/, a ticket cache of up to 10 h), LDAP with a Kerberos GSS-SPNEGO bind and sealed searches, and SYSVOL gpt.ini reads over signed SMB 3.1.1 on a connection kept open for KeepConn. Members refresh computer Group Policy every 90-120 minutes; `ot-baseline-operations` adds an engineer's logon at the EWS and questions on the account and the GPO file. In every OT scenario with Windows chatter (medium/hard); over IPv6 on the dual-stack level.
 - [x] **Long captures** (M): the composer, the verification and the SIEM export stream with a bounded look-behind window (output byte-identical to the former in-memory composer), the per-action frame index is a compact array, the plan shares equal action arguments and hashes its digest action by action. `ot-baseline-operations` hard, 24 h (3.27 M actions, 12.6 M packets, 1.4 GB pcap) peaks at 0.93 GB RSS in WSL (before: over 13 GB) and composes in about 3 minutes; timings in the ["Long captures" table](docs/how-it-works.md#long-captures). Recording time scales linearly (about 2,000-2,300 actions/s). The plan stays in memory at about 0.15 KB per action.
 
 ## 2. OT content
@@ -74,7 +74,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ## 3. IT line (benign equivalents only, see CONTRIBUTING.md)
 
-- [ ] **IT background** (L): HTTPS browsing to local web servers with a private CA and realistic SNI/certificates, software updates, DHCP, AD traffic (see 1.).
+- [ ] **IT background** (L): HTTPS browsing to local web servers with a private CA and realistic SNI/certificates, software updates, DHCP on the IT side; the AD domain traffic exists (section 1) and can be reused.
 - [ ] **IT scenarios** (M each, maintainer-authored, reviewed against the defensive policy):
   - periodic HTTPS check-ins to a local test server;
   - DNS-based data transfer to a local resolver;

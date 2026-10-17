@@ -77,6 +77,10 @@ actors:
     hosts: [hmi, historian]
     when: vars.chatter
     params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # Active Directory background (with the Windows chatter): the DC serves Kerberos, LDAP and SYSVOL,
+  # the Windows hosts refresh Group Policy as domain members.
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.chatter}
+  - {id: domain_members, type: ad.member, hosts: [hmi, historian], when: vars.chatter, params: {dc: dc}}
   # The incident: an unapproved host opens feeder breakers over IEC 104 (select-before-operate).
   - id: inject
     type: iec104.command_injection

@@ -109,6 +109,15 @@ Done and committed (verify with `git log --oneline`):
   ports and payloads checked against a Windows 10 capture). Lookups only use names the site
   DNS zone does not resolve; hosts with a `dns.client` first query the site server for
   `name.<domain>` (shared `dns.query_server`), get NXDOMAIN and fall back 5–30 ms later
+  (a joining host chatters only while connected: `Host.present`, set in `build_plan` from its
+  `dhcp.client` window),
+  `ad.dc|member` (Active Directory: codecs `der`, `kerberos`, `ldap`, `smb2`; the actor `ad.py` holds
+  a `Directory` both simulators share, synthetic keys from the seed, ciphertext opaque but of the real
+  AES-CTS-HMAC length, the trailing HMAC keyed so the DC can tell its own tickets and a right
+  pre-authentication. The composer starts every flow of an action at the action's time, so each
+  exchange of a Group Policy refresh is its own action, a client step after the previous one; the plan
+  models the ticket cache and the SMB connection's KeepConn timeout, and knows that a PAC makes the
+  AS-REP and every TGS-REQ exceed the 1465-byte UDP limit),
 - link-local destinations: `topology.SINKS` are loopback stand-ins (`127.77.0.2-5`) for
   224.0.0.252, 224.0.0.251, 239.255.255.250 and the sender's subnet broadcast; actors
   declare the `(sink, port)` pairs they use and the recorder binds discard sockets there (no

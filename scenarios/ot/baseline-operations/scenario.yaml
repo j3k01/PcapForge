@@ -6,12 +6,14 @@ line: ot
 version: 6
 license: CC-BY-4.0
 authors: [pcapforge contributors]
-tags: [baseline, modbus, opcua, s7comm, ics, ot, water, wastewater, hvac, power]
+tags: [baseline, modbus, opcua, s7comm, ics, ot, water, wastewater, hvac, power, active-directory, kerberos, ldap, smb]
 summary: >
   Normal operation of an industrial site: SCADA HMI, historian and (on medium/hard) a SCADA
   OPC UA server poll the PLCs, the engineering workstation makes approved setpoint changes,
-  Windows hosts sync time and resolve names. There is no incident. Use it to learn what
-  normal looks like, to tune detections against false positives and to build baselines.
+  Windows hosts sync time, resolve names and (medium/hard) work as members of an Active Directory
+  domain: Kerberos, LDAP and SYSVOL reads for Group Policy, and an engineer's logon. There is no
+  incident. Use it to learn what normal looks like, to tune detections against false positives
+  and to build baselines.
 
 briefing: |
   You are joining the OT SOC of the {site_name} site ({domain}), {process_title}.
@@ -86,6 +88,19 @@ actors:
     hosts: [hmi, historian, ews]
     when: vars.chatter
     params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # Active Directory: the DC serves Kerberos, LDAP and SYSVOL; the Windows hosts are domain members
+  # (background Group Policy refreshes) and an engineer logs on at the EWS during the shift.
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [hmi, historian, ews]
+    when: vars.domain
+    params: {dc: dc, logon: {host: ews, at: [0.15, 0.6]}}
+  - id: scada_domain_member
+    type: ad.member
+    hosts: scada
+    when: "vars.domain and vars.opcua"
+    params: {dc: dc}
   # Second treatment train: OEM package unit on a Siemens S7-1500, monitored over S7comm.
   - id: s7_service
     type: s7.server
@@ -209,6 +224,7 @@ difficulty:
       dns: false
       ntp: true
       chatter: false
+      domain: false
       s7: false
       opcua: false
       ipv6: false
@@ -227,6 +243,7 @@ difficulty:
       ntp: true
       chatter: true
       chatter_rate: 1
+      domain: true
       s7: true
       opcua: true
       ipv6: true
@@ -245,6 +262,7 @@ difficulty:
       ntp: true
       chatter: true
       chatter_rate: 2
+      domain: true
       s7: true
       opcua: true
       ipv6: dual
@@ -327,17 +345,17 @@ questions:
       filter: "opcua && tcp.srcport == 4840 && ipv6.src == ${facts.opcua_service.hosts[0].ipv6}"
       expect: {min: 1}
   - id: ipv6_services
-    when: "vars.opcua and vars.dns and vars.ipv6 == 'dual'"
+    when: "vars.opcua and vars.dns and vars.domain and vars.ipv6 == 'dual'"
     text: >-
       This site is dual-stack. Which server ports do the Windows hosts reach over IPv6 (everything
       else, including all PLC traffic, stays IPv4)?
-    answer: [53, 123, 4840]
+    answer: [53, 88, 123, 389, 445, 4840]
     type: set
     points: 10
     hint: Filter on "ipv6 && !icmpv6 && !(ipv6.dst == ff00::/8)" and look at the destination ports.
     check:
-      filter: "ipv6 && (udp.dstport == 53 || udp.dstport == 123 || tcp.dstport == 4840)"
-      expect: {min: 3}
+      filter: "ipv6 && (udp.dstport in {53, 88, 123, 389} || tcp.dstport in {88, 389, 445, 4840})"
+      expect: {min: 6}
   - id: ipv6_resolver
     when: "vars.dns and vars.ipv6 == 'dual'"
     text: >-
@@ -349,6 +367,34 @@ questions:
     hint: The firewall's Router Advertisements carry it in an RDNSS option (icmpv6.opt.rdnss).
     check:  # an RA may not fall into a short capture; the queries to the resolver always do
       filter: "icmpv6.opt.rdnss == ${facts.dns_service.hosts[0].ipv6} || (udp.dstport == 53 && ipv6.dst == ${facts.dns_service.hosts[0].ipv6})"
+      expect: {min: 1}
+  - id: logon_user
+    when: vars.domain
+    text: >-
+      An engineer logged on to the domain at the engineering workstation during the shift. Which
+      domain account did they use?
+    answer: "${facts.domain_members.logons[0].user}"
+    accept: ["${facts.domain_members.logons[0].user}"]
+    type: text
+    points: 10
+    hint: >-
+      Logons start with a Kerberos AS exchange (kerberos.msg_type == 10). Computer accounts end with
+      "$"; a person's account does not.
+    check:
+      filter: 'kerberos.msg_type == 10 && kerberos.CNameString == "${facts.domain_members.logons[0].user}"'
+      expect: {min: 3}
+  - id: gpo_file
+    when: vars.domain
+    text: >-
+      Group Policy processing reads one file of every GPO from the domain controller's SYSVOL share.
+      What is the file name?
+    answer: gpt.ini
+    accept: [gpt.ini, GPT.INI]
+    type: text
+    points: 5
+    hint: Filter smb2.filename and look at the Create requests on the SysVol tree.
+    check:
+      filter: 'smb2.cmd == 5 && smb2.filename contains "gpt.ini"'
       expect: {min: 1}
 
 translations:
@@ -387,6 +433,12 @@ translations:
       ipv6_resolver:
         text: Hosty Windows rozwiązują nazwy po IPv6. Którego adresu IPv6 używają jako serwera DNS? Nie został skonfigurowany przez DHCP.
         hint: Ogłoszenia routera (Router Advertisement) z firewalla niosą go w opcji RDNSS (icmpv6.opt.rdnss).
+      logon_user:
+        text: Inżynier zalogował się do domeny na stacji inżynierskiej podczas zmiany. Którego konta domenowego użył?
+        hint: Logowanie zaczyna się od wymiany Kerberos AS (kerberos.msg_type == 10). Konta komputerów kończą się znakiem „$”, konta osób nie.
+      gpo_file:
+        text: Przetwarzanie zasad grupy (Group Policy) odczytuje z udziału SYSVOL kontrolera domeny jeden plik każdego GPO. Jak się nazywa ten plik?
+        hint: Przefiltruj smb2.filename i sprawdź żądania Create w drzewie SysVol.
   de:
     title: Baseline des Normalbetriebs im OT-Netz (kein Vorfall)
     briefing: |
@@ -422,3 +474,9 @@ translations:
       ipv6_resolver:
         text: Windows-Hosts lösen Namen per IPv6 auf. Welche IPv6-Adresse verwenden sie als DNS-Server? Sie wurde nicht per DHCP konfiguriert.
         hint: Die Router Advertisements der Firewall übertragen sie in der RDNSS-Option (icmpv6.opt.rdnss).
+      logon_user:
+        text: Ein Ingenieur hat sich während der Schicht an der Engineering-Workstation an der Domäne angemeldet. Welches Domänenkonto hat er verwendet?
+        hint: Anmeldungen beginnen mit einem Kerberos-AS-Austausch (kerberos.msg_type == 10). Computerkonten enden mit „$“, Personenkonten nicht.
+      gpo_file:
+        text: Die Gruppenrichtlinienverarbeitung liest von jedem GPO eine Datei aus der SYSVOL-Freigabe des Domänencontrollers. Wie heißt die Datei?
+        hint: Filtern Sie auf smb2.filename und prüfen Sie die Create-Anfragen im SysVol-Baum.

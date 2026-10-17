@@ -103,13 +103,22 @@ def test_s7comm_and_opcua_sessions_are_logged_and_deterministic(tmp_path):
     hosts = {h["id"]: h for h in answers["topology"]["hosts"]}
     s7plc, scada, historian = (hosts[h]["interfaces"][0]["ip"] for h in ("s7plc", "scada", "historian"))
 
-    # Every S7comm job request is logged: as many as tshark decodes, all to the S7-1500.
+    # Every S7comm job request is logged, all to the S7-1500: as many as tshark decodes up to the first
+    # content gap of their connection (a sensor drop; ICSNPP's analyzer stops parsing a connection there).
     jobs = [r for r in jsonl(logs["s7comm"]) if r["is_orig"] and r["rosctr_name"] == "Job-Request"]
-    tshark = subprocess.run([find_tool("tshark"), "-n", "-r", str(result.pcap), "-Y",
-                             "s7comm.header.rosctr == 1 && !tcp.analysis.retransmission", "-T", "fields",
-                             "-e", "frame.number"], capture_output=True, text=True, check=True).stdout
+
+    def frames(display_filter):
+        out = subprocess.run([find_tool("tshark"), "-n", "-r", str(result.pcap), "-Y", display_filter, "-T", "fields",
+                              "-e", "tcp.stream", "-e", "frame.number"], capture_output=True, text=True, check=True)
+        return [tuple(map(int, line.split("\t"))) for line in out.stdout.splitlines()]
+
+    gaps: dict[int, int] = {}
+    for stream, number in frames("tcp.port == 102 && (tcp.analysis.lost_segment || tcp.analysis.ack_lost_segment)"):
+        gaps.setdefault(stream, number)
+    decoded = frames("s7comm.header.rosctr == 1 && !tcp.analysis.retransmission")
+    before_gaps = [n for stream, n in decoded if n < gaps.get(stream, n + 1)]
     assert jobs and all(r["id.resp_h"] == s7plc for r in jobs)
-    assert abs(len(jobs) - len(tshark.split())) <= len(tshark.split()) // 100  # mid-session start, sensor drops
+    assert len(before_gaps) - len(before_gaps) // 100 <= len(jobs) <= len(decoded)  # mid-session start
     assert {r["function_name"] for r in jobs} >= {"Read Variable"}
 
     # The historian's OPC UA subscription to the SCADA server: Publish requests.

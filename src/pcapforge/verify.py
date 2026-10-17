@@ -23,6 +23,7 @@ ADDRESS_FIELDS = ["ip.src", "ip.dst", "ipv6.src", "ipv6.dst", "arp.src.proto_ipv
 INTEGRITY_FIELDS = ["frame.number", "frame.protocols", "_ws.malformed", "_ws.expert.severity",
                     *CHECKSUM_FIELDS, *ADDRESS_FIELDS]
 EXAMPLES = 10
+TRANSPORTS = {"tcp", "udp", "sctp", "ip", "ipv6"}
 
 
 class TsharkError(RuntimeError):
@@ -97,7 +98,9 @@ def _integrity(pcap: Path, report: VerifyReport, answers: dict | None) -> None:
         protocols.update(set(stack))
         if frame.get("_ws.malformed"):
             malformed.append(number)
-        if stack[-1] == "data":
+        # Opaque content a dissector hands on (an SMB READ's file data) is decoded; "data" straight on
+        # top of the transport is a payload no dissector understood.
+        if stack[-1] == "data" and (len(stack) < 2 or stack[-2] in TRANSPORTS):
             undecoded.append(number)
         if any(sev and (int(sev) & PI_SEVERITY_MASK) == PI_ERROR
                for sev in frame.get("_ws.expert.severity", "").split(",")):

@@ -25,6 +25,18 @@
   SSDP and browser announcements start once its address is configured, its IPv6 interface (DHCPv6 back-off
   from the start) comes up with the link, and browser announcements start a minute apart and lengthen to
   12 minutes. `ot-modbus-write-manipulation` (medium/hard): the vendor's service laptop now chatters too.
+- Active Directory domain background (`ad.dc`, `ad.member`) from a synthetic, seed-derived directory: the
+  Windows hosts refresh their computer Group Policy every 90-120 minutes (CLDAP DC-locator ping, LDAP with
+  a Kerberos GSS-SPNEGO bind and sealed searches, gpt.ini of every GPO from SYSVOL over signed SMB 3.1.1,
+  the connection dropped after 10 idle minutes) and use cached Kerberos tickets, asking the KDC only when
+  they expire (AS exchange with pre-authentication, retried over TCP after KRB_ERR_RESPONSE_TOO_BIG; TGS
+  over TCP). On medium/hard of every OT scenario; over IPv6 on the dual-stack level. Zeek writes
+  `kerberos.log`, `ldap.log`, `ldap_search.log`, `smb_mapping.log` and `smb_files.log` for it.
+- `ot-baseline-operations` (medium/hard): an engineer logs on to the domain at the EWS during the shift;
+  new questions on the logon account and the GPO file, and the dual-stack question on IPv6 services now
+  includes Kerberos, LDAP and SMB.
+- Verification no longer counts opaque content that a dissector hands on (an SMB read's file data) as an
+  undissected payload.
 
 ### Detection engineering
 - `--zeek` loads CISA's ICSNPP packages when they are installed (versions pinned in `zeek.py`, installed in

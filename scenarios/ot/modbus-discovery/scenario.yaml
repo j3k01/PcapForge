@@ -82,6 +82,10 @@ actors:
     hosts: [hmi, historian, ews]
     when: vars.chatter
     params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # Active Directory background (with the Windows chatter): the DC serves Kerberos, LDAP and SYSVOL,
+  # the Windows hosts refresh Group Policy as domain members.
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.chatter}
+  - {id: domain_members, type: ad.member, hosts: [hmi, historian, ews], when: vars.chatter, params: {dc: dc}}
   # The reconnaissance: a sweep of the control subnet for port 502, then identity reads and
   # register enumeration on every PLC. No writes.
   - id: scan
