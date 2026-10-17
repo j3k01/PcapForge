@@ -27,6 +27,7 @@ import pytest
 
 from pcapforge.pipeline import generate
 from pcapforge.scenario import discover
+from recordings import ensure_recorded
 
 SPLUNK_URL = os.environ.get("PCAPFORGE_SPLUNK_URL", "").rstrip("/")
 ELASTIC_URL = os.environ.get("PCAPFORGE_ELASTIC_URL", "").rstrip("/")
@@ -46,6 +47,7 @@ def runs(tmp_path_factory):
 
     def get(scenario_id, level):
         if (scenario_id, level) not in cache:
+            ensure_recorded(discover()[scenario_id], level, SEED, DURATION, root / "recording")
             result = generate(discover()[scenario_id], level, SEED, root, duration=DURATION, siem=True)
             assert result.report.ok, [c for c in result.report.checks if not c["ok"]]
             answers = json.loads(result.answers.read_text(encoding="utf-8"))

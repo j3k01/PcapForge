@@ -206,16 +206,24 @@ class WindowsChatter(Actor):
             t += ANNOUNCE_PERIOD + rng.uniform(0.0, 2.5)
 
     def _plan_dhcpv6(self, host, rng) -> None:
-        """Solicit retransmissions of an interface whose IPv6 comes up ``up`` s into the capture."""
+        """Solicit retransmissions: of an interface whose IPv6 comes up ``up`` s into the capture (a host
+        that arrives), else of one up long before (every SOL_MAX_RT, elapsed time at its 0xFFFF cap)."""
         plan = self.plan_
-        up = round(rng.uniform(0.0, 0.5), 6)
-        first = up + DAD_S + rng.uniform(0.0, SOLICIT_DELAY)
         xid, iaid = rng.getrandbits(24), rng.getrandbits(32)
         installed = int(plan.start_epoch - rng.uniform(30.0, 1500.0) * 86400.0) - DUID_EPOCH
+        common = {"xid": xid, "iaid": iaid, "duid_time": installed, "fqdn": f"{host.name}.{plan.topology.domain}"}
+        if not host.arrives:
+            t = rng.uniform(0.0, SOLICIT_MRT)
+            while t < plan.duration:
+                plan.add(t, self.id, host.id, "dhcpv6.solicit", elapsed=0xFFFF, **common)
+                t += SOLICIT_MRT * (1.0 + rng.uniform(-0.1, 0.1))
+            return
+        up = round(rng.uniform(0.0, 0.5), 6)
+        first = up + DAD_S + rng.uniform(0.0, SOLICIT_DELAY)
         t, rt = first, SOLICIT_IRT * (1.0 + rng.uniform(0.0, 0.1))  # first RT strictly above IRT
         while t < plan.duration:
-            plan.add(t, self.id, host.id, "dhcpv6.solicit", up=up, xid=xid, iaid=iaid, duid_time=installed,
-                     elapsed=min(round((t - first) * 100), 0xFFFF), fqdn=f"{host.name}.{plan.topology.domain}")
+            plan.add(t, self.id, host.id, "dhcpv6.solicit", up=up, elapsed=min(round((t - first) * 100), 0xFFFF),
+                     **common)
             t += rt
             rt = 2 * rt + rng.uniform(-0.1, 0.1) * rt
             if rt > SOLICIT_MRT:

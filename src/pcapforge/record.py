@@ -273,11 +273,25 @@ def cache_dir() -> Path:
     return base / "pcapforge"
 
 
+def _cache_path(plan: Plan) -> Path:
+    return cache_dir() / "recordings" / plan.scenario.id / f"{plan.digest()}.pcap"
+
+
+def _is_cached(path: Path) -> bool:
+    return path.is_file() and path.with_suffix(".json").is_file()
+
+
+def cached_recording(plan: Plan) -> Path | None:
+    """The cached recording of ``plan``, if there is one."""
+    path = _cache_path(plan)
+    return path if _is_cached(path) else None
+
+
 def recording_for(plan: Plan, use_cache: bool = True,
                   progress: Callable[[int, int], None] | None = None) -> tuple[Path, bool]:
     """Path to a recording of ``plan``; records it unless a cached copy exists."""
-    path = cache_dir() / "recordings" / plan.scenario.id / f"{plan.digest()}.pcap"
-    if use_cache and path.is_file() and path.with_suffix(".json").is_file():
+    path = _cache_path(plan)
+    if use_cache and _is_cached(path):
         return path, True
     tmp = path.with_name(path.stem + ".partial.pcap")
     record(plan, tmp, progress)

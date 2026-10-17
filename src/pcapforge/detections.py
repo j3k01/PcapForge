@@ -792,6 +792,18 @@ def _hunting(answers: dict, rules: list[Rule]) -> str:
                   "`sigma convert -t splunk sigma/`:", "",
                   "| level | rule | fires on |", "|---|---|---|"]
         lines += [f"| {r['level']} | {r['title']} | {r['description'].replace('|', '/')} |" for r in sigma]
+    lines += ["", "## Zeek notices", "",
+              f"`{ZEEK_SCRIPT}` raises notices (`notice.log`) for the same roles as the Suricata rules; `--zeek` "
+              "loads it. Run it yourself with `zeek -r capture.pcap pcapforge-ot.zeek` (IEC 104, BACnet and "
+              "EtherNet/IP need pcapforge's IEC 104 analyzer and the ICSNPP packages):", "",
+              "| notice | fires on |", "|---|---|",
+              "| `Pcapforge::Unapproved_Modbus_Write` | Modbus write (functions 5, 6, 15, 16, 22, 23) to a PLC from a host that is not an approved writer |",
+              "| `Pcapforge::Modbus_Device_Identification` | Read Device Identification (function 43) from a host that is not a SCADA client |",
+              "| `Pcapforge::Modbus_Out_Of_Band_Write` | a holding-register setpoint written outside its normal band (UINT16 raw, FLOAT32 decoded) |",
+              "| `Pcapforge::Unapproved_DNP3_Control` | DNP3 write, select / operate, restart or disable-unsolicited from a host other than the master |",
+              "| `Pcapforge::Unapproved_IEC104_Command` | IEC 104 process command, interrogation or reset (activation) from a host other than the SCADA master |",
+              "| `Pcapforge::Unapproved_BACnet_Write` | BACnet WriteProperty(Multiple), DeviceCommunicationControl or ReinitializeDevice from an unapproved host |",
+              "| `Pcapforge::Unapproved_CIP_Service` | CIP Write_Tag, Set_Attribute*, Reset or Forward_Open from an unapproved originator |"]
     lines += ["", "## Questions", ""]
     for index, question in enumerate(answers["questions"], 1):
         hunt = question.get("hunt", {})
@@ -819,13 +831,220 @@ def _hunting(answers: dict, rules: list[Rule]) -> str:
             lines += [f"**What to look for:** {hunt['look_for']}", ""]
     return "\n".join(lines)
 
+# --- Zeek ---------------------------------------------------------------------------
+# The Suricata roles as a Zeek script: NOTICE (notice.log) for OT commands and writes from hosts
+# outside the approved roles, and for Modbus setpoint writes outside the register map's normal
+# band. Modbus and DNP3 use Zeek's own analyzers; IEC 104, BACnet and EtherNet/IP need pcapforge's
+# IEC 104 analyzer and the ICSNPP packages, so their handlers are compiled only when those events
+# exist. The sender of a BACnet / CIP message is the side `is_orig` names (ICSNPP's UDP 47808 flows
+# can be oriented either way).
+
+ZEEK_SCRIPT = "pcapforge-ot.zeek"
+ZEEK_MODBUS_WRITES = (5, 6, 15, 16, 22, 23)
+ZEEK_DNP3_CONTROLS = (2, 3, 4, 5, 6, 13, 14, 21)   # as the Suricata rules: write, select/operate, restarts, disable unsolicited
+ZEEK_BACNET_EVENTS = ("bacnet_write_property", "bacnet_write_property_multiple", "bacnet_device_communication_control",
+                      "bacnet_reinitialize_device")
+ZEEK_CIP_SERVICES = (0x4D, 0x53, 0x10, 0x02, 0x04, 0x05, 0x54, 0x5B)
+
+
+def _zeek_set(values) -> str:
+    values = list(values)
+    return "{ " + ", ".join(str(v) for v in values) + " }" if values else "set()"
+
+
+def zeek_script(answers: dict) -> str:
+    """Zeek detection script for one run (notice.log)."""
+    ips = host_ips(answers)
+
+    def role(types: tuple[str, ...]) -> list[str]:
+        return [ips[h] for h in _hosts(answers, types)]
+
+    plcs = [ips[h] for a in answers["actors"] if a["type"] == "modbus.server" for h in a["hosts"]]
+    bands = []
+    for actor in sorted((a for a in answers["actors"] if a["type"] == "modbus.server"), key=lambda a: a["id"]):
+        profile = ProcessProfile(answers["facts"][actor["id"]]["process"])
+        for host in actor["hosts"]:
+            for point in profile.table("holding"):
+                if not (point.writable and point.normal):
+                    continue
+                lo, hi = point.normal
+                if point.type == "float32":
+                    bands.append((ips[host], point.address, point.name, True, point.word_order == "big", lo, hi))
+                else:
+                    bands.append((ips[host], point.address, point.name, False, True,
+                                  math.ceil(lo * point.scale - 1e-9), math.floor(hi * point.scale + 1e-9)))
+    sc = answers["scenario"]
+    lines = [
+        f"# pcapforge detections for {sc['id']} ({sc['difficulty']}, seed {sc['seed']}): the Suricata rules' roles",
+        "# as Zeek notices. Load it with the capture: zeek -r capture.pcap pcapforge-ot.zeek (with the ICSNPP",
+        "# packages and pcapforge's IEC 104 analyzer installed for those protocols).",
+        "",
+        "@load base/frameworks/notice",
+        "",
+        "module Pcapforge;",
+        "",
+        "export {",
+        "\tredef enum Notice::Type += {",
+        "\t\tUnapproved_Modbus_Write,       ##< Modbus write from a host that is not an approved writer",
+        "\t\tModbus_Device_Identification,  ##< Read Device Identification from a host that is not a SCADA client",
+        "\t\tModbus_Out_Of_Band_Write,      ##< a setpoint written outside its normal band",
+        "\t\tUnapproved_DNP3_Control,       ##< DNP3 control / write / restart from a host other than the master",
+        "\t\tUnapproved_IEC104_Command,     ##< IEC 104 command from a host other than the SCADA master",
+        "\t\tUnapproved_BACnet_Write,       ##< BACnet write / device control from an unapproved host",
+        "\t\tUnapproved_CIP_Service,        ##< CIP write / reset / Forward_Open from an unapproved originator",
+        "\t};",
+        "",
+        f"\tconst modbus_plcs: set[addr] = {_zeek_set(plcs)};",
+        f"\tconst modbus_writers: set[addr] = {_zeek_set(role(WRITER_TYPES))};",
+        f"\tconst modbus_clients: set[addr] = {_zeek_set(role(CLIENT_TYPES))};",
+        f"\tconst dnp3_outstations: set[addr] = {_zeek_set(role(DNP3_SERVER_TYPES))};",
+        f"\tconst dnp3_masters: set[addr] = {_zeek_set(role(DNP3_MASTER_TYPES))};",
+        f"\tconst iec104_rtus: set[addr] = {_zeek_set(role(IEC104_SERVER_TYPES))};",
+        f"\tconst iec104_masters: set[addr] = {_zeek_set(role(IEC104_MASTER_TYPES))};",
+        f"\tconst bacnet_controllers: set[addr] = {_zeek_set(role(BACNET_SERVER_TYPES))};",
+        f"\tconst bacnet_clients: set[addr] = {_zeek_set(role(BACNET_CLIENT_TYPES))};",
+        f"\tconst enip_targets: set[addr] = {_zeek_set(role(ENIP_TARGET_TYPES))};",
+        f"\tconst enip_originators: set[addr] = {_zeek_set(role(ENIP_ORIGINATOR_TYPES))};",
+        "",
+        "\t## Setpoint bands: [PLC, holding register] -> name, FLOAT32, ABCD word order, low, high",
+        "\t## (raw register units for UINT16 points, engineering units for FLOAT32).",
+        "\ttype Band: record { name: string; float32: bool; big: bool; low: double; high: double; };",
+    ]
+    default = "&default=Band($name=\"\", $float32=F, $big=T, $low=0.0, $high=0.0)"
+    if bands:
+        lines += ["\tconst bands: table[addr, count] of Band = {"]
+        lines += [f"\t\t[{plc}, {address}] = Band($name=\"{name}\", $float32={'T' if f32 else 'F'}, "
+                  f"$big={'T' if big else 'F'}, $low={float(lo)!r}, $high={float(hi)!r}),"
+                  for plc, address, name, f32, big, lo, hi in bands]
+        lines += [f"\t}} {default};"]
+    else:
+        lines += [f"\tconst bands: table[addr, count] of Band = table() {default};"]
+    lines += ["}", ""]
+    lines += [
+        "function notify(note: Notice::Type, c: connection, src: addr, dst: addr, msg: string, sub: string)",
+        "\t{",
+        "\tNOTICE([$note=note, $conn=c, $src=src, $dst=dst, $msg=msg, $sub=sub,",
+        "\t        $identifier=cat(src, dst, note, sub)]);",
+        "\t}",
+        "",
+        "event modbus_message(c: connection, headers: ModbusHeaders, is_orig: bool)",
+        "\t{",
+        "\tif ( ! is_orig || c$id$resp_h !in modbus_plcs )",
+        "\t\treturn;",
+        f"\tif ( headers$function_code in set({', '.join(map(str, ZEEK_MODBUS_WRITES))}) && c$id$orig_h !in modbus_writers )",
+        "\t\tnotify(Unapproved_Modbus_Write, c, c$id$orig_h, c$id$resp_h,",
+        "\t\t       fmt(\"Modbus write (function %d) from %s, not an approved writer\", headers$function_code, c$id$orig_h),",
+        "\t\t       fmt(\"function %d\", headers$function_code));",
+        "\tif ( headers$function_code == 43 && c$id$orig_h !in modbus_clients )",
+        "\t\tnotify(Modbus_Device_Identification, c, c$id$orig_h, c$id$resp_h,",
+        "\t\t       fmt(\"Read Device Identification from %s, not a SCADA client\", c$id$orig_h), \"function 43\");",
+        "\t}",
+        "",
+        "function check_band(c: connection, address: count, value: double)",
+        "\t{",
+        "\tlocal band = bands[c$id$resp_h, address];",
+        "\tif ( band$name != \"\" && (value < band$low || value > band$high) )",
+        "\t\tnotify(Modbus_Out_Of_Band_Write, c, c$id$orig_h, c$id$resp_h,",
+        "\t\t       fmt(\"%s set to %s outside its normal band %s-%s\", band$name, value, band$low, band$high),",
+        "\t\t       band$name);",
+        "\t}",
+        "",
+        "event modbus_write_single_register_request(c: connection, headers: ModbusHeaders, address: count, value: count)",
+        "\t{",
+        "\tif ( ! bands[c$id$resp_h, address]$float32 )",
+        "\t\tcheck_band(c, address, value);",
+        "\t}",
+        "",
+        "event modbus_write_multiple_registers_request(c: connection, headers: ModbusHeaders, start_address: count,",
+        "                                              registers: ModbusRegisters)",
+        "\t{",
+        "\tlocal i = 0;",
+        "\twhile ( i < |registers| )",
+        "\t\t{",
+        "\t\tlocal band = bands[c$id$resp_h, start_address + i];",
+        "\t\tif ( band$float32 && i + 1 < |registers| )",
+        "\t\t\t{",
+        "\t\t\tlocal high = band$big ? registers[i] : registers[i + 1];",
+        "\t\t\tlocal low = band$big ? registers[i + 1] : registers[i];",
+        "\t\t\tlocal bits = hexstr_to_bytestring(fmt(\"%04x%04x\", high, low));",
+        "\t\t\tcheck_band(c, start_address + i, bytestring_to_float(bits));",
+        "\t\t\ti += 2;",
+        "\t\t\tnext;",
+        "\t\t\t}",
+        "\t\tif ( ! band$float32 )",
+        "\t\t\tcheck_band(c, start_address + i, registers[i]);",
+        "\t\t++i;",
+        "\t\t}",
+        "\t}",
+        "",
+        "event dnp3_application_request_header(c: connection, is_orig: bool, application: count, fc: count)",
+        "\t{",
+        f"\tif ( is_orig && c$id$resp_h in dnp3_outstations && c$id$orig_h !in dnp3_masters && fc in set({', '.join(map(str, ZEEK_DNP3_CONTROLS))}) )",
+        "\t\tnotify(Unapproved_DNP3_Control, c, c$id$orig_h, c$id$resp_h,",
+        "\t\t       fmt(\"DNP3 %s from %s, not the DNP3 master\", DNP3::function_codes[fc], c$id$orig_h),",
+        "\t\t       DNP3::function_codes[fc]);",
+        "\t}",
+        "",
+        "@ifdef ( PcapforgeIEC104::command )",
+        "event PcapforgeIEC104::command(c: connection, is_orig: bool, type_id: count, cot: count, common_address: count,",
+        "                               ioa: count, value: double, qualifier: count, select: bool)",
+        "\t{",
+        "\tif ( is_orig && cot % 64 == 6 && c$id$resp_h in iec104_rtus && c$id$orig_h !in iec104_masters",
+        "\t     && ((type_id >= 45 && type_id <= 64) || type_id == 100 || type_id == 101 || type_id == 105) )",
+        "\t\tnotify(Unapproved_IEC104_Command, c, c$id$orig_h, c$id$resp_h,",
+        "\t\t       fmt(\"IEC 104 command type %d (IOA %d) from %s, not the SCADA master\", type_id, ioa, c$id$orig_h),",
+        "\t\t       fmt(\"type %d ioa %d\", type_id, ioa));",
+        "\t}",
+        "@endif",
+        "",
+        "function bacnet(c: connection, is_orig: bool, what: string)",
+        "\t{",
+        "\tlocal src = is_orig ? c$id$orig_h : c$id$resp_h;",
+        "\tlocal dst = is_orig ? c$id$resp_h : c$id$orig_h;",
+        "\tif ( dst in bacnet_controllers && src !in bacnet_clients )",
+        "\t\tnotify(Unapproved_BACnet_Write, c, src, dst, fmt(\"BACnet %s from %s, not a BMS workstation\", what, src), what);",
+        "\t}",
+        "",
+    ]
+    signatures = {
+        "bacnet_write_property": ("invoke_id: count, object_type: count, instance_number: count, property_identifier: count, "
+                                  "property_array_index: count, priority: count, property_value: string", "WriteProperty"),
+        "bacnet_write_property_multiple": ("invoke_id: count", "WritePropertyMultiple"),
+        "bacnet_device_communication_control": ("invoke_id: count, time_duration: count, enable_disable: count, "
+                                                "password: string", "DeviceCommunicationControl"),
+        "bacnet_reinitialize_device": ("invoke_id: count, reinitialized_state: count, password: string",
+                                       "ReinitializeDevice"),
+    }
+    for event in ZEEK_BACNET_EVENTS:
+        params, what = signatures[event]
+        lines += [f"@ifdef ( {event} )", f"event {event}(c: connection, is_orig: bool, {params})",
+                  "\t{", f"\tbacnet(c, is_orig, \"{what}\");", "\t}", "@endif", ""]
+    lines += [
+        "@ifdef ( cip_header )",
+        "event cip_header(c: connection, is_orig: bool, packet_correlation_id: string, cip_sequence_count: count,",
+        "                 service: count, response: bool, status: count, status_extended: count, class_id: count,",
+        "                 instance_id: count, attribute_id: count, occurrence_count: count)",
+        "\t{",
+        "\tlocal src = is_orig ? c$id$orig_h : c$id$resp_h;",
+        "\tlocal dst = is_orig ? c$id$resp_h : c$id$orig_h;",
+        f"\tif ( ! response && service in set({', '.join(map(str, ZEEK_CIP_SERVICES))}) && dst in enip_targets && src !in enip_originators )",
+        "\t\tnotify(Unapproved_CIP_Service, c, src, dst,",
+        "\t\t       fmt(\"CIP service 0x%02x from %s, not an approved originator\", service, src),",
+        "\t\t       fmt(\"service 0x%02x\", service));",
+        "\t}",
+        "@endif",
+    ]
+    return "\n".join(lines) + "\n"
+
 
 def write_detections(answers: dict, out_dir: Path) -> dict[str, Path]:
-    """Write ``suricata.rules``, ``sigma/*.yml`` and ``hunting.md`` for one run into ``out_dir``."""
+    """Write ``suricata.rules``, ``sigma/*.yml``, ``pcapforge-ot.zeek`` and ``hunting.md`` for one run into ``out_dir``."""
     rules = suricata_rules(answers)
     out_dir.mkdir(parents=True, exist_ok=True)
-    paths = {"suricata.rules": out_dir / "suricata.rules", "hunting.md": out_dir / "hunting.md"}
+    paths = {"suricata.rules": out_dir / "suricata.rules", "hunting.md": out_dir / "hunting.md",
+             ZEEK_SCRIPT: out_dir / ZEEK_SCRIPT}
     paths["suricata.rules"].write_text(_rules_file(answers, rules), encoding="utf-8", newline="\n")
+    paths[ZEEK_SCRIPT].write_text(zeek_script(answers), encoding="utf-8", newline="\n")
     paths["hunting.md"].write_text(_hunting(answers, rules), encoding="utf-8", newline="\n")
     sigma = _sigma_files(answers, sigma_rules(answers))
     if sigma:

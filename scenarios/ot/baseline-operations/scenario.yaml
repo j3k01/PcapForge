@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: ot-baseline-operations
 title: Baseline of normal OT operations (no incident)
 line: ot
-version: 5
+version: 6
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [baseline, modbus, opcua, s7comm, ics, ot, water, wastewater, hvac, power]

@@ -131,6 +131,13 @@ command over `zeek/<log>.log`, run from the run directory. `tests/test_zeek_hunt
 over the logs of every scenario and level, compares jq's output with pcapforge's own evaluation, and
 checks that text answers found in the log are in the output.
 
+`detections/pcapforge-ot.zeek` (written with the other detections, and loaded by `--zeek`) turns the
+Suricata rules' roles into Zeek notices: `notice.log` names Modbus writes, device identification, DNP3
+controls, IEC 104 commands, BACnet writes and CIP writes / Forward_Open from hosts outside the approved
+roles, and Modbus setpoints written outside their normal band. On every scenario and level the notices
+name the attacker and only the attacker (`tests/test_zeek_notices.py`); the baseline raises none. The IEC
+104 analyzer also recognises the protocol on other ports by the STARTDT / TESTFR handshake.
+
 Zeek is found as `PCAPFORGE_ZEEK` (path to the binary), `zeek` on `PATH` or `/opt/zeek/bin/zeek`, and on Windows
 in the default WSL distribution (`zeek` on its `PATH` or `/opt/zeek/bin/zeek`, run through `wsl.exe`); otherwise
 the official `zeek/zeek:lts` Docker image is used (`PCAPFORGE_ZEEK_IMAGE` overrides it; the container has

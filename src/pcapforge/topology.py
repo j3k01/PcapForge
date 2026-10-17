@@ -86,6 +86,9 @@ class Host:
     subnets: list[str]
     name: str = ""
     interfaces: list[Interface] = field(default_factory=list)
+    # Connected during the capture (scenario `arrives`, or a DHCP client that joins): its IPv6 interface
+    # and mDNS responder start in the capture. Other hosts were up long before it.
+    arrives: bool = False
 
     @property
     def ip(self) -> str:
@@ -139,6 +142,7 @@ class Topology:
                     device=device(world_rng.choice(choices)),
                     loopback=f"{LOOPBACK_NET}.{loop_index // 250}.{loop_index % 250 + 2}",
                     router=spec.get("router", False),
+                    arrives=bool(spec.get("arrives", False)),
                     name_template=spec.get("name", f"{spec['id']}-{{index:02d}}"),
                     subnets=list(spec.get("subnets", [spec.get("subnet")])),
                 )

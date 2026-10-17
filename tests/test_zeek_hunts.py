@@ -15,6 +15,7 @@ from pcapforge.pipeline import generate
 from pcapforge.scenario import discover
 from pcapforge.tools import MIN_TSHARK, find_tool, tshark_version
 from pcapforge.zeek import ICSNPP, IEC104_SCRIPTS, find_zeek, hunt_command, hunt_rows
+from recordings import ensure_recorded
 
 SEED = "siem-queries"   # the recordings tests/test_siem_queries.py caches
 DURATION = 600.0
@@ -51,6 +52,7 @@ def runs(tmp_path_factory):
 
     def get(scenario_id, level):
         if (scenario_id, level) not in cache:
+            ensure_recorded(discover()[scenario_id], level, SEED, DURATION, root / "recording")
             result = generate(discover()[scenario_id], level, SEED, root, duration=DURATION, zeek=True)
             assert result.report.ok, [c for c in result.report.checks if not c["ok"]]
             answers = json.loads(result.answers.read_text(encoding="utf-8"))

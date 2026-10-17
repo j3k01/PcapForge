@@ -252,6 +252,10 @@
               "router": {
                 "type": "boolean"
               },
+              "arrives": {
+                "type": "boolean",
+                "description": "Connected during the capture: its IPv6 interface start (DAD, MLD, Router Solicitations, SLAAC) and mDNS responder are in the capture. Hosts that join by DHCP arrive anyway; others were up long before."
+              },
               "when": {
                 "$ref": "#/$defs/condition"
               }

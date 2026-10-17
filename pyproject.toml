@@ -41,7 +41,7 @@ packages = [
 
 [tool.setuptools.package-data]
 pcapforge = ["**/*.json", "**/*.yaml", "ui/static/*.css", "ui/static/*.js",
-             "zeek_analyzers/*/*.spicy", "zeek_analyzers/*/*.evt", "zeek_analyzers/*/*.zeek"]
+             "zeek_analyzers/*/*.spicy", "zeek_analyzers/*/*.evt", "zeek_analyzers/*/*.zeek", "zeek_analyzers/*/*.sig"]
 "pcapforge._scenarios" = ["**/*.yaml", "LICENSE"]
 
 [tool.pytest.ini_options]

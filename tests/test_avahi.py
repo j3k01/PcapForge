@@ -38,6 +38,7 @@ def compose(variant, seed="avahi", bound_after=None):
     for host in doc["topology"]["hosts"]:
         if host["id"] == "itpc":
             host["subnet"] = "control"
+            host["arrives"] = True  # plugged into the control LAN during the capture
     plan = build_plan(Scenario(base.path, doc), "medium", seed, duration_override=DURATION)
     root = Rng("pcapforge", plan.scenario.id, plan.difficulty, seed)
     plan.topology.assign_addresses(root.child("addressing"))

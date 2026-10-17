@@ -47,7 +47,7 @@ topology:
     - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
     - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
     - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
-    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.scanner_host == 'rogue'"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", arrives: true, when: "vars.scanner_host == 'rogue'"}
     - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.scanner_host == 'itpc'"}
 
 actors:

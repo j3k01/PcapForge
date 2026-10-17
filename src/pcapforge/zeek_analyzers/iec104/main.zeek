@@ -108,6 +108,9 @@ global pending: table[string, bool] of Info;
 # as Zeek does for its own analyzers' ports; otherwise the port-based analyzer would not attach.
 redef likely_server_ports += { 2404/tcp };
 
+# Content-based detection on other ports: STARTDT / TESTFR act answered by con.
+@load-sigs ./dpd.sig
+
 event zeek_init() &priority=5
 	{
 	Log::create_stream(PcapforgeIEC104::LOG, [$columns=Info, $ev=log_iec104, $path="iec104"]);

@@ -79,3 +79,27 @@ def test_command_log_has_the_attackers_breaker_select_and_execute(run):
         assert selects and executes and min(selects) < min(executes)
     assert all(r["value"] == 0 and r["id.resp_h"] == inject["target"]["ip"] and r["type_name"] == "C_SC_NA_1"
                for r in commands)
+
+
+
+def test_the_analyzer_finds_iec104_on_another_port_by_its_startdt(run, tmp_path):
+    """Content-based detection (dpd.sig): the same capture with the RTUs moved from 2404 to 12404."""
+    from scapy.layers.inet import IP, TCP
+    from scapy.utils import rdpcap, wrpcap
+
+    result, answers, logs = run
+    packets = rdpcap(str(result.pcap))
+    for pkt in packets:
+        if TCP in pkt and 2404 in (pkt[TCP].sport, pkt[TCP].dport):
+            tcp = pkt[TCP]
+            tcp.sport, tcp.dport = (12404 if p == 2404 else p for p in (tcp.sport, tcp.dport))
+            del pkt[IP].chksum, tcp.chksum
+    moved = tmp_path / "moved.pcap"
+    wrpcap(str(moved), packets)
+    moved_logs = write_zeek_logs(moved, answers, tmp_path / "zeek")
+    original = [{k: v for k, v in r.items() if k not in ("id.orig_p", "id.resp_p")} for r in jsonl(logs["iec104"])]
+    found = [{k: v for k, v in r.items() if k not in ("id.orig_p", "id.resp_p")} for r in jsonl(moved_logs["iec104"])]
+    # The STARTDT act that only the con confirms reaches the analyzer replayed, stamped with the con's time.
+    assert [{**r, "ts": None} for r in found] == [{**r, "ts": None} for r in original]
+    assert all(a["ts"] == b["ts"] or b.get("u_function") == "startdt_act" for a, b in zip(found, original))
+    assert all(r["id.resp_p"] == 12404 for r in jsonl(moved_logs["iec104"]))

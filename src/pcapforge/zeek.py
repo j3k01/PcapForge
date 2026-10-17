@@ -114,7 +114,7 @@ ANALYZERS_INSTALL = (
     + f" && spicyz -o \"$(zeek-config --prefix)/lib/zeek/spicy/{IEC104_SCRIPTS}.hlto\" "
       f"'{IEC104_DIR.as_posix()}/iec104.spicy' '{IEC104_DIR.as_posix()}/iec104.evt'"
     + f" && mkdir -p \"$(zeek-config --site_dir)/{IEC104_SCRIPTS}\""
-    + f" && cp '{IEC104_DIR.as_posix()}/'*.zeek \"$(zeek-config --site_dir)/{IEC104_SCRIPTS}/\"")
+    + f" && cp '{IEC104_DIR.as_posix()}/'*.zeek '{IEC104_DIR.as_posix()}/'*.sig \"$(zeek-config --site_dir)/{IEC104_SCRIPTS}/\"")
 
 
 def install_hint() -> str:
@@ -164,7 +164,10 @@ def write_zeek_logs(pcap: Path, answers: dict, out_dir: Path) -> dict[str, Path]
         old.unlink()
     subnets = [s["cidr"] for s in answers.get("topology", {}).get("subnets", [])]
     script = out_dir / SITE_SCRIPT
-    script.write_text(site_script(subnets), encoding="utf-8")
+    from pcapforge.detections import zeek_script  # detections imports this module (hunt_command)
+
+    # The run's detection script (notice.log) follows the site settings and the analyzers it hooks.
+    script.write_text(site_script(subnets) + "\n" + zeek_script(answers), encoding="utf-8")
     command = _command(pcap, out_dir)
     try:
         proc = subprocess.run(command, cwd=out_dir, capture_output=True, text=True, timeout=TIMEOUT_S, check=False)

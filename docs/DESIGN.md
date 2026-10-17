@@ -247,15 +247,20 @@ subscription (`vars.opcua`), see below.
     types are not in the approved-role tuples of `detections.py`, so the existing "command / write /
     Forward_Open from a host other than the approved master" Suricata and Sigma rules flag them; no new
     rules. The OT datasets carry `src_mac` / `dest_mac` like `modbus.jsonl`, for the source-MAC hunts.
-    SPL/KQL checked by `tests/test_siem_queries.py`; a recording missing from the cache must be made
-    under `unshare -rn` first, because the harness runs outside the namespace to reach the backends.
-- IPv6 (`compose/ipv6.py`, `vars.ipv6`): besides the Windows link-local baseline, the sensor segment's
-  firewall (`fortigate`, `ipv6_router` in devices.yaml with FortiOS defaults) sends Router Advertisements
-  with a seeded ULA /64; Windows hosts form SLAAC stable and temporary addresses (MLDv2 joins, DAD) and run
-  unicast Neighbor Discovery with the router (address resolution after the RA, the router's one NUD probe
-  5 s later). Hosts never send from the SLAAC addresses, as on a real IPv4 site with a ULA-only RA: no AAAA
-  records, and Windows' prefix policy (RFC 6724) ranks IPv4 above ULA, so nothing uses the router and no
-  later NUD happens.
+    SPL/KQL checked by `tests/test_siem_queries.py`. The harness runs outside a network namespace to reach the
+    backends; a recording missing from the cache is made first in its own namespace (`tests/recordings.py`:
+    `unshare -rn pcapforge generate ...` when this process lacks the quickack route), and the test fails at
+    once with that command when it cannot be made.
+- IPv6 (`compose/ipv6.py`, `vars.ipv6`): the sensor segment's firewall (`fortigate`, `ipv6_router` in
+  devices.yaml with FortiOS defaults) sends Router Advertisements with a seeded ULA /64. Hosts were up long
+  before the capture: their link-local and SLAAC addresses are configured, nothing of their interface start
+  is in the capture, and Windows' DHCPv6 client retransmits its old Solicit every SOL_MAX_RT with the elapsed
+  time at its cap. Only a host that arrives (`Host.arrives`: a `dhcp.client` with `join`, set in `build_plan`
+  before any actor plans, or topology `arrives: true`) starts its interface at its first frame: DAD, MLDv2,
+  Router Solicitations, SLAAC stable and temporary addresses, unicast Neighbor Discovery with the router
+  (address resolution after the RA, the router's one NUD probe 5 s later), and avahi. Hosts never send from
+  the SLAAC addresses, as on a real IPv4 site with a ULA-only RA: no AAAA records, and Windows' prefix policy
+  (RFC 6724) ranks IPv4 above ULA, so nothing uses the router and no later NUD happens.
 - Dual-stack site (`dualstack.py`, `compose/ipv6.GlobalAddresses`, `vars.ipv6: dual` on hard of
   `ot-baseline-operations` and `ot-modbus-write-manipulation`): a global /64 from 2001:db8::/32 (RFC 3849)
   per subnet the IPv6 router serves, a stable and a temporary address per Windows PC / server (devices

@@ -196,9 +196,12 @@ difficulty:
 - `impairments.clock_offset` (s) and `impairments.clock_drift_ppm`: sensor clock error, a number or a
   `[lo, hi]` range drawn per seed. Frame times and every time in the answer key carry it; payload clocks
   (NTP, OPC UA) keep the true site time, so analysts can measure the skew.
-- `vars.ipv6` (passed to `windows.chatter` as `ipv6`): IPv6 baseline of the Windows hosts on the sensor
-  segment (link-local DAD, Router Solicitation, MLDv2, LLMNR/mDNS over IPv6, DHCPv6 Solicit) and, when the
-  segment's router device has `ipv6_router`, its Router Advertisements, SLAAC addresses and unicast ND.
+- `vars.ipv6` (passed to `windows.chatter` as `ipv6`): IPv6 on the sensor segment: LLMNR/mDNS over IPv6 and
+  DHCPv6 Solicits of the Windows hosts and, when the segment's router device has `ipv6_router`, its Router
+  Advertisements. Hosts were up long before the capture (addresses configured, DHCPv6 Solicits every
+  SOL_MAX_RT); only a host that arrives during it (a DHCP client with `join`, or a topology host with
+  `arrives: true`) shows its interface start: link-local DAD, MLDv2, Router Solicitations, SLAAC, unicast ND
+  with the router and, for `mdns: avahi` devices, the mDNS announcements.
   Hosts with IPv6 are those whose stack has an `ipv6` section (`windows`: randomized identifiers and a
   temporary address; `linux`: kernel defaults, modified EUI-64, no temporary address) and whose device
   does not set `ipv6: false` in `devices.yaml`.

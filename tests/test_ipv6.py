@@ -1,6 +1,7 @@
 """IPv6 on the sensor segment: the firewall's Router Advertisements, SLAAC of the Windows hosts
 and unicast Neighbor Discovery (compose/ipv6.py), checked frame by frame with Scapy and tshark."""
 
+import copy
 import ipaddress
 import subprocess
 
@@ -15,18 +16,26 @@ from pcapforge.compose.ipv6 import Ipv6
 from pcapforge.compose.writer import write_pcap
 from pcapforge.plan import build_plan
 from pcapforge.rng import Rng
-from pcapforge.scenario import find
+from pcapforge.scenario import Scenario, find
 from pcapforge.tools import find_tool
 
 SCENARIO = "ot-modbus-write-manipulation"
 DURATION = 7200.0
 
 
-def compose_ipv6(seed="ipv6", starts=None, router_up=None):
+def compose_ipv6(seed="ipv6", starts=None, router_up=None, arriving=True):
     """(plan, Ipv6, decoded frames) of the IPv6 a medium capture of ``DURATION`` s shows.
 
-    ``starts``: host id -> interface start (s into the capture) instead of the DHCPv6 ``up``."""
-    plan = build_plan(find(SCENARIO), "medium", seed, duration_override=DURATION)
+    ``starts``: host id -> interface start (s into the capture) instead of the DHCPv6 ``up``.
+    ``arriving``: every host arrives during the capture (scenario ``arrives``), so its interface
+    start is in it; False: the scenario as shipped, where the hosts were up long before."""
+    scenario = find(SCENARIO)
+    if arriving:
+        doc = copy.deepcopy(scenario.doc)
+        for spec in doc["topology"]["hosts"]:
+            spec["arrives"] = True
+        scenario = Scenario(scenario.path, doc)
+    plan = build_plan(scenario, "medium", seed, duration_override=DURATION)
     root = Rng("pcapforge", plan.scenario.id, plan.difficulty, seed)
     plan.topology.assign_addresses(root.child("addressing"))
     t0 = plan.start_epoch
@@ -235,6 +244,27 @@ def test_same_seed_gives_identical_frames_and_another_seed_another_prefix(defaul
     assert [(t, data) for t, _, data in frames] == [(t, data) for t, _, data in frames_again]
     _, other, _ = compose_ipv6("another")
     assert other.prefix[:6] != ipv6.prefix[:6]
+
+
+def test_hosts_up_before_the_capture_show_no_interface_start_and_solicit_dhcpv6_at_sol_max_rt():
+    # The scenario as shipped: only the vendor laptop that joins by DHCP arrives during the capture.
+    plan, ipv6, frames = compose_ipv6("long-up", arriving=False)
+    arriving = {h for h in ipv6.address if plan.topology.by_id[h].arrives}
+    assert arriving == {h.id for h in plan.topology.hosts if h.group == "svc_laptop"}
+    senders = {p.src for _, p, _ in frames if ICMPv6MLReport2 in p or ICMPv6ND_RS in p
+               or (ICMPv6ND_NS in p and p[IPv6].src == "::")}
+    assert senders == {mac(ipv6.mac[h]) for h in arriving}, "DAD, MLD and RS only from the host that arrives"
+    assert ras(frames), "the router keeps advertising"
+    assert all(ipv6.valid[h] == float("-inf") for h in set(ipv6.address) - arriving)
+    # Windows retransmits the Solicit it started long ago every SOL_MAX_RT (120 s +-10 %), elapsed time capped.
+    for host in plan.topology.hosts:
+        solicits = [a for a in plan.actions if a.op == "dhcpv6.solicit" and a.host == host.id]
+        if not solicits or host.arrives:
+            continue
+        assert all(a.args["elapsed"] == 0xFFFF and "up" not in a.args for a in solicits)
+        assert len({a.args["xid"] for a in solicits}) == 1
+        assert all(108.0 <= b.t - a.t <= 132.0 for a, b in zip(solicits, solicits[1:]))
+        assert solicits[0].t < 120.0
 
 
 @pytest.mark.skipif(not find_tool("tshark"), reason="requires tshark")

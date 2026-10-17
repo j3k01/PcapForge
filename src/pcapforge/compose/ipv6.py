@@ -6,11 +6,14 @@ profile: modified EUI-64 or randomized, with or without a temporary address):
 
 * every such host on the sensor subnet gets a link-local address with a randomized
   interface identifier (Windows default) drawn from the presentation seed;
-* when the host first shows up (or when its IPv6 interface comes up, ``up`` of its DHCPv6
-  actions), the interface start is synthesized like ARP: an MLDv2 report joining the
-  solicited-node group from ``::``, the DAD Neighbor Solicitation, and once the address is
-  usable MLDv2 reports for the joined groups and up to three Router Solicitations, the
-  later ones only while no Router Advertisement has arrived (RFC 4861 section 6.3.7);
+* a host that arrives during the capture (``Host.arrives``: a DHCP client that joins, or a host the
+  scenario marks ``arrives``) starts its interface when it first shows up (or when its IPv6
+  interface comes up, ``up`` of its DHCPv6 actions), synthesized like ARP: an MLDv2 report joining
+  the solicited-node group from ``::``, the DAD Neighbor Solicitation, and once the address is
+  usable MLDv2 reports for the joined groups and up to three Router Solicitations, the later ones
+  only while no Router Advertisement has arrived (RFC 4861 section 6.3.7), then SLAAC (below).
+  Every other host was up long before the capture: its addresses are configured, and with no
+  MLD querier on the segment it sends no reports;
 * datagrams to a sink with an IPv6 group (LLMNR, mDNS, DHCPv6) are sent over IPv6 as well
   (or only, for DHCPv6): same payload, IPv6 + UDP header with the IPv6 pseudo-header checksum,
   Ethernet 33:33 group address. LLMNR uses its own socket (port) per query and family.
@@ -265,7 +268,7 @@ class Ipv6:
         self.mac = {hid: mac_bytes(h.interface_on(topology.sensor).mac) for hid, h in self.hosts.items()}
         self.up: dict[str, float] = {}
         for action in plan.actions:
-            if action.op == "dhcpv6.solicit" and action.host not in self.up:
+            if action.op == "dhcpv6.solicit" and "up" in action.args and action.host not in self.up:
                 self.up[action.host] = self.start + action.args["up"]
         self.valid: dict[str, float] = {}  # host -> when its link-local address is usable
         self.solicits: dict[str, list[float]] = {}  # host -> its Router Solicitations if no RA comes first
@@ -283,10 +286,12 @@ class Ipv6:
         self.global6 = global6
         if global6 is not None and global6.hosts:
             self.prefix = global6.prefix[topology.sensor]
-            for host_id in self.address:
-                if host_id in global6.hosts:
-                    self.valid[host_id] = -math.inf
-                    self.configured.add(host_id)
+        # A host that does not arrive during the capture was up long before it: its link-local and SLAAC
+        # addresses are configured and its Router Solicitations, DAD and MLD reports lie in the past.
+        for host_id, host in self.hosts.items():
+            if not host.arrives:
+                self.valid[host_id] = -math.inf
+                self.configured.add(host_id)
         self.confirmed: dict[tuple[str, str], float] = {}  # (sender, neighbour) -> last reachability confirmation
         self.reachable: dict[str, float] = {}
         self.bound = bound if bound is not None else {}

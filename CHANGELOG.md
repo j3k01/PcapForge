@@ -17,6 +17,10 @@
   address; Ubuntu Desktop: stable-privacy identifiers and a temporary address) and run avahi-daemon,
   which announces their addresses over IPv4 and IPv6 mDNS when the interface comes up (shipped with the
   Pi scanner on medium of `ot-modbus-discovery`).
+- IPv6 hosts that were up before the capture no longer show an interface start (DAD, Router Solicitations,
+  MLD reports, SLAAC) at their first frame: their addresses are configured and Windows retransmits its
+  DHCPv6 Solicit every two minutes. Only a host that arrives during the capture (a DHCP joiner, or topology
+  `arrives: true`) starts its interface in it. Medium and hard captures change (scenario versions bumped).
 
 ### Detection engineering
 - `--zeek` loads CISA's ICSNPP packages when they are installed (versions pinned in `zeek.py`, installed in
@@ -26,6 +30,12 @@
   `iec104_command.log` (one per command object); `zeek.ANALYZERS_INSTALL` builds it next to ICSNPP.
 - The hunting guide has a Zeek query (a jq command over `zeek/<log>.log`) for every question a Zeek log
   can answer, tested on every scenario and level; `conn.log` now records the MACs on the wire.
+- `detections/pcapforge-ot.zeek` (also loaded by `--zeek`): Zeek notices for OT writes and commands from
+  hosts outside the approved roles and for Modbus setpoints written out of band; tested to flag the
+  attacker and only the attacker on every scenario and level.
+- The IEC 104 Zeek analyzer also recognises the protocol on non-standard ports (STARTDT / TESTFR handshake).
+- The SPL/KQL and Zeek test harnesses record a missing recording in their own network namespace
+  (`unshare -rn`) instead of failing deep inside the recorder.
 - The hunting guide's SPL and KQL are tested against Splunk 10.6 and Elasticsearch 9.5 for every scenario
   and level (`tests/test_siem_queries.py`, CI job `siem-queries`).
 - `ot-modbus-discovery`: the enumeration SPL searched `dest=` the scanner and matched nothing; it now

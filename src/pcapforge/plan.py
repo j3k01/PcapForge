@@ -177,6 +177,12 @@ def build_plan(scenario: Scenario, difficulty: str, seed: str, base_seed: str | 
         actor = create_actor(spec["type"], spec["id"], hosts, params, bool(spec.get("incident")),
                              plan, rng.child(f"actor:{spec['id']}"))
         plan.actors.append(actor)
+    # A DHCP client that joins during the capture arrives (its IPv6 start is in the capture); set before
+    # planning, so every actor sees it.
+    for actor in plan.actors:
+        if actor.type == "dhcp.client" and actor.param("join") is not None:
+            for host in actor.hosts:
+                host.arrives = True
     # Servers first so clients can look them up; incident actors last so they can see
     # the background they hide in.
     for actor in sorted(plan.actors, key=lambda a: (a.incident, not a.is_server)):
