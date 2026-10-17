@@ -236,7 +236,7 @@ def devices_page() -> str:
     for name in sorted(devices):
         d = devices[name]
         identity = d.get("identity") or {}
-        extras = [k for k in ("browser", "ipv6_router", "forwarding_ms") if k in d]
+        extras = [k for k in ("browser", "ipv6", "ipv6_router", "mdns", "forwarding_ms") if k in d]
         rows.append([code(name), md(d["vendor"]), f"[`{d['stack']}`](#stack-{d['stack']})",
                      ", ".join(code(o) for o in d["ouis"]), str(d["link_mbps"]),
                      str(d["processing_ms"]["median"]),

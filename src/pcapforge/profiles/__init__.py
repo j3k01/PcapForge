@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
 
@@ -114,12 +114,10 @@ class Device:
     browser: Browser | None = None  # None: the device sends no browser announcements
     link_mbps: int = 100            # NIC speed: spacing of back-to-back segments on the wire
     ipv6_router: Ipv6Router | None = None  # None: the device does not advertise itself as IPv6 router
-    ipv6_enabled: bool = True       # devices.yaml `ipv6: false`: IPv6 off although the stack has it
-
-    @property
-    def ipv6(self) -> Ipv6 | None:
-        """The device's IPv6 behaviour (None: no IPv6)."""
-        return self.stack.ipv6 if self.ipv6_enabled else None
+    # The device's IPv6 behaviour (None: no IPv6): its stack's, unless devices.yaml `ipv6` turns it off
+    # (`false`) or overrides fields of it (a mapping).
+    ipv6: Ipv6 | None = None
+    mdns: str | None = None         # mDNS responder that announces the host's addresses (`avahi`)
 
 
 @cache
@@ -148,11 +146,7 @@ def stack(name: str) -> Stack:
         link_local=LinkLocal(df=raw.get("link_local", {}).get("df", raw["df"]),
                              ttl=dict(raw.get("link_local", {}).get("ttl", {}))),
         initial_window=raw["initial_window"],
-        ipv6=Ipv6(multicast_hop_limit=dict(raw["ipv6"]["multicast_hop_limit"]), groups=tuple(raw["ipv6"]["groups"]),
-                  router_solicitations=raw["ipv6"]["router_solicitations"],
-                  rs_interval_s=raw["ipv6"]["rs_interval_s"],
-                  random_iid=raw["ipv6"].get("random_iid", True),
-                  temporary=raw["ipv6"].get("temporary", True)) if "ipv6" in raw else None,
+        ipv6=_ipv6(raw["ipv6"]) if "ipv6" in raw else None,
         syn_rto_s=float(raw.get("syn_rto_s", 1.0)),
         drops_unsolicited=bool(raw.get("drops_unsolicited", False)),
     )
@@ -176,8 +170,29 @@ def device(name: str) -> Device:
         if "browser" in raw else None,
         link_mbps=raw["link_mbps"],
         ipv6_router=_ipv6_router(raw["ipv6_router"]) if "ipv6_router" in raw else None,
-        ipv6_enabled=bool(raw.get("ipv6", True)),
+        ipv6=_device_ipv6(raw.get("ipv6", True), stack(raw["stack"]).ipv6),
+        mdns=raw.get("mdns"),
     )
+
+
+def _ipv6(raw: dict) -> Ipv6:
+    return Ipv6(multicast_hop_limit=dict(raw["multicast_hop_limit"]), groups=tuple(raw["groups"]),
+                router_solicitations=raw["router_solicitations"], rs_interval_s=raw["rs_interval_s"],
+                random_iid=raw.get("random_iid", True), temporary=raw.get("temporary", True))
+
+
+def _device_ipv6(raw: bool | dict, base: Ipv6 | None) -> Ipv6 | None:
+    """A device's IPv6: ``false`` turns its stack's off, a mapping overrides fields of it."""
+    if base is None or raw is False:
+        return None
+    if raw is True:
+        return base
+    fields = dict(raw)
+    if "groups" in fields:
+        fields["groups"] = tuple(fields["groups"])
+    if "multicast_hop_limit" in fields:
+        fields["multicast_hop_limit"] = dict(fields["multicast_hop_limit"])
+    return replace(base, **fields)
 
 
 def _ipv6_router(raw: dict) -> Ipv6Router:

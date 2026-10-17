@@ -123,6 +123,7 @@ class Dhcp:
         self.topology = plan.topology
         self.rng = rng
         self.joining = frozenset(a.host for a in plan.actions if a.op == JOIN_OP)
+        self.bound: dict[str, float] = {}  # host -> when its new address is configured (first announcement)
 
     def after(self, p: Packet) -> list[tuple[float, bytes]]:
         """ARP probes and announcements of the client whose new lease ``p`` acknowledges."""
@@ -145,6 +146,7 @@ class Dhcp:
                 t += rng.uniform(*acd.interval) * rng.uniform(*TIMER_JITTER)
             frames.append((t, arp_request(mac, UNSPECIFIED_BYTES, address)))
         t += acd.announce_wait * rng.uniform(*TIMER_JITTER)
+        self.bound.setdefault(host.id, t)
         for index in range(acd.announcements):
             if index:
                 t += acd.announce_interval * rng.uniform(*TIMER_JITTER)

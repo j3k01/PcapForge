@@ -262,6 +262,14 @@ subscription (`vars.opcua`), see below.
   (reachability older than ReachableTime) probed 5 s after use with a unicast NS / NA, except by a
   Windows endpoint of a TCP connection (forward progress confirms). The router probes the hosts it
   forwards to the same way. PLCs (also embedded Windows ones) stay IPv4.
+- Linux desktops (`profiles.Device.ipv6`: devices.yaml `ipv6` may override fields of the stack's IPv6, or turn
+  it off with `false`): `raspberry-pi` keeps the linux stack's modified EUI-64 and no temporary address
+  (Raspberry Pi OS Bookworm with NetworkManager), `linux-laptop` has stable-privacy identifiers and a temporary
+  address (Ubuntu Desktop). Both have `mdns: avahi`: `compose/avahi.py` is a small discrete-event model of
+  avahi 0.8 (announcers per record and interface, probe and response schedulers with their defer, jitter and
+  history times, packing of pending jobs into one packet) fed by the interface start, the DHCP bind time
+  (`compose/dhcp.Dhcp.bound`) and the SLAAC addresses' DAD. Runs inside `Ipv6.finish`, so only with the
+  scenario's IPv6 on; no shipped scenario puts these devices on the sensor segment at such a level.
 - FLOAT32 registers: profile points may be `type: float32` (two registers, profile `word_order` big = ABCD or
   little = CDAB); `power_substation` and `hvac_building` use them. `Point.encode` returns the register words,
   `ProcessProfile.decode_block` decodes whole points from a read/write block (half a float is skipped), and a

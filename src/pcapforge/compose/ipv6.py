@@ -1,7 +1,8 @@
 """IPv6 of hosts whose stack has it on (``ipv6`` in devices.yaml) and of the sensor segment's
 router, with the scenario var ``ipv6``: what the sensor sees of it on its segment.
 
-Hosts (Windows):
+Hosts (Windows; Linux hosts the same way with the identifiers and addresses of their devices.yaml
+profile: modified EUI-64 or randomized, with or without a temporary address):
 
 * every such host on the sensor subnet gets a link-local address with a randomized
   interface identifier (Windows default) drawn from the presentation seed;
@@ -44,6 +45,11 @@ ULA prefix: the site DNS has no AAAA records, and Windows' default prefix policy
 ranks IPv4 (``::ffff:0:0/96``, precedence 35) above ULA (``fc00::/7``, precedence 3), so
 nothing goes out over the ULA addresses and the host does not use its default router either.
 
+A host that runs an mDNS responder (``mdns: avahi``: Raspberry Pi OS, desktop Linux) announces
+its IPv4 address, its link-local address and then its SLAAC addresses over mDNS from the
+link-local address (``compose/avahi.py``). That is link-local multicast, so it does not
+contradict the above. A host that joins by DHCP has its IPv4 address at ``bound``.
+
 Unicast Neighbor Discovery (RFC 4861 section 7):
 
 * right after RA handling the host resolves its new default router: NS from its link-local
@@ -63,12 +69,15 @@ import struct
 from typing import TYPE_CHECKING
 
 from pcapforge import dualstack, ports
+from pcapforge.compose.avahi import Avahi
 from pcapforge.compose.headers import checksum
 from pcapforge.compose.link import mac_bytes, pad
 from pcapforge.compose.packets import TCP
 from pcapforge.topology import Sink, group6_mac
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from pcapforge.compose.headers import Headers
     from pcapforge.compose.packets import Packet
     from pcapforge.plan import Plan
@@ -233,10 +242,12 @@ class GlobalAddresses:
 
 class Ipv6:
     def __init__(self, plan: Plan, headers: Headers, rng: Rng, router_up: float | None = None,
-                 global6: GlobalAddresses | None = None) -> None:
+                 global6: GlobalAddresses | None = None, bound: Mapping[str, float] | None = None) -> None:
         """``router_up``: epoch at which the router's interface comes up inside the capture
         (None: it is up before the capture starts). ``global6``: the dual-stack site's global
-        addresses; their hosts were configured before the capture (no interface start, no SLAAC)."""
+        addresses; their hosts were configured before the capture (no interface start, no SLAAC).
+        ``bound``: host id -> when a host that joins by DHCP has its IPv4 address (filled while the
+        capture is composed; others have theirs when the interface starts)."""
         topology = plan.topology
         self.start = plan.start_epoch
         self.headers = headers
@@ -278,6 +289,9 @@ class Ipv6:
                     self.configured.add(host_id)
         self.confirmed: dict[tuple[str, str], float] = {}  # (sender, neighbour) -> last reachability confirmation
         self.reachable: dict[str, float] = {}
+        self.bound = bound if bound is not None else {}
+        self.started: dict[str, float] = {}  # host -> interface start
+        self.slaac: dict[str, list[tuple[float, bytes]]] = {}  # host -> (usable at, SLAAC address)
 
     def _frame(self, src_mac: bytes, dst_mac: bytes, packet: bytes) -> bytes:
         return pad(dst_mac + src_mac + ETHERTYPE_IPV6 + packet)
@@ -293,7 +307,7 @@ class Ipv6:
         stack = host.device.ipv6
         own, mac = self.address[host.id], self.mac[host.id]
         node_group = solicited_node(own)
-        at = min(t, self.up.get(host.id, t))
+        at = self.started[host.id] = min(t, self.up.get(host.id, t))
         frames = [(at, self._mld(mac, UNSPECIFIED, [node_group]))]
         dad = at + rng.uniform(*DAD_DELAY)
         frames.append((dad, self._icmp(mac, UNSPECIFIED, node_group, neighbor_solicitation(own))))
@@ -331,11 +345,12 @@ class Ipv6:
     # -- router, SLAAC and unicast ND -----------------------------------------------------
     def finish(self, first: float, last: float) -> list[tuple[float, bytes]]:
         """Frames that depend on the whole capture (``first`` .. ``last``): the hosts' Router
-        Solicitations until an RA answers them, the router's RAs, SLAAC and unicast ND."""
+        Solicitations until an RA answers them, the router's RAs, SLAAC, unicast ND and the mDNS
+        responder's (avahi) announcements of the addresses."""
         frames: list[tuple[float, bytes]] = []
         queue = sorted((t, hid) for hid, times in self.solicits.items() for t in times)
         if self.router is None:
-            return [(t, self._rs(hid)) for t, hid in queue]
+            return [(t, self._rs(hid)) for t, hid in queue] + self._mdns(last)
         config = self.router.device.ipv6_router
         rng = self.rng.child("router")
         lo, hi = config.min_rtr_adv_interval, config.max_rtr_adv_interval
@@ -383,7 +398,7 @@ class Ipv6:
                 if host_id not in configured and self.valid.get(host_id, math.inf) <= ra_t:
                     configured.add(host_id)
                     self._configure(host_id, ra_t, frames)
-        return frames
+        return frames + self._mdns(last)
 
     def _router_start(self, at: float, rng: Rng, frames: list[tuple[float, bytes]]) -> float:
         """Interface start of the router at ``at``; returns when its link-local address is usable."""
@@ -418,6 +433,7 @@ class Ipv6:
                 frames.append((t + rng.uniform(*REPORT_REPEAT), self._mld(mac, own, [group])))
                 t += rng.uniform(*DAD_DELAY)
             frames.append((t, self._icmp(mac, UNSPECIFIED, group, neighbor_solicitation(address))))
+            self.slaac.setdefault(host_id, []).append((t + DAD_S, address))
             t += rng.uniform(*TEMPORARY_AFTER)
 
         # Address resolution of the new default router.
@@ -432,6 +448,20 @@ class Ipv6:
         answered = probe + rng.uniform(*ND_REPLY)
         frames.append((answered, self._icmp(mac, own, router, neighbor_advertisement(
             own, NA_SOLICITED | NA_OVERRIDE, mac), rmac)))
+
+    def _mdns(self, last: float) -> list[tuple[float, bytes]]:
+        """avahi-daemon of the hosts that run it (``mdns: avahi``), up to ``last``."""
+        frames: list[tuple[float, bytes]] = []
+        for host_id, start in self.started.items():
+            host = self.hosts[host_id]
+            if host.device.mdns != "avahi":
+                continue
+            iface = host.interface_on(self.sensor)
+            avahi = Avahi(self.rng.child("avahi").child(host_id), host.name, iface.mac,
+                          ipaddress.IPv4Address(iface.ip).packed, self.address[host_id])
+            frames += [f for f in avahi.run(self.bound.get(host_id, start), self.valid[host_id],
+                                            self.slaac.get(host_id, [])) if f[0] <= last]
+        return frames
 
     # -- neighbours of IPv6 conversations (dual-stack site) ---------------------------------------
     def neighbor(self, p: Packet, dst: bytes) -> list[tuple[float, bytes]]:

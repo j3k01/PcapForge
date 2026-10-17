@@ -21,6 +21,10 @@
 # the scenario turns IPv6 on (`compose/ipv6.py`): Router Advertisement timers and fields, MTU option
 # (omit `mtu` to leave it out), the Prefix Information option of the segment's /64 (ULA, or global
 # on a dual-stack site) and `rdnss_lifetime` of the RDNSS option a dual-stack site adds.
+# `ipv6` (devices): `false` turns the stack's IPv6 off; a mapping overrides fields of the stack's
+# `ipv6` for this device (e.g. a desktop Linux with stable-privacy identifiers).
+# `mdns` (devices): the mDNS responder that announces the host's addresses when its interface
+# comes up with the scenario's IPv6 on (`avahi`: `compose/avahi.py`).
 
 stacks:
   windows:
@@ -251,14 +255,23 @@ devices:
     stack: linux
     link_mbps: 1000
     processing_ms: {median: 0.6, sigma: 0.5}
-    ipv6: false  # not modelled: Raspberry Pi OS / desktop Linux use stable-privacy IIDs, temporary addresses, avahi
+    # Raspberry Pi OS Bookworm (NetworkManager) forms modified EUI-64 interface identifiers, as
+    # reported on the Raspberry Pi forums (a keyfile without addr-gen-mode reads as
+    # default-or-eui64), and Debian leaves use_tempaddr at 0: no temporary address. avahi-daemon
+    # joins ff02::fb and sends mDNS with hop limit 255.
+    ipv6: {groups: [ff02::fb], multicast_hop_limit: {ff02::fb: 255}}
+    mdns: avahi
   linux-laptop:
     vendor: Dell
     ouis: ["70:B5:E8", "F0:1F:AF"]
     stack: linux
     link_mbps: 1000
     processing_ms: {median: 0.3, sigma: 0.5}
-    ipv6: false  # see raspberry-pi
+    # Ubuntu Desktop (NetworkManager's own wired profile, addr-gen-mode default = stable-privacy,
+    # RFC 7217: randomized identifiers, another per prefix) with /etc/sysctl.d/10-ipv6-privacy.conf
+    # (use_tempaddr 2: an RFC 8981 temporary address); avahi-daemon as on the Raspberry Pi.
+    ipv6: {random_iid: true, temporary: true, groups: [ff02::fb], multicast_hop_limit: {ff02::fb: 255}}
+    mdns: avahi
   fortigate:
     vendor: Fortinet
     ouis: ["00:09:0F"]

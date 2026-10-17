@@ -185,7 +185,7 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
     headers = Headers(plan, present.child("headers"), global6)
     leases = dhcp.Dhcp(plan, present.child("dhcp"))
     link = Link(plan, network, present.child("arp"), leases.joining)
-    ipv6 = Ipv6(plan, headers, present.child("ipv6"), global6=global6)
+    ipv6 = Ipv6(plan, headers, present.child("ipv6"), global6=global6, bound=leases.bound)
     sorter = _Sorter()
 
     def frames() -> Iterator[Frame]:
