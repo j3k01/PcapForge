@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: ot-modbus-discovery
 title: Modbus/TCP device discovery on the control subnet
 line: ot
-version: 3
+version: 4
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [modbus, ics, discovery, recon, ot, water, wastewater, hvac, power]
@@ -117,7 +117,7 @@ difficulty:
       process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
       plc_count: {range: [2, 4]}
       hmi_interval: 1.0
-      scanner_host: itpc
+      scanner_host: rogue  # a Raspberry Pi on the control LAN; with IPv6 on it also announces itself (avahi)
       start: [0.25, 0.65]
       operator_writes: 2
       dns: true
@@ -239,6 +239,25 @@ questions:
       look_for: >-
         Sweeping for Modbus services is Remote System Discovery (T0846); reading device identity and
         register layout is Remote System Information Discovery (T0888) and Point & Tag Identification (T0861).
+  - id: announced_name
+    when: "vars.ipv6 and vars.scanner_host == 'rogue'"
+    text: The scanning device announced itself on the control LAN over multicast DNS. Which host name did it announce?
+    answer: "${facts.scan.source.name}.local"
+    accept: ["${facts.scan.source.name}"]
+    type: text
+    points: 5
+    hint: Filter mdns responses from the scanner's MAC address; they map its addresses to a .local name (A / AAAA records and their reverse PTRs).
+    check:
+      filter: 'mdns && dns.flags.response == 1 && eth.src == ${facts.scan.source.mac} && dns.ptr.domain_name == "${facts.scan.source.name}.local"'
+      expect: {min: 2}
+    hunt:
+      dataset: name_resolution
+      spl: "index=* sourcetype=pcapforge:name_resolution app=mdns message=response src_mac=\"${facts.scan.source.mac}\" | stats values(answers{}) AS announced BY src"
+      kql: "app : \"mdns\" and message : \"response\" and src_mac : \"${facts.scan.source.mac}\""
+      look_for: >-
+        avahi-daemon on the device probes for and then announces its name with every address it has, over
+        IPv4 and IPv6 (from its link-local address, whose EUI-64 interface identifier also embeds the
+        MAC address). The PTR answers carry the name.
 
 translations:
   pl:
@@ -269,6 +288,9 @@ translations:
         hint: Zbyt duży odczyt tabeli rejestrów jest odrzucany przez PLC. Jaki kod wyjątku (i nazwa) wraca?
       technique:
         text: Która technika MITRE ATT&CK for ICS najlepiej opisuje odczyt identyfikacji PLC i mapy rejestrów?
+      announced_name:
+        text: Urządzenie skanujące ogłosiło się w sieci sterowania przez multicast DNS. Jaką nazwę hosta ogłosiło?
+        hint: Przefiltruj odpowiedzi mdns z adresu MAC skanera; wiążą one jego adresy z nazwą .local (rekordy A / AAAA i ich odwrotne PTR).
   de:
     title: Erkundung von Modbus/TCP-Geräten im Steuerungsnetz
     briefing: |
@@ -298,3 +320,6 @@ translations:
         hint: Ein zu großer Lesezugriff auf eine Registertabelle wird von der SPS abgewiesen. Welcher Exception-Code (und Name) kommt zurück?
       technique:
         text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das Auslesen der SPS-Identifikation und der Registertabelle am besten?
+      announced_name:
+        text: Das scannende Gerät hat sich im Steuerungsnetz per Multicast-DNS angekündigt. Welchen Hostnamen hat es angekündigt?
+        hint: Filtern Sie mdns-Antworten von der MAC-Adresse des Scanners; sie ordnen seine Adressen einem .local-Namen zu (A- / AAAA-Einträge und ihre Reverse-PTRs).

@@ -8,6 +8,9 @@
   `ot-enip-drive-manipulation` (unapproved Forward_Open + forced drive speed reference). Each is
   flagged by the existing "command / write / Forward_Open from an unexpected host" Suricata and Sigma
   rules for that protocol.
+- `ot-modbus-discovery` (version 4): on medium the scanner is a Raspberry Pi on the control LAN instead
+  of a routed laptop; it brings up IPv6 and announces itself over mDNS, and a new question asks for the
+  announced name. Medium exercises of the same seed differ from version 3.
 
 ### Traffic realism
 - The Raspberry Pi and Linux laptop profiles have IPv6 (Raspberry Pi OS: modified EUI-64, no temporary

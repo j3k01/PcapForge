@@ -269,7 +269,7 @@ subscription (`vars.opcua`), see below.
   avahi 0.8 (announcers per record and interface, probe and response schedulers with their defer, jitter and
   history times, packing of pending jobs into one packet) fed by the interface start, the DHCP bind time
   (`compose/dhcp.Dhcp.bound`) and the SLAAC addresses' DAD. Runs inside `Ipv6.finish`, so only with the
-  scenario's IPv6 on; no shipped scenario puts these devices on the sensor segment at such a level.
+  scenario's IPv6 on; shipped on medium of `ot-modbus-discovery`, where the scanner is the Raspberry Pi.
 - FLOAT32 registers: profile points may be `type: float32` (two registers, profile `word_order` big = ABCD or
   little = CDAB); `power_substation` and `hvac_building` use them. `Point.encode` returns the register words,
   `ProcessProfile.decode_block` decodes whole points from a read/write block (half a float is skipped), and a
