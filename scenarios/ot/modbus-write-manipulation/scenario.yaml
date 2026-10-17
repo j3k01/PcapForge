@@ -96,6 +96,12 @@ actors:
     hosts: [hmi, historian, ews]
     when: vars.chatter
     params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The vendor's service laptop (medium/hard) chatters too, while it is connected.
+  - id: laptop_chatter
+    type: windows.chatter
+    hosts: svc_laptop
+    when: "vars.chatter and vars.service_laptop"
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
   # Second treatment train: OEM package unit on a Siemens S7-1500, monitored over S7comm.
   - id: s7_service
     type: s7.server

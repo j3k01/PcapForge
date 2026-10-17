@@ -21,6 +21,10 @@
   MLD reports, SLAAC) at their first frame: their addresses are configured and Windows retransmits its
   DHCPv6 Solicit every two minutes. Only a host that arrives during the capture (a DHCP joiner, or topology
   `arrives: true`) starts its interface in it. Medium and hard captures change (scenario versions bumped).
+- A Windows host that joins over DHCP and leaves again chatters only while it is connected: name lookups,
+  SSDP and browser announcements start once its address is configured, its IPv6 interface (DHCPv6 back-off
+  from the start) comes up with the link, and browser announcements start a minute apart and lengthen to
+  12 minutes. `ot-modbus-write-manipulation` (medium/hard): the vendor's service laptop now chatters too.
 
 ### Detection engineering
 - `--zeek` loads CISA's ICSNPP packages when they are installed (versions pinned in `zeek.py`, installed in

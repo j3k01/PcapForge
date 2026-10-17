@@ -49,6 +49,8 @@ NBNS_INTERVAL = 0.75          # NetBT BcastQueryTimeout (s)
 LLMNR_RESEND = (0.41, 0.44)   # delay of the single LLMNR retransmission (s)
 FALLBACK = (0.005, 0.030)     # NXDOMAIN from the DNS server -> link-local lookups (s)
 ANNOUNCE_PERIOD = 720.0       # browser announcement interval of a host that has been up a while
+STARTUP_PERIOD = 60.0         # first announcement interval after joining, then a minute longer each time
+JOIN_SETTLE = 6.0             # joined -> address configured (DHCP, ARP conflict detection, INFORM) (s)
 NB_WORKSTATION, NB_SERVER, NB_MASTER_BROWSER = 0x00, 0x20, 0x1D
 
 # Default printer names: Brother "BRN" + MAC, HP JetDirect "NPI" + last three MAC bytes.
@@ -91,13 +93,17 @@ class WindowsChatter(Actor):
                 raise ScenarioError(f"{self.type} needs Windows hosts; '{host.id}' runs "
                                     f"{host.device.stack.name}")
             rng = self.rng.child(host.id)
+            # A host that joins chatters once its address is configured, and stops when it leaves.
+            start, end = host.present or (0.0, self.plan_.duration)
+            joined = host.present is not None and host.arrives
+            begin = start + JOIN_SETTLE if joined else start
             self._plan_lookups(host, rng.child("lookups"), rng.uniform(*lookups) * rate / 3600.0, names,
-                               self._dns_server(host))
-            self._plan_searches(host, rng.child("ssdp"), rng.uniform(*searches) * rate / 3600.0)
+                               self._dns_server(host), begin, end)
+            self._plan_searches(host, rng.child("ssdp"), rng.uniform(*searches) * rate / 3600.0, begin, end)
             if host.device.browser is not None:
-                self._plan_announcements(host, rng.child("browser"))
+                self._plan_announcements(host, rng.child("browser"), begin, end, joined)
             if self.param("ipv6", False):
-                self._plan_dhcpv6(host, rng.child("dhcpv6"))
+                self._plan_dhcpv6(host, rng.child("dhcpv6"), start, end)
 
     # -- names ----------------------------------------------------------------------
     def _unknown_names(self, rng) -> list[tuple[str, int]]:
@@ -133,15 +139,16 @@ class WindowsChatter(Actor):
         self._exchanges += 1
         return self._exchanges
 
-    def _plan_lookups(self, host, rng, rate: float, names: list[tuple[str, int]], dns_server) -> None:
+    def _plan_lookups(self, host, rng, rate: float, names: list[tuple[str, int]], dns_server, begin: float,
+                      end: float) -> None:
         if rate <= 0:
             return
         plan = self.plan_
         domain = plan.topology.domain
         habitual = rng.sample(names[1:], min(3, len(names) - 1))  # stale shortcuts, mapped drives
         txid = rng.randrange(65536)  # NetBT counts its transaction IDs up
-        t = rng.expovariate(rate)
-        while t < plan.duration - 2.0:
+        t = begin + rng.expovariate(rate)
+        while t < end - 2.0:
             roll = rng.random()
             pool = habitual if roll < 0.85 and habitual else names
             name, suffix = names[0] if roll < 0.4 else rng.choice(pool)
@@ -175,12 +182,12 @@ class WindowsChatter(Actor):
                 at += rng.uniform(0.0001, 0.0004)
             t += max(3.0, rng.expovariate(rate))
 
-    def _plan_searches(self, host, rng, rate: float) -> None:
+    def _plan_searches(self, host, rng, rate: float, begin: float, end: float) -> None:
         if rate <= 0:
             return
         plan = self.plan_
-        t = rng.expovariate(rate)
-        while t < plan.duration - 8.0:
+        t = begin + rng.expovariate(rate)
+        while t < end - 8.0:
             exchange = self._exchange()
             sends = []
             for round_index, copies in enumerate(SSDP_COPIES):
@@ -192,36 +199,43 @@ class WindowsChatter(Actor):
                          last=index == len(sends) - 1)
             t += max(10.0, rng.expovariate(rate))
 
-    def _plan_announcements(self, host, rng) -> None:
+    def _plan_announcements(self, host, rng, begin: float, end: float, joined: bool) -> None:
+        """Host announcements every 12 minutes. A host that has just joined starts once a minute and
+        lengthens the interval by a minute up to 12 (the progression of Samba's nmbd for the same
+        protocol; Windows' own timer, [MS-BRWS] 3.2.6, was not captured). The period field carries
+        the current interval."""
         plan = self.plan_
         browser = host.device.browser
         domain = nb_name(plan.topology.domain.split(".")[0])
         datagram_id = rng.randrange(65536)
-        t = rng.uniform(0.0, ANNOUNCE_PERIOD)
-        while t < plan.duration:
+        period = STARTUP_PERIOD if joined else ANNOUNCE_PERIOD
+        t = begin + (rng.uniform(0.0, 2.0) if joined else rng.uniform(0.0, ANNOUNCE_PERIOD))
+        while t < end:
             datagram_id = (datagram_id + rng.randint(1, 4)) & 0xFFFF
             plan.add(t, self.id, host.id, "browser.announce", name=nb_name(host.name), domain=domain,
                      os_version=list(browser.os_version), server_type=browser.server_type,
-                     period_ms=int(ANNOUNCE_PERIOD * 1000), datagram_id=datagram_id)
-            t += ANNOUNCE_PERIOD + rng.uniform(0.0, 2.5)
+                     period_ms=int(period * 1000), datagram_id=datagram_id)
+            t += period + rng.uniform(0.0, 2.5)
+            period = min(period + STARTUP_PERIOD, ANNOUNCE_PERIOD)
 
-    def _plan_dhcpv6(self, host, rng) -> None:
-        """Solicit retransmissions: of an interface whose IPv6 comes up ``up`` s into the capture (a host
-        that arrives), else of one up long before (every SOL_MAX_RT, elapsed time at its 0xFFFF cap)."""
+    def _plan_dhcpv6(self, host, rng, start: float, end: float) -> None:
+        """Solicit retransmissions while the host is connected: of an interface whose IPv6 comes up
+        ``up`` s into the capture (a host that arrives: at the capture start, or when it joins), else of
+        one up long before (every SOL_MAX_RT, elapsed time at its 0xFFFF cap)."""
         plan = self.plan_
         xid, iaid = rng.getrandbits(24), rng.getrandbits(32)
         installed = int(plan.start_epoch - rng.uniform(30.0, 1500.0) * 86400.0) - DUID_EPOCH
         common = {"xid": xid, "iaid": iaid, "duid_time": installed, "fqdn": f"{host.name}.{plan.topology.domain}"}
         if not host.arrives:
-            t = rng.uniform(0.0, SOLICIT_MRT)
-            while t < plan.duration:
+            t = start + rng.uniform(0.0, SOLICIT_MRT)
+            while t < end:
                 plan.add(t, self.id, host.id, "dhcpv6.solicit", elapsed=0xFFFF, **common)
                 t += SOLICIT_MRT * (1.0 + rng.uniform(-0.1, 0.1))
             return
-        up = round(rng.uniform(0.0, 0.5), 6)
+        up = round(start + rng.uniform(0.0, 0.5), 6)
         first = up + DAD_S + rng.uniform(0.0, SOLICIT_DELAY)
         t, rt = first, SOLICIT_IRT * (1.0 + rng.uniform(0.0, 0.1))  # first RT strictly above IRT
-        while t < plan.duration:
+        while t < end:
             plan.add(t, self.id, host.id, "dhcpv6.solicit", up=up, elapsed=min(round((t - first) * 100), 0xFFFF),
                      **common)
             t += rt

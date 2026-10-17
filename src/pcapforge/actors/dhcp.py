@@ -303,6 +303,18 @@ class DhcpClient(Actor):
         self._offers: dict[str, tuple[bytes, bytes]] = {}
         self._leases: dict[str, tuple[bytes, bytes]] = {}
 
+    def window(self, host) -> tuple[float | None, float]:
+        """(join time or None if it holds a lease from before, leave time) of ``host``, in seconds
+        into the capture: the first draws ``plan`` makes for it."""
+        return self._window(self.rng.child(host.id))
+
+    def _window(self, rng) -> tuple[float | None, float]:
+        join, leave = self.param("join"), self.param("leave")
+        duration = self.plan_.duration
+        joined_at = rng.uniform(*self.span(join)) * duration if join is not None else None
+        gone = rng.uniform(*self.span(leave)) * duration if leave is not None else duration
+        return joined_at, gone
+
     def plan(self) -> None:
         plan = self.plan_
         topology = plan.topology
@@ -327,8 +339,7 @@ class DhcpClient(Actor):
             common = {"server": server_host.id, "style": style, "hostname": host.name,
                       "fqdn": f"{host.name}.{topology.domain}"}
             joined = inform = released = None
-            joined_at = rng.uniform(*self.span(join)) * plan.duration if join is not None else None
-            gone = rng.uniform(*self.span(leave)) * plan.duration if leave is not None else plan.duration
+            joined_at, gone = self._window(rng)
             if joined_at is not None and joined_at >= gone:
                 raise ScenarioError(f"{self.type} '{self.id}': '{host.id}' leaves before it joins")
             if joined_at is not None:

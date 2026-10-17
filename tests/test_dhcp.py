@@ -3,6 +3,8 @@
 import socket
 from types import SimpleNamespace
 
+import pytest
+
 from pcapforge import ports
 from pcapforge.actors.dhcp import (
     ACK, BOOTREPLY, BOOTREQUEST, BROADCAST_FLAG, CLIENT_ID, DISCOVER, HOST_NAME, INFORM, MESSAGE_TYPE, MIN_SIZE,
@@ -108,3 +110,28 @@ def test_only_the_ack_of_a_new_lease_triggers_address_conflict_detection():
     assert leases.after(packet(message(BOOTREPLY, OFFER, yiaddr="10.1.2.200"), 1)) == []
     assert leases.after(packet(message(BOOTREPLY, ACK, ciaddr="10.1.2.200", yiaddr="10.1.2.200"), 1)) == []
     assert leases.after(packet(message(BOOTREQUEST, REQUEST), 0)) == []
+
+
+def test_a_windows_host_that_joins_and_leaves_chatters_only_while_connected():
+    from pcapforge.actors.dhcp import JOIN_OP
+    from pcapforge.plan import build_plan
+    from pcapforge.scenario import find
+
+    plan = build_plan(find("ot-modbus-write-manipulation"), "medium", "joiner")
+    laptop = next(h for h in plan.topology.hosts if h.group == "svc_laptop")
+    joined = next(a.t for a in plan.actions if a.op == JOIN_OP and a.host == laptop.id)
+    left = next(a.t for a in plan.actions if a.op == "dhcp.release" and a.host == laptop.id)
+    assert laptop.arrives and laptop.present == pytest.approx((joined, left), abs=1e-6)
+    chatter = [a for a in plan.actions if a.actor == "laptop_chatter"]
+    assert chatter and all(joined < a.t < left for a in chatter)
+    # Name resolution, discovery and announcements wait until its address is configured.
+    assert min(a.t for a in chatter if a.op != "dhcpv6.solicit") >= joined + 6.0
+    # Its IPv6 interface comes up with the link; the DHCPv6 client starts over (RFC 8415 backoff).
+    solicits = [a for a in chatter if a.op == "dhcpv6.solicit"]
+    assert solicits and joined <= solicits[0].args["up"] < joined + 0.5
+    assert solicits[0].args["elapsed"] == 0 and solicits[1].t - solicits[0].t < 2.0
+    # Browser announcements of a freshly started host: one minute apart, then a minute longer each time.
+    announced = [a for a in chatter if a.op == "browser.announce"]
+    assert [a.args["period_ms"] for a in announced[:3]] == [60000, 120000, 180000]
+    assert all(p.args["period_ms"] / 1000 <= b.t - p.t <= p.args["period_ms"] / 1000 + 2.5
+               for p, b in zip(announced, announced[1:]))

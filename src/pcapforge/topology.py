@@ -89,6 +89,9 @@ class Host:
     # Connected during the capture (scenario `arrives`, or a DHCP client that joins): its IPv6 interface
     # and mDNS responder start in the capture. Other hosts were up long before it.
     arrives: bool = False
+    # (from, until) in seconds into the capture while the host is connected (a DHCP client that joins
+    # and / or leaves); None: the whole capture.
+    present: tuple[float, float] | None = None
 
     @property
     def ip(self) -> str:
