@@ -508,7 +508,9 @@
                   "iec104",
                   "dnp3",
                   "bacnet",
-                  "enip"
+                  "enip",
+                  "kerberos",
+                  "smb"
                 ],
                 "description": "SIEM export file the SPL/KQL queries search"
               },

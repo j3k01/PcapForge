@@ -96,6 +96,12 @@ FIELDS = [
     "cip.cm.ot_connid", "cip.cm.to_connid", "cip.cm.conn_serial_num", "cip.cm.vendor", "cip.cm.orig_serial_num",
     "cip.cm.otrpi", "cip.cm.torpi", "cip.cm.otapi", "cip.cm.toapi", "cip.cm.fwo.transport", "cip.cm.fwo.trigger",
     "cip.cm.fwo.type", "cip.cm.fwo.consize",
+    # Kerberos KDC exchanges (the first msg_type is the message's; a TGS-REQ also carries its AP-REQ).
+    "kerberos.msg_type", "kerberos.CNameString", "kerberos.SNameString", "kerberos.realm", "kerberos.crealm",
+    "kerberos.error_code", "kerberos.padata_type",
+    # SMB 2/3: header, tree and file names (tshark tracks them across the session), sizes.
+    "smb2.cmd", "smb2.flags.response", "smb2.msg_id", "smb2.sesid", "smb2.tid", "smb2.nt_status", "smb2.tree",
+    "smb2.share_type", "smb2.filename", "smb2.flags.signature", "smb2.dialect", "smb2.eof", "smb2.read_length",
 ]
 F = {name: index for index, name in enumerate(FIELDS)}
 
@@ -104,6 +110,7 @@ APPS = {
     "modbus": "modbus", "mbtcp": "modbus", "dns": "dns", "llmnr": "llmnr", "mdns": "mdns",
     "nbns": "nbns", "ssdp": "ssdp", "browser": "browser", "nbdgm": "nbdgm", "ntp": "ntp",
     "dhcp": "dhcp", "dhcpv6": "dhcpv6", "http": "http", "tls": "tls", "smb": "smb", "smb2": "smb", "ssh": "ssh",
+    "kerberos": "kerberos", "ldap": "ldap", "cldap": "ldap",
     "icmp": "icmp", "icmpv6": "icmpv6", "snmp": "snmp", "syslog": "syslog", "opcua": "opcua", "s7comm": "s7comm",
     "iec60870_104": "iec104", "iec60870_asdu": "iec104", "dnp3": "dnp3", "bvlc": "bacnet", "bacnet": "bacnet",
     "bacapp": "bacnet", "enip": "enip", "cip": "enip", "cipcm": "enip", "cipcls": "enip",
@@ -139,6 +146,20 @@ BROWSER_COMMANDS = {1: "host_announcement", 2: "announcement_request", 8: "elect
                     14: "reset_browser_state", 15: "local_master_announcement"}
 DHCP_TYPES = {1: "discover", 2: "offer", 3: "request", 4: "decline", 5: "ack", 6: "nak", 7: "release",
               8: "inform"}
+KERBEROS_PORT = 88
+KRB_REQUESTS = {10: "AS", 12: "TGS"}
+KRB_REPLIES = {11: "AS", 13: "TGS"}
+KRB_ERROR = 30
+KRB_ERRORS = {6: "KDC_ERR_C_PRINCIPAL_UNKNOWN", 7: "KDC_ERR_S_PRINCIPAL_UNKNOWN", 12: "KDC_ERR_POLICY",
+              14: "KDC_ERR_ETYPE_NOSUPP", 18: "KDC_ERR_CLIENT_REVOKED", 23: "KDC_ERR_KEY_EXPIRED",
+              24: "KDC_ERR_PREAUTH_FAILED", 25: "KDC_ERR_PREAUTH_REQUIRED", 32: "KRB_AP_ERR_TKT_EXPIRED",
+              37: "KRB_AP_ERR_SKEW", 52: "KRB_ERR_RESPONSE_TOO_BIG", 68: "KDC_ERR_WRONG_REALM"}
+PA_ENC_TIMESTAMP = 2
+SMB2_COMMANDS = {0: "negotiate", 1: "session_setup", 2: "logoff", 3: "tree_connect", 4: "tree_disconnect",
+                 5: "create", 6: "close", 7: "flush", 8: "read", 9: "write", 10: "lock", 11: "ioctl", 12: "cancel",
+                 13: "echo", 14: "query_directory", 15: "change_notify", 16: "query_info", 17: "set_info",
+                 18: "oplock_break"}
+SMB2_SHARE_TYPES = {1: "disk", 2: "pipe", 3: "print"}
 
 IEC104_PORT = 2404
 DNP3_PORT = 20000
@@ -388,7 +409,8 @@ def _is_service_port(port: int | None) -> bool:
 
 
 # JSON-lines files written as the capture streams by (flows.jsonl is written at the end).
-DATASETS = ("modbus", "dns", "ntp", "name_resolution", "arp", "dhcp", "iec104", "dnp3", "bacnet", "enip")
+DATASETS = ("modbus", "dns", "ntp", "name_resolution", "arp", "dhcp", "iec104", "dnp3", "bacnet", "enip",
+            "kerberos", "smb")
 
 
 class ExportError(RuntimeError):
@@ -463,6 +485,10 @@ class _Exporter:
         self.enip = self.datasets["enip"]
         self.enip_io: dict[tuple, dict] = {}
         self.enip_io_last: dict[tuple, tuple[int | None, float]] = {}
+        self.kerberos = self.datasets["kerberos"]
+        self.kerberos_pending: dict[tuple, deque[dict]] = defaultdict(deque)
+        self.smb = self.datasets["smb"]
+        self.smb_pending: dict[tuple, deque[dict]] = defaultdict(deque)
 
     # -- per frame -------------------------------------------------------------------
     def frame(self, row: list[str]) -> None:
@@ -517,6 +543,10 @@ class _Exporter:
             self._enip(row, transport, number, epoch, conn)
         elif row[F["enip.cpf.sai.connid"]] and transport == "udp":
             self._enip_io(row, number, epoch, conn)
+        elif row[F["kerberos.msg_type"]] and KERBEROS_PORT in (sport, dport):
+            self._kerberos(row, key, transport, number, epoch, conn)
+        elif row[F["smb2.cmd"]]:
+            self._smb(row, key, number, epoch, conn)
 
     def _flow(self, row, key, transport, number, epoch, src, dst, sport, dport, app) -> None:
         flow = self.flows.get(key)
@@ -897,6 +927,105 @@ class _Exporter:
             "frame": number,
         })
 
+    # -- kerberos ----------------------------------------------------------------------
+    def _kerberos(self, row, key, transport, number, epoch, conn) -> None:
+        """One record per KDC exchange: the AS / TGS request and its reply or KRB-ERROR on the same
+        socket / connection. A KRB-ERROR names no client and a TGS-REQ shows only its TGT's server
+        name, so the client comes from the AS-REQ or the reply, the service from the reply."""
+        msg_type = _int(_first(row, "kerberos.msg_type"))
+        names = _all(row, "kerberos.SNameString")
+        client = _first(row, "kerberos.CNameString") or None
+        if msg_type in KRB_REQUESTS:
+            record = {
+                **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "transport": transport,
+                "app": "kerberos", "request_type": KRB_REQUESTS[msg_type], "client": client,
+                "realm": _first(row, "kerberos.realm") or None,
+                "service": "/".join(names) if msg_type == 10 and names else None,
+                "preauth": (str(PA_ENC_TIMESTAMP) in _all(row, "kerberos.padata_type")) if msg_type == 10 else None,
+                "result": None, "error": None, "error_code": None, "response_time_ms": None,
+                "request_frame": number, "response_frame": None,
+            }
+            self.kerberos.append(record)
+            self.kerberos_pending[key].append(record)
+            return
+        if msg_type not in KRB_REPLIES and msg_type != KRB_ERROR:
+            return
+        pending = self.kerberos_pending.get(key)
+        if pending:
+            record = pending.popleft()
+            record["response_time_ms"] = _ms(epoch - record["epoch"])
+            if not pending:
+                del self.kerberos_pending[key]
+        else:  # the request fell before the capture
+            record = {
+                **_stamp(epoch), "src": conn["dest"], "src_port": conn["dest_port"], "dest": conn["src"],
+                "dest_port": conn["src_port"], "src_mac": None, "transport": transport, "app": "kerberos",
+                "request_type": KRB_REPLIES.get(msg_type), "client": None, "realm": None, "service": None,
+                "preauth": None, "result": None, "error": None, "error_code": None, "response_time_ms": None,
+                "request_frame": None,
+            }
+            self.kerberos.append(record)
+        if msg_type == KRB_ERROR:
+            code = _int(_first(row, "kerberos.error_code"))
+            record.update(result="error", error_code=code, error=KRB_ERRORS.get(code, f"error_{code}"))
+        else:
+            record["result"] = "success"
+        record["client"] = record["client"] or client
+        record["realm"] = record["realm"] or _first(row, "kerberos.crealm") or _first(row, "kerberos.realm") or None
+        if names:
+            record["service"] = "/".join(names)
+        record["response_frame"] = number
+
+    # -- smb ---------------------------------------------------------------------------
+    def _smb(self, row, key, number, epoch, conn) -> None:
+        """One record per SMB2 request and its response (matched by message id on the connection)."""
+        command = _int(_first(row, "smb2.cmd"))
+        message_id = _int(_first(row, "smb2.msg_id"))
+        response = _bool(_first(row, "smb2.flags.response"))
+        share_type = _int(_first(row, "smb2.share_type"))
+        details = {
+            "tree": _unescaped(_first(row, "smb2.tree")) or None,
+            "share_type": SMB2_SHARE_TYPES.get(share_type) if share_type is not None else None,
+            "filename": _unescaped(_first(row, "smb2.filename")) or None,
+            "dialect": _first(row, "smb2.dialect") or None,
+            "file_size": _int(_first(row, "smb2.eof")) if command == 5 else None,   # CREATE: end of file
+            "read_length": _int(_first(row, "smb2.read_length")),
+        }
+        pending = self.smb_pending.get((key, message_id))
+        if not response:
+            record = {
+                **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "transport": "tcp", "app": "smb",
+                "command": SMB2_COMMANDS.get(command, f"command_{command}"), "message_id": message_id,
+                "session_id": _first(row, "smb2.sesid") or None, "signed": _bool(_first(row, "smb2.flags.signature")),
+                **details, "status": None, "success": None, "response_time_ms": None, "request_frame": number,
+                "response_frame": None,
+            }
+            self.smb.append(record)
+            self.smb_pending[(key, message_id)].append(record)
+            return
+        if pending:
+            record = pending.popleft()
+            record["response_time_ms"] = _ms(epoch - record["epoch"])
+            if not pending:
+                del self.smb_pending[(key, message_id)]
+        else:  # the request fell before the capture
+            record = {
+                **_stamp(epoch), "src": conn["dest"], "src_port": conn["dest_port"], "dest": conn["src"],
+                "dest_port": conn["src_port"], "src_mac": None, "transport": "tcp", "app": "smb",
+                "command": SMB2_COMMANDS.get(command, f"command_{command}"), "message_id": message_id,
+                "signed": _bool(_first(row, "smb2.flags.signature")), **details, "status": None,
+                "response_time_ms": None, "request_frame": None,
+            }
+            self.smb.append(record)
+        record["session_id"] = _first(row, "smb2.sesid") or record.get("session_id")
+        for name, value in details.items():
+            if value is not None:
+                record[name] = value
+        status = _int(_first(row, "smb2.nt_status"))
+        record["status"] = None if status is None else f"0x{status:08x}"
+        record["success"] = status == 0
+        record["response_frame"] = number
+
     # -- iec 60870-5-104 ---------------------------------------------------------------
     def _iec104(self, row, number, epoch, conn) -> None:
         """One record per APDU; several can share a TCP segment, so every element is taken from
@@ -1070,7 +1199,7 @@ class _Exporter:
     def _flush(self, mark: float) -> None:
         # A request still unanswered behind the horizon stays unanswered: a reply that late is
         # matched as a response without request, and its record is already written.
-        for pending in (self.modbus_pending, self.dns_pending):
+        for pending in (self.modbus_pending, self.dns_pending, self.kerberos_pending, self.smb_pending):
             for key in [k for k, queue in pending.items() if queue[0]["epoch"] < mark]:
                 queue = pending[key]
                 while queue and queue[0]["epoch"] < mark:
@@ -1126,6 +1255,15 @@ def _refid(text: str, stratum: int | None) -> str | None:
     if stratum is not None and stratum <= 1:
         return raw.rstrip(b"\x00").decode("ascii", "replace") or None
     return ".".join(str(b) for b in raw) if len(raw) == 4 else text
+
+
+_ESCAPES = {"t": "\t", "n": "\n", "r": "\r"}
+
+
+def _unescaped(text: str) -> str:
+    """A string field as tshark ``-T fields`` prints it, with its backslash escapes undone (an SMB path
+    ``\\\\dc\\SysVol`` comes out with every backslash doubled)."""
+    return re.sub(r"\\(.)", lambda m: _ESCAPES.get(m[1], m[1]), text) if "\\" in text else text
 
 
 # --- OT protocol helpers -------------------------------------------------------------

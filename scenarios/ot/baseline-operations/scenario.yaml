@@ -383,6 +383,15 @@ questions:
     check:
       filter: 'kerberos.msg_type == 10 && kerberos.CNameString == "${facts.domain_members.logons[0].user}"'
       expect: {min: 3}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=AS result=success | eval account_type=if(like(client, \"%$\"), \"computer\", \"person\") | stats count, min(ts) AS first BY client, account_type, src"
+      kql: "request_type : \"AS\" and result : \"success\""
+      zeek: {log: kerberos, where: {request_type: AS, success: true}, count_by: [client, id.orig_h]}
+      look_for: >-
+        Successful AS exchanges (a new TGT). Computer accounts end with `$` and renew their TGT now and
+        then; the account without `$` is the person who logged on at that host. Before it, the same host
+        got KDC_ERR_PREAUTH_REQUIRED and, over UDP, KRB_ERR_RESPONSE_TOO_BIG (`result=error`).
   - id: gpo_file
     when: vars.domain
     text: >-
@@ -396,6 +405,14 @@ questions:
     check:
       filter: 'smb2.cmd == 5 && smb2.filename contains "gpt.ini"'
       expect: {min: 1}
+    hunt:
+      dataset: smb
+      spl: "index=* sourcetype=pcapforge:smb command=create success=true | stats count BY tree, filename"
+      kql: "command : \"create\" and success : true"
+      zeek: {log: smb_files, where: {action: "SMB::FILE_OPEN"}, count_by: [path, name]}
+      look_for: >-
+        Every Group Policy refresh opens `<domain>\Policies\{GPO GUID}\gpt.ini` on the DC's SysVol share and
+        reads its version; a GPO's other files are only fetched when that version changed.
 
 translations:
   pl:

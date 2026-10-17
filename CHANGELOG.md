@@ -39,6 +39,10 @@
   undissected payload.
 
 ### Detection engineering
+- SIEM export: `siem/kerberos.jsonl` (one record per KDC exchange: request type, client account, service,
+  pre-authentication, success or KRB-ERROR) and `siem/smb.jsonl` (one per SMB2 request/response: command,
+  tree, file name, signing, NTSTATUS); Kerberos, LDAP and CLDAP flows carry their `app`. The baseline's
+  logon and GPO questions have SPL, KQL and Zeek hunting queries.
 - `--zeek` loads CISA's ICSNPP packages when they are installed (versions pinned in `zeek.py`, installed in
   CI): S7comm/COTP, OPC UA Binary, BACnet, EtherNet/IP/CIP and DNP3 control logs. Their random link ids
   are renumbered so the logs stay deterministic.
