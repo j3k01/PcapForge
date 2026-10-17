@@ -330,6 +330,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus write=true | stats count AS writes, min(ts) AS first, max(ts) AS last, values(dest) AS plcs, values(function) AS functions BY src | sort - writes"
       kql: "write : true"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.orig_h, id.resp_h, func]}
       look_for: >-
         Every host that writes to a PLC. Only the engineering workstation (${facts.operator_changes.source.ip})
         is approved to change setpoints. Any other writer is the answer; if the workstation is the only
@@ -347,6 +348,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} | stats count BY src, src_mac"
       kql: "write : true and src : \"${facts.change.source.ip}\""
+      zeek: {log: conn, where: {id.orig_h: "${facts.change.source.ip}", id.resp_p: 502}, count_by: [id.orig_h, orig_l2_addr]}
       look_for: >-
         `src_mac` is the MAC the sensor saw. A source outside the capture subnet arrives with the MAC of the
         router that forwarded it, not of the originating host.
@@ -362,6 +364,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | stats count AS writes, values(point) AS points BY dest"
       kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.change.source.ip}", func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.resp_h, func]}
       look_for: The PLC that received the out-of-band writes.
   - id: first_write
     text: At what time (UTC) was the first unauthorized write request sent?
@@ -418,6 +421,7 @@ questions:
       wireshark: "mbtcp && ip.src == ${facts.change.source.ip} && modbus.func_code in {5, 6, 15, 16} && !modbus.request_frame"
       spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | stats count BY function_code, function"
       kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.change.source.ip}", func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [func]}
       look_for: 6 = Write Single Register, 16 = Write Multiple Registers (5 / 15 are the coil equivalents).
   - id: discovery
     text: Before writing, did the source query the PLC identity? If so, which vendor/product did the PLC report?
@@ -431,6 +435,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus function_code=43 | table ts src dest device_identity{}"
       kql: "function_code : 43"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: ENCAP_INTERFACE_TRANSPORT}, count_by: [id.orig_h, id.resp_h]}
       look_for: >-
         Read Device Identification (function 43 / MEI 14) from a host that is not a SCADA client, followed
         by register enumeration (reads rejected with `illegal_data_address`).
@@ -460,6 +465,7 @@ questions:
       dataset: dhcp
       spl: "index=* sourcetype=pcapforge:dhcp message=discover | table ts client_mac host_name vendor_class requested_addr"
       kql: "message : \"discover\""
+      zeek: {log: dhcp, where: {mac: "${facts.change.source.mac}"}, show: [ts, mac, host_name, assigned_addr, msg_types]}
       look_for: >-
         A DHCP Discover from a MAC that is not in the asset inventory, followed by the Offer / Request / ACK of
         its lease and ARP probes for the leased address. `host_name` and `vendor_class` (dhcpcd on Linux)
@@ -487,6 +493,7 @@ questions:
       wireshark: "mbtcp && ip.src == ${facts.operator_changes.source.ip} && modbus.func_code in {5, 6, 15, 16} && !modbus.request_frame"
       spl: "index=* sourcetype=pcapforge:modbus write=true | stats count BY src, in_normal_band"
       kql: "write : true and in_normal_band : true"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.orig_h]}
       look_for: Legitimate operator changes come from the workstation and stay inside the normal band (`in_normal_band=true`).
 
 translations:

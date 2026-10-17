@@ -170,6 +170,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) | stats count AS writes, values(point) AS coils BY src"
       kql: "function_code : (5 or 15)"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: [WRITE_SINGLE_COIL, WRITE_MULTIPLE_COILS]}, count_by: [id.orig_h, id.resp_h, func]}
       look_for: Every host that writes coils. Only the engineering workstation is allowed to command; any other writer is the answer.
   - id: target_ip
     text: Which PLC (IP address) received the coil commands?
@@ -183,6 +184,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) src=${facts.force.source.ip} | stats count BY dest"
       kql: "function_code : (5 or 15) and src : \"${facts.force.source.ip}\""
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.force.source.ip}", func: [WRITE_SINGLE_COIL, WRITE_MULTIPLE_COILS]}, count_by: [id.resp_h, func]}
       look_for: The PLC that received the coil writes.
   - id: first_force
     text: At what time (UTC) was the first unauthorized coil command sent?
@@ -197,6 +199,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) src=${facts.force.source.ip} | sort 0 epoch | head 1 | table ts dest point request_frame"
       kql: "function_code : (5 or 15) and src : \"${facts.force.source.ip}\""
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.force.source.ip}", func: [WRITE_SINGLE_COIL, WRITE_MULTIPLE_COILS]}, show: [ts, id.resp_h, func]}
       look_for: The earliest coil write from the source; request_frame is the frame to open in Wireshark.
   - id: coils_forced
     text: Which coils (register map names) did the source command? List them.
@@ -222,6 +225,7 @@ questions:
       wireshark: "mbtcp && ip.src == ${facts.force.source.ip} && modbus.func_code in {5, 15} && !modbus.request_frame"
       spl: "index=* sourcetype=pcapforge:modbus function_code IN (5, 15) src=${facts.force.source.ip} | stats count BY function_code, function"
       kql: "function_code : (5 or 15) and src : \"${facts.force.source.ip}\""
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.force.source.ip}", func: [WRITE_SINGLE_COIL, WRITE_MULTIPLE_COILS]}, count_by: [func]}
       look_for: 5 = Write Single Coil, 15 = Write Multiple Coils.
   - id: alarm_suppressed
     when: vars.ack

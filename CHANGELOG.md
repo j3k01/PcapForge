@@ -22,6 +22,10 @@
 - `--zeek` loads CISA's ICSNPP packages when they are installed (versions pinned in `zeek.py`, installed in
   CI): S7comm/COTP, OPC UA Binary, BACnet, EtherNet/IP/CIP and DNP3 control logs. Their random link ids
   are renumbered so the logs stay deterministic.
+- IEC 60870-5-104 in Zeek: pcapforge's own Spicy analyzer writes `iec104.log` (one record per APDU) and
+  `iec104_command.log` (one per command object); `zeek.ANALYZERS_INSTALL` builds it next to ICSNPP.
+- The hunting guide has a Zeek query (a jq command over `zeek/<log>.log`) for every question a Zeek log
+  can answer, tested on every scenario and level; `conn.log` now records the MACs on the wire.
 - The hunting guide's SPL and KQL are tested against Splunk 10.6 and Elasticsearch 9.5 for every scenario
   and level (`tests/test_siem_queries.py`, CI job `siem-queries`).
 - `ot-modbus-discovery`: the enumeration SPL searched `dest=` the scanner and matched nothing; it now

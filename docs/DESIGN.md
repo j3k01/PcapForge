@@ -154,11 +154,15 @@ subscription (`vars.opcua`), see below.
     Verified with Zeek 8.0.10 LTS (OBS packages extracted user-space in WSL): incident writes appear once
     each in modbus.log at their frame time; on easy Zeek's Modbus requests equal the JSONL export, no
     weird.log; two runs give identical logs.
-    ICSNPP (`zeek.ICSNPP`, versions pinned; `ICSNPP_INSTALL` builds them with zkg as root, CI too): the site
-    script loads each package inside `@if ( find_in_zeekpath("packages/<name>") != "" )`, so a Zeek without
-    them (the Docker image) still runs. ENIP and OPC UA link ids come from `std::random_device` and are
-    renumbered in first-appearance order after the run (`_number_link_ids`), keeping logs byte-identical.
-    `tests/test_zeek_icsnpp.py` compares the incidents' ICSNPP records with the JSONL export on easy.
+    ICSNPP (`zeek.ICSNPP`, versions pinned) and pcapforge's IEC 104 Spicy analyzer (`zeek_analyzers/iec104`:
+    grammar, event mapping, logging script; `spicyz` compiles it into Zeek's auto-loaded Spicy module
+    directory) are installed by `zeek.ANALYZERS_INSTALL` as root (CI too). The site script loads each inside
+    `@if ( find_in_zeekpath("<scripts>") != "" )`, so a Zeek without them (the Docker image) still runs.
+    ENIP and OPC UA link ids come from `std::random_device` and are renumbered in first-appearance order
+    after the run (`_number_link_ids`), keeping logs byte-identical. `tests/test_zeek_icsnpp.py` and
+    `tests/test_zeek_iec104.py` compare the incidents' records with the JSONL export on easy (IEC 104: every
+    APDU field by field). Questions may carry `hunt.zeek` (log, `where`, `show` or `count_by`), rendered as a
+    jq command (`zeek.hunt_command`) and evaluated by `zeek.hunt_rows`; `tests/test_zeek_hunts.py` runs them.
 - Grading and packaging (`pcapforge grade`, `pcapforge package`):
   - `grade.py` — every run gets `submission_template.yaml` (question ids with null answers, text as
     comments). Submissions are YAML/JSON maps (student = file stem) or a class CSV

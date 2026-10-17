@@ -24,6 +24,7 @@ import yaml
 
 from pcapforge.export import host_ips
 from pcapforge.process import ProcessProfile
+from pcapforge.zeek import hunt_command
 
 SID_BASE = 9100000          # local sid range reserved for pcapforge (9100000-9199999)
 SID_BAND_BASE = SID_BASE + 100
@@ -745,7 +746,9 @@ def _hunting(answers: dict, rules: list[Rule]) -> str:
         "",
         "Wireshark display filters come from the answer key and are machine-verified by "
         "`pcapforge verify` (expected frame counts shown). The SPL and KQL queries come from the "
-        "scenario and are tested against Splunk and Elasticsearch loaded as described below.",
+        "scenario and are tested against Splunk and Elasticsearch loaded as described below; the "
+        "Zeek queries are jq commands over the JSON logs `--zeek` writes (run them in the run "
+        "directory), tested against Zeek 8 LTS with the ICSNPP packages.",
         "",
         "## Loading the SIEM export",
         "",
@@ -809,6 +812,9 @@ def _hunting(answers: dict, rules: list[Rule]) -> str:
         if hunt.get("kql"):
             lines += [f"**Kibana KQL** on `pcapforge-{dataset}`:", "",
                       "```kql", hunt["kql"], "```", ""]
+        if hunt.get("zeek"):
+            lines += [f"**Zeek** (`zeek/{hunt['zeek']['log']}.log`, with jq):", "",
+                      "```sh", hunt_command(hunt["zeek"]), "```", ""]
         if hunt.get("look_for"):
             lines += [f"**What to look for:** {hunt['look_for']}", ""]
     return "\n".join(lines)

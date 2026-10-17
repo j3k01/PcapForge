@@ -102,20 +102,34 @@ the out-of-band rules fire; the unapproved-writer rule fires on easy and medium.
 `known_services.log`, `known_modbus.log` (Modbus masters and slaves) and `modbus_register_change.log`.
 `Site::local_nets` is set to the scenario's subnets, so `local_orig` / `local_resp` and the `known_*`
 logs describe the site. Zeek runs with `-D` (deterministic mode), so the same capture always gives
-byte-identical logs; `packet_filter.log` (wall-clock start time only) is not kept.
+byte-identical logs; `packet_filter.log` (wall-clock start time only) is not kept. `conn.log` carries the
+MACs on the wire (`orig_l2_addr`, `resp_l2_addr`, from `policy/protocols/conn/mac-logging`).
 
 Zeek itself has no analyzer for S7comm, OPC UA, IEC 104, BACnet or EtherNet/IP. CISA's
-[ICSNPP](https://github.com/cisagov/icsnpp) packages add them, and pcapforge loads every one of these that
-zkg installed: `icsnpp-s7comm` (`s7comm.log`, `s7comm_read_szl.log`, `cotp.log`), `icsnpp-opcua-binary`
+[ICSNPP](https://github.com/cisagov/icsnpp) packages add four of them, and pcapforge loads every one of these
+that zkg installed: `icsnpp-s7comm` (`s7comm.log`, `s7comm_read_szl.log`, `cotp.log`), `icsnpp-opcua-binary`
 (`opcua_binary*.log`), `icsnpp-bacnet` (`bacnet.log`, `bacnet_property.log` with WriteProperty values),
 `icsnpp-enip` (`enip.log`, `cip.log` with Forward_Open, `cip_io.log` per class 1 I/O packet) and
-`icsnpp-dnp3` (`dnp3_control.log` with each select / operate and its point, `dnp3_objects.log`). The
-versions are pinned in `src/pcapforge/zeek.py` (`ICSNPP`); install them as root after Zeek with the
-`ICSNPP_INSTALL` command there (zkg, cmake and the Zeek headers, then a build of each package; CI does
-the same). The ENIP and OPC UA packages draw the ids that link their logs (`packet_correlation_id`,
-`*_link_id`) from the OS random source, which `-D` does not seed, so pcapforge renumbers them in order of
-first appearance. IEC 104 has no ICSNPP parser and stays in `conn.log` only; the `zeek/zeek` image has
-no ICSNPP packages (point `PCAPFORGE_ZEEK_IMAGE` at an image that has them).
+`icsnpp-dnp3` (`dnp3_control.log` with each select / operate and its point, `dnp3_objects.log`). IEC 104
+comes from pcapforge's own Spicy analyzer (`src/pcapforge/zeek_analyzers/iec104`): `iec104.log` has one
+record per APDU (I / S / U frame: sequence numbers, U function, type, cause, common address, the
+information object addresses), `iec104_command.log` one per command object (single / double /
+regulating step command, set point, interrogation, counter interrogation: IOA, value, qualifier,
+select or execute). Field names follow `siem/iec104.jsonl`.
+
+The ICSNPP versions are pinned in `src/pcapforge/zeek.py` (`ICSNPP`). Install everything as root after
+Zeek with the `ANALYZERS_INSTALL` command there: zkg, cmake and the Zeek headers, a build of each ICSNPP
+package, and `spicyz` compiling the IEC 104 analyzer into Zeek's Spicy module directory (loaded
+automatically) with its logging scripts in the site directory. CI does the same; re-run it after
+updating pcapforge so the installed analyzer matches. The ENIP and OPC UA packages draw the ids that link
+their logs (`packet_correlation_id`, `*_link_id`) from the OS random source, which `-D` does not seed, so
+pcapforge renumbers them in order of first appearance. The `zeek/zeek` image has none of these
+(point `PCAPFORGE_ZEEK_IMAGE` at an image that has them).
+
+The hunting guide gives a Zeek query per question where a Zeek log can show the answer: a `jq`
+command over `zeek/<log>.log`, run from the run directory. `tests/test_zeek_hunts.py` runs every one
+over the logs of every scenario and level, compares jq's output with pcapforge's own evaluation, and
+checks that text answers found in the log are in the output.
 
 Zeek is found as `PCAPFORGE_ZEEK` (path to the binary), `zeek` on `PATH` or `/opt/zeek/bin/zeek`, and on Windows
 in the default WSL distribution (`zeek` on its `PATH` or `/opt/zeek/bin/zeek`, run through `wsl.exe`); otherwise

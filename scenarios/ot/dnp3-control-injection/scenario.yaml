@@ -145,6 +145,7 @@ questions:
       dataset: dnp3
       spl: "index=* sourcetype=pcapforge:dnp3 function_code IN (3, 4, 5) | stats count AS commands values(function) AS functions values(dest) AS outstations BY src | sort - commands"
       kql: "function_code >= 3 and function_code <= 5"
+      zeek: {log: dnp3, where: {fc_request: [SELECT, OPERATE, DIRECT_OPERATE, DIRECT_OPERATE_NR]}, count_by: [id.orig_h, id.resp_h, fc_request]}
       look_for: Every host that issues select / operate / direct operate to the outstation. The control-room master is the approved source; any other is the attacker.
   - id: source_mac
     text: Which MAC address did the sensor see on the frames carrying those commands?
@@ -159,6 +160,7 @@ questions:
       dataset: dnp3
       spl: "index=* sourcetype=pcapforge:dnp3 function_code IN (3, 4, 5) src=${facts.inject.source.ip} | stats count values(dest) AS outstations BY src, src_mac"
       kql: "function_code >= 3 and function_code <= 5 and src : \"${facts.inject.source.ip}\""
+      zeek: {log: conn, where: {id.orig_h: "${facts.inject.source.ip}", id.resp_p: 20000}, count_by: [id.orig_h, orig_l2_addr]}
       look_for: src_mac is the MAC on the wire; for a routed source it is the firewall's, not the host's.
   - id: target_ip
     text: Which outstation (IP address) received the unauthorized control commands?
@@ -172,6 +174,7 @@ questions:
       dataset: dnp3
       spl: "index=* sourcetype=pcapforge:dnp3 function_code IN (3, 4, 5) src=${facts.inject.source.ip} | stats count BY dest"
       kql: "function_code >= 3 and function_code <= 5 and src : \"${facts.inject.source.ip}\""
+      zeek: {log: dnp3, where: {id.orig_h: "${facts.inject.source.ip}", fc_request: [SELECT, OPERATE, DIRECT_OPERATE, DIRECT_OPERATE_NR]}, count_by: [id.resp_h, fc_request]}
       look_for: The outstation the attacker's control commands were sent to.
   - id: points_stopped
     text: Which binary output points did the source latch off? (point map names)
@@ -186,6 +189,7 @@ questions:
       dataset: dnp3
       spl: "index=* sourcetype=pcapforge:dnp3 function_code=4 src=${facts.inject.source.ip} | stats values(point_index) AS point_indices count AS operates BY src"
       kql: "function_code : 4 and src : \"${facts.inject.source.ip}\""
+      zeek: {log: dnp3_control, where: {source_h: "${facts.inject.source.ip}", function_code: [SELECT, OPERATE, DIRECT_OPERATE, DIRECT_OPERATE_NR]}, count_by: [index_number, function_code, operation_type]}
       look_for: The binary output indices the attacker operated; map each to its control point in the outstation point list.
   - id: first_command
     text: At what time (UTC) was the first unauthorized command (the first select) sent?
@@ -200,6 +204,7 @@ questions:
       dataset: dnp3
       spl: "index=* sourcetype=pcapforge:dnp3 function_code=3 src=${facts.inject.source.ip} | sort 0 ts | head 1 | table ts function point_index frame"
       kql: "function_code : 3 and src : \"${facts.inject.source.ip}\""
+      zeek: {log: dnp3_control, where: {source_h: "${facts.inject.source.ip}", function_code: SELECT}, show: [ts, destination_h, function_code, index_number, operation_type]}
       look_for: The earliest control frame from the source; its frame is the select in Wireshark.
   - id: technique
     text: Which MITRE ATT&CK for ICS technique best describes stopping actuators with DNP3 control commands from an unapproved host?

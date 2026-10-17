@@ -520,6 +520,25 @@
                 "type": "string",
                 "description": "Kibana KQL filter over the SIEM export"
               },
+              "zeek": {
+                "type": "object",
+                "description": "Query over a Zeek JSON log (generate/export --zeek), rendered as a jq command",
+                "additionalProperties": false,
+                "required": ["log"],
+                "oneOf": [{"required": ["show"]}, {"required": ["count_by"]}],
+                "properties": {
+                  "log": {"type": "string", "pattern": "^[a-z0-9_]+$", "description": "zeek/<log>.log"},
+                  "where": {
+                    "type": "object",
+                    "description": "field -> value (or a list: any of them); every field must match",
+                    "additionalProperties": {"type": ["string", "number", "boolean", "array"]}
+                  },
+                  "show": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                           "description": "fields printed for each matching record"},
+                  "count_by": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                               "description": "count matches per combination of these fields"}
+                }
+              },
               "look_for": {
                 "type": "string",
                 "description": "what the analyst should notice"

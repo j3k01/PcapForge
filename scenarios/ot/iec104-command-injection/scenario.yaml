@@ -148,6 +148,7 @@ questions:
       dataset: iec104
       spl: "index=* sourcetype=pcapforge:iec104 category=control cot=6 | stats count AS commands values(type) AS types values(dest) AS rtus BY src | sort - commands"
       kql: "category : \"control\" and cot : 6"
+      zeek: {log: iec104_command, where: {is_orig: true, cause: activation, type_name: [C_SC_NA_1, C_DC_NA_1, C_RC_NA_1, C_SE_NA_1, C_SE_NB_1, C_SE_NC_1]}, count_by: [id.orig_h, id.resp_h, type_name]}
       look_for: Every host that sends control commands to the RTU. The control-centre master is the approved source; any other is the attacker.
   - id: source_mac
     text: Which MAC address did the sensor see on the frames carrying those commands?
@@ -162,6 +163,7 @@ questions:
       dataset: iec104
       spl: "index=* sourcetype=pcapforge:iec104 category=control cot=6 src=${facts.inject.source.ip} | stats count BY src, src_mac"
       kql: "category : \"control\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: conn, where: {id.orig_h: "${facts.inject.source.ip}", id.resp_p: 2404}, count_by: [id.orig_h, orig_l2_addr]}
       look_for: src_mac is the MAC on the wire; for a routed source it is the firewall's, not the host's.
   - id: target_ip
     text: Which RTU (IP address) received the unauthorized breaker commands?
@@ -175,6 +177,7 @@ questions:
       dataset: iec104
       spl: "index=* sourcetype=pcapforge:iec104 category=control cot=6 src=${facts.inject.source.ip} | stats count BY dest"
       kql: "category : \"control\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: iec104_command, where: {is_orig: true, cause: activation, id.orig_h: "${facts.inject.source.ip}"}, count_by: [id.resp_h, type_name]}
       look_for: The RTU the attacker's commands were sent to.
   - id: breakers_opened
     text: Which breaker control points did the source open? (register map names)
@@ -189,6 +192,7 @@ questions:
       dataset: iec104
       spl: "index=* sourcetype=pcapforge:iec104 type=C_SC_NA_1 cot=6 select=false src=${facts.inject.source.ip} | stats count BY ioa{}"
       kql: "type : \"C_SC_NA_1\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: iec104_command, where: {is_orig: true, cause: activation, type_name: C_SC_NA_1, select: false, id.orig_h: "${facts.inject.source.ip}"}, count_by: [ioa, value]}
       look_for: The IOAs the attacker executed; map each to its breaker close command (switch commands are numbered from 6001) in the signal list.
   - id: first_command
     text: At what time (UTC) was the first unauthorized command (the first select) sent?
@@ -203,6 +207,7 @@ questions:
       dataset: iec104
       spl: "index=* sourcetype=pcapforge:iec104 category=control cot=6 src=${facts.inject.source.ip} | sort 0 epoch | head 1 | table ts type ioa{} select frame"
       kql: "category : \"control\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: iec104_command, where: {is_orig: true, cause: activation, id.orig_h: "${facts.inject.source.ip}"}, show: [ts, type_name, ioa, select, value]}
       look_for: The earliest control frame from the source; its frame is the select to open in Wireshark.
   - id: technique
     text: Which MITRE ATT&CK for ICS technique best describes opening breakers with IEC 104 commands from an unapproved host?

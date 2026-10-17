@@ -1,0 +1,146 @@
+# IEC 60870-5-104 (TCP 2404) for Zeek: APCI (I, S and U frames) and the ASDU header with its
+# information object addresses; command objects (single / double / regulating step commands,
+# set points, interrogation and counter interrogation) are decoded for iec104_command.log.
+# Element sizes per type identification are those of IEC 60870-5-101 section 7.3 (with the
+# 7-octet CP56Time2a tag of the time-tagged types); an unknown type ends the ASDU's parse.
+
+module PcapforgeIEC104;
+
+import spicy;
+
+public type APDUs = unit {
+    : APDU[];
+};
+
+public type APDU = unit {
+    start: uint8 &requires=($$ == 0x68);
+    length: uint8 &requires=($$ >= 4);
+    c1: uint8;
+    c2: uint8;
+    c3: uint8;
+    c4: uint8 {
+        if ((self.c1 & 0x01) == 0) {
+            self.apci = "I";
+            self.send_seq = ((cast<uint64>(self.c2) << 8) | self.c1) >> 1;
+            self.recv_seq = ((cast<uint64>(self.c4) << 8) | self.c3) >> 1;
+        } else if ((self.c1 & 0x03) == 1) {
+            self.apci = "S";
+            self.recv_seq = ((cast<uint64>(self.c4) << 8) | self.c3) >> 1;
+        } else {
+            self.apci = "U";
+            self.u_function = self.c1 >> 2;
+        }
+    }
+    asdu: ASDU &size=(self.length - 4) if (self.apci == "I");
+    : skip bytes &size=(self.length - 4) if (self.apci != "I");
+
+    var apci: string;
+    var u_function: uint8 = 0;
+    var send_seq: uint64 = 0;
+    var recv_seq: uint64 = 0;
+};
+
+public type ASDU = unit {
+    type_id: uint8;
+    vsq: uint8;
+    cot: uint8;
+    originator: uint8;
+    common_address: uint16 &byte-order=spicy::ByteOrder::Little {
+        self.size = element_size(self.type_id);
+        self.count = self.vsq & 0x7f;
+        self.sq = (self.vsq & 0x80) != 0;
+    }
+    objects: (InfoObject(self))[self.count] if (self.size > 0 && ! self.sq);
+    sequence: InfoSequence(self) if (self.size > 0 && self.sq);
+    : skip bytes &eod;
+
+    var size: uint64 = 0;
+    var count: uint64 = 0;
+    var sq: bool = False;
+    var ioas: vector<uint64>;
+};
+
+public type InfoObject = unit(inout asdu: ASDU) {
+    address: bytes &size=3 {
+        self.ioa = $$.to_uint(spicy::ByteOrder::Little);
+        asdu.ioas.push_back(self.ioa);
+        self.type_id = asdu.type_id;
+        self.cot = asdu.cot;
+        self.common_address = asdu.common_address;
+    }
+    element: Element(asdu.type_id) &size=asdu.size;
+
+    var ioa: uint64 = 0;
+    var type_id: uint8 = 0;
+    var cot: uint8 = 0;
+    var common_address: uint16 = 0;
+};
+
+type InfoSequence = unit(inout asdu: ASDU) {
+    address: bytes &size=3 {
+        local first = $$.to_uint(spicy::ByteOrder::Little);
+        local i = 0;
+        while (i < asdu.count) {
+            asdu.ioas.push_back(first + i);
+            i = i + 1;
+        }
+    }
+    : skip bytes &size=(asdu.size * asdu.count);
+};
+
+# The element of one information object; `command` is set for the types iec104_command.log covers.
+type Element = unit(type_id: uint8) {
+    switch (type_id) {
+        45, 46, 47, 58, 59, 60 -> octet: uint8 {
+            self.command = True;
+            self.select = (self.octet & 0x80) != 0;
+            self.qualifier = (self.octet >> 2) & 0x1f;
+            self.value = cast<real>(self.octet & (type_id == 45 || type_id == 58 ? 0x01 : 0x03));
+        }
+        48, 61 -> normalized: int16 &byte-order=spicy::ByteOrder::Little {
+            self.value = cast<real>(self.normalized) / 32768.0;
+        }
+        49, 62 -> scaled: int16 &byte-order=spicy::ByteOrder::Little {
+            self.value = cast<real>(self.scaled);
+        }
+        50, 63 -> float: real &type=spicy::RealType::IEEE754_Single &byte-order=spicy::ByteOrder::Little {
+            self.value = self.float;
+        }
+        100, 101, 105 -> code: uint8 {
+            self.command = True;
+            self.value = cast<real>(type_id == 101 ? self.code & 0x3f : self.code);
+            self.qualifier = type_id == 101 ? self.code >> 6 : 0;
+        }
+        * -> : void;
+    };
+    qos: uint8 if (type_id == 48 || type_id == 49 || type_id == 50 || type_id == 61 || type_id == 62 || type_id == 63) {
+        self.command = True;
+        self.select = (self.qos & 0x80) != 0;
+        self.qualifier = self.qos & 0x7f;
+    }
+    : skip bytes &eod;
+
+    var command: bool = False;
+    var select: bool = False;
+    var qualifier: uint64 = 0;
+    var value: real = 0.0;
+};
+
+# Octets of one information element (without the 3-octet address); 0 = not supported.
+function element_size(type_id: uint8) : uint64 {
+    switch (type_id) {
+        case 1, 3, 45, 46, 47, 70, 100, 101, 105: return 1;
+        case 5, 21, 104: return 2;
+        case 9, 11, 48, 49: return 3;
+        case 2, 4, 51: return 4;
+        case 6, 7, 13, 15, 50: return 5;
+        case 10, 12: return 6;
+        case 103: return 7;
+        case 8, 14, 16, 30, 31, 58, 59, 60: return 8;
+        case 32, 107: return 9;
+        case 34, 35, 61, 62: return 10;
+        case 64: return 11;
+        case 33, 36, 37, 63: return 12;
+        default: return 0;
+    }
+}

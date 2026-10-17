@@ -8,15 +8,16 @@ subnets, which fills ``local_orig`` / ``local_resp`` in conn.log and the ``known
 base scripts, the Modbus policy scripts (master/slave pairs, register change tracking) and known
 hosts / services are loaded.
 
-Zeek has no analyzers for S7comm, OPC UA, BACnet or EtherNet/IP. CISA's ICSNPP packages add them (and
-detailed DNP3 control and object logs); each one installed with zkg (``ICSNPP``, versions pinned) is
-loaded, the others are skipped, so the logs depend on what the Zeek installation has. IEC 60870-5-104
-has no ICSNPP parser.
+Zeek has no analyzers for S7comm, OPC UA, BACnet, EtherNet/IP or IEC 60870-5-104. CISA's ICSNPP
+packages add the first four (and detailed DNP3 control and object logs); pcapforge's own Spicy
+analyzer (``zeek_analyzers/iec104``) adds IEC 104. Each one that is installed (``ANALYZERS_INSTALL``)
+is loaded, the others are skipped, so the logs depend on what the Zeek installation has.
 """
 
 from __future__ import annotations
 
 import functools
+import json
 import os
 import re
 import shutil
@@ -29,6 +30,7 @@ from pcapforge.tools import ToolNotFound
 IMAGE = "zeek/zeek:lts"   # official image (hub.docker.com/r/zeek/zeek); PCAPFORGE_ZEEK_IMAGE overrides it
 SCRIPTS = (
     "policy/protocols/conn/known-hosts",
+    "policy/protocols/conn/mac-logging",  # orig_l2_addr / resp_l2_addr in conn.log: the MACs on the wire
     "policy/protocols/conn/known-services",
     "policy/protocols/modbus/known-masters-slaves",
     "policy/protocols/modbus/track-memmap",
@@ -42,6 +44,10 @@ ICSNPP = {
     "icsnpp-enip": "808f90b0d834481a1368dbcad650f63c88550991",
     "icsnpp-dnp3": "b31dbadeceb1cbcda16aef89c650559cd177dd7e",
 }
+# pcapforge's IEC 60870-5-104 analyzer: Spicy grammar + event mapping (compiled into the Spicy module
+# directory, which Zeek loads automatically) and the logging scripts (into the site directory).
+IEC104_DIR = Path(__file__).parent / "zeek_analyzers" / "iec104"
+IEC104_SCRIPTS = "pcapforge-iec104"
 SITE_SCRIPT = "pcapforge-site.zeek"
 LOCATIONS = ("/opt/zeek/bin/zeek", "/usr/local/zeek/bin/zeek")
 TIMEOUT_S = 1800
@@ -85,9 +91,10 @@ def site_script(subnets: list[str]) -> str:
     if subnets:
         lines.append(f"redef Site::local_nets += {{ {', '.join(subnets)} }};")
     lines += [f"@load {script}" for script in SCRIPTS]
-    # An ICSNPP package is loaded when zkg installed it (its scripts are in ZEEKPATH's site/packages).
-    for package in ICSNPP:
-        lines += [f'@if ( find_in_zeekpath("packages/{package}") != "" )', f"@load packages/{package}", "@endif"]
+    # An ICSNPP package is loaded when zkg installed it (its scripts are in ZEEKPATH's site/packages),
+    # the IEC 104 analyzer's logging when ANALYZERS_INSTALL put it into the site directory.
+    for package in [f"packages/{name}" for name in ICSNPP] + [IEC104_SCRIPTS]:
+        lines += [f'@if ( find_in_zeekpath("{package}") != "" )', f"@load {package}", "@endif"]
     return "\n".join(lines) + "\n"
 
 
@@ -98,11 +105,16 @@ _APT_INSTALL = ("echo 'deb http://download.opensuse.org/repositories/security:/z
                 "| gpg --dearmor > /etc/apt/trusted.gpg.d/security_zeek.gpg && apt-get update "
                 "&& apt-get install -y zeek-lts-core")
 # As root after the above: zkg, plus the headers and cmake the ICSNPP plugins build with, then the
-# pinned ICSNPP packages (CI runs this; docs/siem.md shows it).
-ICSNPP_INSTALL = ("apt-get install -y zeek-lts-zkg cmake && export PATH=/opt/zeek/bin:$PATH "
-                  "&& zkg autoconfig --force && zkg refresh && "
-                  + " && ".join(f"zkg install --force --skiptests --version {version} {package}"
-                                for package, version in ICSNPP.items()))
+# pinned ICSNPP packages and pcapforge's IEC 104 analyzer (CI runs this; docs/siem.md shows it).
+ANALYZERS_INSTALL = (
+    "apt-get install -y zeek-lts-zkg cmake && export PATH=/opt/zeek/bin:$PATH "
+    "&& zkg autoconfig --force && zkg refresh && "
+    + " && ".join(f"zkg install --force --skiptests --version {version} {package}"
+                  for package, version in ICSNPP.items())
+    + f" && spicyz -o \"$(zeek-config --prefix)/lib/zeek/spicy/{IEC104_SCRIPTS}.hlto\" "
+      f"'{IEC104_DIR.as_posix()}/iec104.spicy' '{IEC104_DIR.as_posix()}/iec104.evt'"
+    + f" && mkdir -p \"$(zeek-config --site_dir)/{IEC104_SCRIPTS}\""
+    + f" && cp '{IEC104_DIR.as_posix()}/'*.zeek \"$(zeek-config --site_dir)/{IEC104_SCRIPTS}/\"")
 
 
 def install_hint() -> str:
@@ -190,3 +202,59 @@ def _number_link_ids(paths) -> None:
         data = path.read_bytes()
         if b"link_id" in data or b"packet_correlation_id" in data:
             path.write_bytes(_LINK_ID.sub(number, data))
+
+
+# -- hunting queries over the logs (question `hunt.zeek`) ---------------------------------------
+# A query names a log, `where` (field -> value, or a list: any of them; all fields must match),
+# and either `show` (fields printed per matching record) or `count_by` (matches counted per
+# combination of these fields). The hunting guide renders it as a jq command over the JSON log;
+# `hunt_rows` evaluates the same query in Python.
+
+def _field(name: str) -> str:
+    return "." + json.dumps(name) if not name.isidentifier() else "." + name
+
+
+def _select(where: dict) -> str:
+    terms = []
+    for name, value in where.items():
+        values = value if isinstance(value, list) else [value]
+        alternatives = [f"{_field(name)} == {json.dumps(v)}" for v in values]
+        terms.append(alternatives[0] if len(alternatives) == 1 else "(" + " or ".join(alternatives) + ")")
+    return " and ".join(terms)
+
+
+def hunt_command(hunt: dict) -> str:
+    """The jq command line that runs ``hunt`` over ``zeek/<log>.log``."""
+    select = _select(hunt.get("where", {}))
+    path = f"zeek/{hunt['log']}.log"
+    if "count_by" in hunt:
+        fields = hunt["count_by"]
+        keys = ", ".join(_field(f) for f in fields)
+        record = ", ".join(f"{json.dumps(f)}: .[0]{_field(f)}" for f in fields)
+        program = (f"map(select({select})) | " if select else "") + \
+            f"group_by([{keys}]) | map({{{record}, count: length}})[]"
+        return f"jq -s -c '{program}' {path}"
+    shown = ", ".join(_field(f) for f in hunt["show"])
+    program = (f"select({select}) | " if select else "") + f"[{shown}]"
+    return f"jq -c '{program}' {path}"
+
+
+def _same(record_value, value) -> bool:
+    # jq equality: true is not 1, 1 is 1.0
+    if isinstance(record_value, bool) or isinstance(value, bool):
+        return isinstance(record_value, bool) and isinstance(value, bool) and record_value == value
+    return record_value == value
+
+
+def hunt_rows(hunt: dict, records: list[dict]) -> list[list | dict]:
+    """What ``hunt_command`` prints, one row per line (a list for ``show``, a dict for ``count_by``)."""
+    matches = [r for r in records if all(
+        any(_same(r.get(name), v) for v in (value if isinstance(value, list) else [value]))
+        for name, value in hunt.get("where", {}).items())]
+    if "count_by" not in hunt:
+        return [[r.get(f) for f in hunt["show"]] for r in matches]
+    groups: dict[str, list[dict]] = {}
+    for r in matches:
+        groups.setdefault(json.dumps([r.get(f) for f in hunt["count_by"]], sort_keys=True), []).append(r)
+    return [{**{f: rows[0].get(f) for f in hunt["count_by"]}, "count": len(rows)}
+            for _, rows in sorted(groups.items())]

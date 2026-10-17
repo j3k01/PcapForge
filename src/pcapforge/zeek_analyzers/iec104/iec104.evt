@@ -1,0 +1,17 @@
+# IEC 60870-5-104 analyzer of pcapforge (iec104.spicy): one event per APDU and one per command object.
+
+protocol analyzer PcapforgeIEC104 over TCP:
+    parse with PcapforgeIEC104::APDUs,
+    port 2404/tcp;
+
+import PcapforgeIEC104;
+
+on PcapforgeIEC104::APDU -> event PcapforgeIEC104::apdu($conn, $is_orig, self.apci, self.u_function,
+    self.send_seq, self.recv_seq);
+
+on PcapforgeIEC104::ASDU -> event PcapforgeIEC104::asdu($conn, $is_orig, self.type_id, self.sq, self.count,
+    self.cot, self.originator, self.common_address, self.ioas);
+
+on PcapforgeIEC104::InfoObject if ( self.element.command ) -> event PcapforgeIEC104::command($conn, $is_orig,
+    self.type_id, self.cot, self.common_address, self.ioa, self.element.value, self.element.qualifier,
+    self.element.select);

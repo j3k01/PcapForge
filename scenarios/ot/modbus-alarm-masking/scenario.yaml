@@ -165,6 +165,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus write=true | stats count AS writes, values(point) AS points BY src | sort - writes"
       kql: "write : true"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.orig_h, id.resp_h, func]}
       look_for: Every host that writes parameters. Any writer other than the engineering workstation is the source.
   - id: masked_alarm
     text: Which alarm-threshold point did the source change first to blind the alarm? (register map name)
@@ -216,6 +217,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.mask.source.ip} | sort 0 epoch | head 1 | table ts point request_frame"
       kql: "write : true and src : \"${facts.mask.source.ip}\""
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.mask.source.ip}", func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, show: [ts, id.resp_h, func]}
       look_for: The earliest write from the source is the alarm-threshold change; request_frame is the frame to open.
   - id: technique
     text: Which MITRE ATT&CK for ICS technique describes disabling the alarm before the harmful change?

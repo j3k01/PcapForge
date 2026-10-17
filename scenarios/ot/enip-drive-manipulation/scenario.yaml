@@ -171,6 +171,7 @@ questions:
       dataset: enip
       spl: "index=* sourcetype=pcapforge:enip service=forward_open response=false | stats count AS opens values(dest) AS drives BY src | sort - opens"
       kql: "service : \"forward_open\" and response : false"
+      zeek: {log: cip, where: {cip_service: "Forward Open", direction: request}, count_by: [source_h, destination_h]}
       look_for: Every host that opens a CIP connection. The CompactLogix scanner and the HMI are the approved originators; any other is the attacker.
   - id: source_mac
     text: Which MAC address did the sensor see on the frames carrying the Forward_Open?
@@ -185,6 +186,7 @@ questions:
       dataset: enip
       spl: "index=* sourcetype=pcapforge:enip service=forward_open response=false src=${facts.inject.source.ip} | stats count BY src, src_mac"
       kql: "service : \"forward_open\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: conn, where: {id.orig_h: "${facts.inject.source.ip}", id.resp_p: 44818}, count_by: [id.orig_h, orig_l2_addr]}
       look_for: The MAC on the wire; for a routed source it is the firewall's, not the host's (read eth.src on the Forward_Open frame in Wireshark).
   - id: target_ip
     text: Which drive (IP address) did the unauthorized Forward_Open seize?
@@ -198,6 +200,7 @@ questions:
       dataset: enip
       spl: "index=* sourcetype=pcapforge:enip service=forward_open response=false src=${facts.inject.source.ip} | stats count BY dest"
       kql: "service : \"forward_open\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: cip, where: {cip_service: "Forward Open", direction: request, source_h: "${facts.inject.source.ip}"}, count_by: [destination_h]}
       look_for: The drive adapter the attacker's Forward_Open was sent to.
   - id: commanded_reference
     text: To what frequency reference (Hz) did the source drive the PowerFlex? (the Reference it held in the O->T image)
@@ -212,6 +215,7 @@ questions:
       dataset: enip
       spl: "index=* sourcetype=pcapforge:enip message=io_summary src=${facts.inject.source.ip} | stats sum(packets) AS packets values(connection_id) AS connection BY src, dest"
       kql: "message : \"io_summary\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: cip_io, where: {source_h: "${facts.inject.source.ip}"}, count_by: [source_h, destination_h, connection_id, data_length]}
       look_for: The attacker's O->T class 1 I/O stream to the drive on UDP 2222; decode the Reference (0.01 Hz) in the Connected Data to read the frequency it held (full speed, 60 Hz).
   - id: first_command
     text: At what time (UTC) was the unauthorized Forward_Open sent?
@@ -226,6 +230,7 @@ questions:
       dataset: enip
       spl: "index=* sourcetype=pcapforge:enip service=forward_open response=false src=${facts.inject.source.ip} | sort 0 epoch | head 1 | table ts dest service transport_class frame"
       kql: "service : \"forward_open\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: cip, where: {cip_service: "Forward Open", direction: request, source_h: "${facts.inject.source.ip}"}, show: [ts, source_h, destination_h, cip_service, class_name]}
       look_for: The earliest Forward_Open from the source; its frame is the connection seizure in Wireshark.
   - id: technique
     text: Which MITRE ATT&CK for ICS technique best describes seizing a drive's EtherNet/IP connection and overspeeding it from an unapproved host?

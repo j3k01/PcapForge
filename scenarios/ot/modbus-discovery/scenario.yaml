@@ -156,6 +156,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus function_code=43 | stats count values(dest) AS plcs BY src"
       kql: "function_code : 43"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: ENCAP_INTERFACE_TRANSPORT}, count_by: [id.orig_h, id.resp_h]}
       look_for: >-
         Function 43 (Read Device Identification) from a host that is not a SCADA / HMI / historian client,
         followed by reads of whole register ranges.
@@ -172,6 +173,7 @@ questions:
       dataset: flows
       spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} | sort 0 epoch | head 1 | table ts dest dest_port"
       kql: "src : \"${facts.scan.source.ip}\""
+      zeek: {log: conn, where: {id.orig_h: "${facts.scan.source.ip}", id.resp_p: 502}, show: [ts, id.resp_h, id.resp_p, conn_state]}
       look_for: The earliest activity from the scanning host - the subnet sweep for port 502 or the first identity read.
   - id: swept_port
     text: The host first swept the control subnet looking for one TCP service port. Which port?
@@ -186,6 +188,7 @@ questions:
       dataset: flows
       spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} dest_port=502 | stats count values(dest) AS scanned BY dest_port"
       kql: "src : \"${facts.scan.source.ip}\" and dest_port : 502"
+      zeek: {log: conn, where: {id.orig_h: "${facts.scan.source.ip}", proto: tcp}, count_by: [id.resp_p, id.resp_h, conn_state]}
       look_for: One host opening TCP 502 to many addresses in a short window, several of them refused (RST).
   - id: plcs_enumerated
     text: How many PLCs did the host read a device identification from?
@@ -199,6 +202,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus function_code=43 src=${facts.scan.source.ip} | stats dc(dest) AS plcs"
       kql: "function_code : 43 and src : \"${facts.scan.source.ip}\""
+      zeek: {log: modbus, where: {pdu_type: RESP, id.orig_h: "${facts.scan.source.ip}", func: ENCAP_INTERFACE_TRANSPORT}, count_by: [id.resp_h]}
       look_for: Distinct PLCs that answered the function 43 request.
   - id: functions_used
     text: Which Modbus function codes did the discovery use (identification and reads)?
@@ -210,6 +214,7 @@ questions:
       wireshark: "mbtcp && ip.src == ${facts.scan.source.ip} && !modbus.request_frame"
       spl: "index=* sourcetype=pcapforge:modbus src=${facts.scan.source.ip} | stats count BY function_code, function"
       kql: "src : \"${facts.scan.source.ip}\""
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.scan.source.ip}"}, count_by: [func]}
       look_for: 43 = Read Device Identification; 1/2/3/4 = coil / discrete / holding / input reads of the whole map.
   - id: enumeration_evidence
     text: How did the register enumeration show up on the wire (which Modbus exception do the oversized reads return)?
@@ -225,6 +230,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus exception=illegal_data_address src=${facts.scan.source.ip} | stats count BY dest, exception, table, address, quantity"
       kql: "exception : \"illegal_data_address\" and src : \"${facts.scan.source.ip}\""
+      zeek: {log: modbus, where: {id.orig_h: "${facts.scan.source.ip}", exception: ILLEGAL_DATA_ADDRESS}, count_by: [id.resp_h, func, exception]}
       look_for: The PLC answers an out-of-range read with exception 2 (illegal data address) until the scanner finds the real table size.
   - id: technique
     text: Which MITRE ATT&CK for ICS technique best describes reading the PLC identities and register map?
@@ -254,6 +260,7 @@ questions:
       dataset: name_resolution
       spl: "index=* sourcetype=pcapforge:name_resolution app=mdns message=response src_mac=\"${facts.scan.source.mac}\" | stats values(answers{}) AS announced BY src"
       kql: "app : \"mdns\" and message : \"response\" and src_mac : \"${facts.scan.source.mac}\""
+      zeek: {log: dns, where: {id.orig_h: "${facts.scan.source.ip}", id.resp_p: 5353}, count_by: [query, answers]}
       look_for: >-
         avahi-daemon on the device probes for and then announces its name with every address it has, over
         IPv4 and IPv6 (from its link-local address, whose EUI-64 interface identifier also embeds the

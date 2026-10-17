@@ -153,6 +153,7 @@ questions:
       dataset: bacnet
       spl: "index=* sourcetype=pcapforge:bacnet apdu_type=confirmed_request service=write_property | stats count AS writes values(object_type) AS object_types values(dest) AS controllers BY src | sort - writes"
       kql: "apdu_type : \"confirmed_request\" and service : \"write_property\""
+      zeek: {log: bacnet, where: {pdu_type: CONFIRMED_REQUEST, pdu_service: write_property}, count_by: [source_h, destination_h]}
       look_for: Every host that writes to a controller. The BMS operator workstation is the approved source; any other is the attacker.
   - id: source_mac
     text: Which MAC address did the sensor see on the frames carrying those writes?
@@ -167,6 +168,7 @@ questions:
       dataset: bacnet
       spl: "index=* sourcetype=pcapforge:bacnet service=write_property src=${facts.inject.source.ip} | stats count BY src, src_mac"
       kql: "service : \"write_property\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: conn, where: {id.orig_h: "${facts.inject.source.ip}", id.resp_p: 47808}, count_by: [id.orig_h, orig_l2_addr]}
       look_for: src_mac is the MAC on the wire; for a routed source it is the firewall's, not the host's.
   - id: target_ip
     text: Which controller (IP address) received the unauthorized setpoint overrides?
@@ -180,6 +182,7 @@ questions:
       dataset: bacnet
       spl: "index=* sourcetype=pcapforge:bacnet service=write_property src=${facts.inject.source.ip} | stats count BY dest"
       kql: "service : \"write_property\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: bacnet, where: {pdu_type: CONFIRMED_REQUEST, pdu_service: write_property, source_h: "${facts.inject.source.ip}"}, count_by: [destination_h]}
       look_for: The controller the attacker's writes were sent to.
   - id: overridden_points
     text: Which setpoints did the source override out of band? (object list point names)
@@ -208,6 +211,7 @@ questions:
       dataset: bacnet
       spl: "index=* sourcetype=pcapforge:bacnet service=write_property src=${facts.inject.source.ip} | sort 0 epoch | head 1 | table ts object_type instance value priority frame"
       kql: "service : \"write_property\" and src : \"${facts.inject.source.ip}\""
+      zeek: {log: bacnet_property, where: {pdu_service: write-property, source_h: "${facts.inject.source.ip}"}, show: [ts, destination_h, object_type, instance_number, value]}
       look_for: The earliest WriteProperty from the source; its frame is the first override in Wireshark.
   - id: technique
     text: Which MITRE ATT&CK for ICS technique best describes overriding setpoints with BACnet WriteProperty from an unapproved host?

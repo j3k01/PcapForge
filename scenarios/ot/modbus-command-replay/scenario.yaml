@@ -158,6 +158,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus write=true | stats count AS writes, values(point) AS points BY src"
       kql: "write : true"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.orig_h, id.resp_h, func]}
       look_for: >-
         Every host that writes to a PLC. The approved writer is the engineering workstation
         (${facts.operator_changes.source.ip}); any other writer is the replay source, even though its values look normal.
@@ -173,6 +174,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.replay.source.ip} | stats count"
       kql: "write : true and src : \"${facts.replay.source.ip}\""
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.replay.source.ip}", func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.orig_h]}
       look_for: Count the write requests from the replay source.
   - id: values_in_band
     text: Were the replayed values inside or outside the PLCs' normal operating bands? (answer "inside" or "outside")
@@ -214,6 +216,7 @@ questions:
       dataset: modbus
       spl: "index=* sourcetype=pcapforge:modbus write=true | stats earliest(ts) AS first count BY src, point"
       kql: "write : true"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, show: [ts, id.orig_h, id.resp_h, func]}
       look_for: >-
         The engineering workstation made each change first; the replay source repeats the same point and value
         later. Matching (point, value) pairs across two sources is the tell.

@@ -32,10 +32,12 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y zeek-lts-core
           /opt/zeek/bin/zeek --version
       - run: pip install -e .[test,opcua,s7]
-      - name: Install the ICSNPP Zeek packages (zkg, versions pinned in src/pcapforge/zeek.py)
+      - name: Install the ICSNPP Zeek packages and pcapforge's IEC 104 analyzer (src/pcapforge/zeek.py), and jq
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive sh -c "$(python -c 'from pcapforge.zeek import ICSNPP_INSTALL; print(ICSNPP_INSTALL)')"
+          sudo DEBIAN_FRONTEND=noninteractive sh -c "$(python -c 'from pcapforge.zeek import ANALYZERS_INSTALL; print(ANALYZERS_INSTALL)')"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y jq
           /opt/zeek/bin/zkg list installed
+          /opt/zeek/bin/zeek -NN | grep ANALYZER_PCAPFORGEIEC104
       - run: pcapforge validate
       - run: pytest -q --ignore=tests/test_siem_queries.py  # runs in the siem-queries job
 
