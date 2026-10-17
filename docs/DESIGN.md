@@ -144,7 +144,7 @@ subscription (`vars.opcua`), see below.
   - questions may carry a templated `hunt` block (`dataset`, `wireshark`, `spl`, `kql`, `look_for`),
     copied resolved into answers.json.
   - Verified locally: invariants in tests (out-of-band writes == incident writes, flows sum to IP
-    packets/bytes); SPL/KQL not machine-verified. Suricata test verified on Linux (Suricata 7.0.3): seed 42
+    packets/bytes); SPL/KQL run against Splunk and Elasticsearch (`tests/test_siem_queries.py`). Suricata test verified on Linux (Suricata 7.0.3): seed 42
     gives one band alert per incident write (fc 6 and 16), none for operator writes, and the
     unapproved-writer rule once per incident write on easy/medium, never on hard.
   - `zeek.py` (`--zeek`) — Zeek over the composed pcap with `-D` (deterministic: uids seeded with zero),
@@ -230,6 +230,16 @@ subscription (`vars.opcua`), see below.
     polls, writes and connection set-up of these protocols from hosts other than the approved masters /
     originators, BACnet foreign-device registration and BBMD table changes. Suricata needs its DNP3 and
     ENIP parsers enabled (`SURICATA_PARSERS`).
+  - Incident actors on these protocols (`iec104.command_injection`, `dnp3.control_injection`,
+    `bacnet.write_injection`, `enip.io_injection`; scenarios `ot-iec104-command-injection`,
+    `ot-dnp3-control-injection`, `ot-bacnet-unauthorized-write`, `ot-enip-drive-manipulation`): an
+    unapproved host issues select-before-operate commands, WriteProperty at a high priority or a
+    Forward_Open with forced class 1 output, against the background outstation / controller / drive. Their
+    types are not in the approved-role tuples of `detections.py`, so the existing "command / write /
+    Forward_Open from a host other than the approved master" Suricata and Sigma rules flag them; no new
+    rules. The OT datasets carry `src_mac` / `dest_mac` like `modbus.jsonl`, for the source-MAC hunts.
+    SPL/KQL checked by `tests/test_siem_queries.py`; a recording missing from the cache must be made
+    under `unshare -rn` first, because the harness runs outside the namespace to reach the backends.
 - IPv6 (`compose/ipv6.py`, `vars.ipv6`): besides the Windows link-local baseline, the sensor segment's
   firewall (`fortigate`, `ipv6_router` in devices.yaml with FortiOS defaults) sends Router Advertisements
   with a seeded ULA /64; Windows hosts form SLAAC stable and temporary addresses (MLDv2 joins, DAD) and run

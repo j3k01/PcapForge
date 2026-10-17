@@ -1,0 +1,271 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-dnp3-control-injection
+title: Unauthorized DNP3 actuator control at a wastewater treatment plant
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [dnp3, ieee1815, ics, scada, wastewater, water, rtac, ot]
+summary: >
+  A SCADA master polls a wastewater-plant DNP3 outstation (a SEL RTAC) and takes its events
+  unsolicited. During the capture a host that is not the control room opens a master channel to
+  the outstation, sends control-relay-output-block commands (select-before-operate) and latches
+  running pumps and blowers off - a process upset the operators never requested. The outstation
+  applies the operate and reports the new output state. Who sent the commands, to which
+  outstation, and which actuators were stopped.
+
+briefing: |
+  You are the OT SOC analyst for the {site_name} wastewater treatment plant ({domain}),
+  {process_title}. The attached capture comes from the SPAN port of the plant LAN switch
+  ({sensor_subnet}). Only the SCADA master in the control room is authorised to control the DNP3
+  outstation (IEEE 1815 over TCP 20000). During the shift one or more aeration blowers or sludge
+  pumps stopped and the process drifted out of band, yet the control room logged no command. Work
+  out who commanded the outputs: find every host that issued control requests (select / operate /
+  direct operate, DNP3 function 3-5) to the outstation, identify the one that is not the control-room
+  master, and list the actuators it stopped. The outstation point list (DNP3 object indices) is
+  included below.
+
+mitre:
+  - {framework: ics, id: T0855, name: Unauthorized Command Message}
+  - {framework: ics, id: T0831, name: Manipulation of Control}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [wwtp, aer, sps, clr]
+  start_hours: [6, 21]
+  weekdays: [0, 1, 2, 3, 4, 5]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: rtac, device: sel-rtac, subnet: control, name: "rtac-{code}-01"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "SCADA-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.attacker_host == 'rogue'"}
+    - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.attacker_host == 'itpc'"}
+
+actors:
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: rtac_dnp3
+    type: dnp3.server
+    hosts: rtac
+    # Two accepted master addresses: the control room (1) and the second association the capture
+    # shows the unapproved host using (2).
+    params: {process: wastewater_treatment, unsolicited: true, master_address: [1, 2]}
+  - id: scada_dnp3
+    type: dnp3.client
+    hosts: hmi
+    # Approved control room: unsolicited event reporting, slow backstop polls (integrity 30 min).
+    params: {targets: rtac, unsolicited: true, integrity_s: 1800}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian]
+    when: vars.ntp
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The incident: an unapproved host latches running actuators off over DNP3 (select-before-operate).
+  - id: inject
+    type: dnp3.control_injection
+    hosts: "${vars.attacker_host}"
+    incident: true
+    params:
+      targets: rtac
+      controls: "${vars.controls}"
+      start: "${vars.start}"
+      spread: "${vars.spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      attacker_host: rogue
+      controls: 1
+      start: [0.45, 0.65]
+      spread: 60
+      dns: false
+      ntp: true
+      chatter: false
+      ipv6: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      attacker_host: itpc
+      controls: 1
+      start: [0.35, 0.6]
+      spread: 300
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 1
+      ipv6: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      attacker_host: itpc
+      controls: 2
+      start: [0.25, 0.7]
+      spread: 1800
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 2
+      ipv6: true
+
+questions:
+  - id: source_ip
+    text: Which IP address issued the DNP3 control commands to the outstation?
+    answer: "${facts.inject.source.ip}"
+    type: ip
+    points: 15
+    hint: List every host sending a DNP3 control request (function 3 select, 4 operate, 5 direct operate) to the outstation. Only the control-room master is approved; any other source is the answer.
+    check:
+      filter: "dnp3.al.func == 4 && ip.src == ${facts.inject.source.ip}"
+      expect: {min: "${facts.inject.command_count}"}
+    hunt:
+      dataset: dnp3
+      spl: "index=* sourcetype=pcapforge:dnp3 function_code IN (3, 4, 5) | stats count AS commands values(function) AS functions values(dest) AS outstations BY src | sort - commands"
+      kql: "function_code >= 3 and function_code <= 5"
+      look_for: Every host that issues select / operate / direct operate to the outstation. The control-room master is the approved source; any other is the attacker.
+  - id: source_mac
+    text: Which MAC address did the sensor see on the frames carrying those commands?
+    answer: "${facts.inject.source.observed_mac}"
+    type: mac
+    points: 5
+    hint: A source outside the plant LAN arrives with the MAC of the router that forwarded it, not of the originating host.
+    check:
+      filter: "dnp3.al.func == 4 && ip.src == ${facts.inject.source.ip} && eth.src == ${facts.inject.source.observed_mac}"
+      expect: {min: 1}
+    hunt:
+      dataset: dnp3
+      spl: "index=* sourcetype=pcapforge:dnp3 function_code IN (3, 4, 5) src=${facts.inject.source.ip} | stats count values(dest) AS outstations BY src, src_mac"
+      kql: "function_code >= 3 and function_code <= 5 and src : \"${facts.inject.source.ip}\""
+      look_for: src_mac is the MAC on the wire; for a routed source it is the firewall's, not the host's.
+  - id: target_ip
+    text: Which outstation (IP address) received the unauthorized control commands?
+    answer: "${facts.inject.target.ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "dnp3.al.func == 4 && ip.src == ${facts.inject.source.ip} && ip.dst == ${facts.inject.target.ip}"
+      expect: {min: "${facts.inject.command_count}"}
+    hunt:
+      dataset: dnp3
+      spl: "index=* sourcetype=pcapforge:dnp3 function_code IN (3, 4, 5) src=${facts.inject.source.ip} | stats count BY dest"
+      kql: "function_code >= 3 and function_code <= 5 and src : \"${facts.inject.source.ip}\""
+      look_for: The outstation the attacker's control commands were sent to.
+  - id: points_stopped
+    text: Which binary output points did the source latch off? (point map names)
+    answer: "${facts.inject.point_names}"
+    type: set
+    points: 15
+    hint: Each operate carries a DNP3 object index in its control-relay-output block. Map the indices to the binary output (control) points in the outstation point list.
+    check:
+      filter: "dnp3.al.func == 4 && ip.src == ${facts.inject.source.ip}"
+      expect: {min: "${facts.inject.command_count}"}
+    hunt:
+      dataset: dnp3
+      spl: "index=* sourcetype=pcapforge:dnp3 function_code=4 src=${facts.inject.source.ip} | stats values(point_index) AS point_indices count AS operates BY src"
+      kql: "function_code : 4 and src : \"${facts.inject.source.ip}\""
+      look_for: The binary output indices the attacker operated; map each to its control point in the outstation point list.
+  - id: first_command
+    text: At what time (UTC) was the first unauthorized command (the first select) sent?
+    answer: "${facts.inject.first_command.time}"
+    type: timestamp
+    tolerance_s: 1
+    points: 10
+    check:
+      filter: "frame.number == ${facts.inject.first_command.frame} && ip.src == ${facts.inject.source.ip} && dnp3.al.func == 3"
+      expect: {count: 1}
+    hunt:
+      dataset: dnp3
+      spl: "index=* sourcetype=pcapforge:dnp3 function_code=3 src=${facts.inject.source.ip} | sort 0 ts | head 1 | table ts function point_index frame"
+      kql: "function_code : 3 and src : \"${facts.inject.source.ip}\""
+      look_for: The earliest control frame from the source; its frame is the select in Wireshark.
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique best describes stopping actuators with DNP3 control commands from an unapproved host?
+    answer: T0855
+    accept: [T0855, "Unauthorized Command Message", T0831, "Manipulation of Control"]
+    type: text
+    points: 10
+    hunt:
+      dataset: dnp3
+      spl: "index=* sourcetype=pcapforge:dnp3 function_code IN (3, 4, 5) | stats count BY src dest"
+      kql: "function_code >= 3 and function_code <= 5"
+      look_for: Control commands from a host not authorised to issue them are Unauthorized Command Message (T0855); stopping the actuators is Manipulation of Control (T0831).
+
+translations:
+  pl:
+    title: Nieautoryzowane sterowanie napędami przez DNP3 w oczyszczalni ścieków
+    briefing: |
+      Jesteś analitykiem OT SOC oczyszczalni ścieków {site_name} ({domain}), {process_title}.
+      Załączone nagranie pochodzi z portu SPAN przełącznika sieci zakładowej ({sensor_subnet}).
+      Sterować stacją DNP3 (IEEE 1815 przez TCP 20000) może wyłącznie master SCADA w sterowni.
+      W trakcie zmiany jedna lub więcej dmuchaw napowietrzania lub pomp osadu zatrzymało się, a proces
+      wyszedł poza zakres, lecz sterownia nie zarejestrowała żadnego polecenia. Ustal, kto wydał
+      polecenia: znajdź każdy host wysyłający polecenia sterujące (select / operate / direct operate,
+      funkcja DNP3 3-5) do stacji, wskaż ten, który nie jest masterem sterowni, i wypisz zatrzymane
+      napędy. Lista punktów stacji (indeksy obiektów DNP3) znajduje się poniżej.
+    questions:
+      source_ip:
+        text: Z jakiego adresu IP wysłano polecenia sterujące DNP3 do stacji?
+        hint: Wypisz każdy host wysyłający polecenie sterujące DNP3 (funkcja 3 select, 4 operate, 5 direct operate) do stacji. Uprawniony jest tylko master sterowni; każdy inny to odpowiedź.
+      source_mac:
+        text: Jaki adres MAC widział sensor na ramkach niosących te polecenia?
+        hint: Źródło spoza sieci zakładowej przychodzi z adresem MAC routera, który je przekazał, a nie hosta źródłowego.
+      target_ip:
+        text: Która stacja (adres IP) otrzymała nieautoryzowane polecenia sterujące?
+      points_stopped:
+        text: Które punkty wyjść dwustanowych źródło zatrzymało (latch off)? (nazwy z mapy punktów)
+        hint: Każde operate niesie indeks obiektu DNP3 w bloku control-relay-output. Zmapuj indeksy na punkty wyjść dwustanowych (sterowania) z listy punktów stacji.
+      first_command:
+        text: O której godzinie (UTC) wysłano pierwsze nieautoryzowane polecenie (pierwszy select)?
+      technique:
+        text: Która technika MITRE ATT&CK for ICS najlepiej opisuje zatrzymywanie napędów poleceniami DNP3 z nieuprawnionego hosta?
+  de:
+    title: Unautorisierte DNP3-Aktorsteuerung in einer Kläranlage
+    briefing: |
+      Sie sind Analyst im OT-SOC der Kläranlage {site_name} ({domain}), {process_title}.
+      Der beigefügte Mitschnitt stammt vom SPAN-Port des Anlagennetz-Switches ({sensor_subnet}).
+      Nur der SCADA-Master im Leitstand darf die DNP3-Station (IEEE 1815 über TCP 20000) steuern.
+      Während der Schicht stoppten eine oder mehrere Belüftungsgebläse oder Schlammpumpen und der
+      Prozess lief aus dem Band, obwohl der Leitstand keinen Befehl protokollierte. Klären Sie, wer
+      die Ausgänge befehligt hat: Finden Sie jeden Host, der Steuerbefehle (Select / Operate / Direct
+      Operate, DNP3-Funktion 3-5) an die Station sendet, bestimmen Sie den, der nicht der
+      Leitstand-Master ist, und listen Sie die gestoppten Aktoren auf. Die Punktliste der Station
+      (DNP3-Objektindizes) finden Sie unten.
+    questions:
+      source_ip:
+        text: Von welcher IP-Adresse wurden die DNP3-Steuerbefehle an die Station gesendet?
+        hint: Listen Sie jeden Host auf, der einen DNP3-Steuerbefehl (Funktion 3 Select, 4 Operate, 5 Direct Operate) an die Station sendet. Berechtigt ist nur der Leitstand-Master; jede andere Quelle ist die Antwort.
+      source_mac:
+        text: Welche MAC-Adresse sah der Sensor auf den Frames mit diesen Befehlen?
+        hint: Eine Quelle außerhalb des Anlagennetzes kommt mit der MAC des weiterleitenden Routers, nicht des Ursprungshosts.
+      target_ip:
+        text: Welche Station (IP-Adresse) erhielt die unautorisierten Steuerbefehle?
+      points_stopped:
+        text: Welche Binärausgangspunkte hat die Quelle abgeschaltet (latch off)? (Namen aus der Punktliste)
+        hint: Jedes Operate trägt einen DNP3-Objektindex im Control-Relay-Output-Block. Ordnen Sie die Indizes den Binärausgangs-(Steuer-)Punkten in der Punktliste der Station zu.
+      first_command:
+        text: Um welche Uhrzeit (UTC) wurde der erste unautorisierte Befehl (der erste Select) gesendet?
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das Stoppen von Aktoren per DNP3-Steuerbefehl von einem nicht autorisierten Host am besten?

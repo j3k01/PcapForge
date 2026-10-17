@@ -1,0 +1,299 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-enip-drive-manipulation
+title: Unauthorized EtherNet/IP drive manipulation on a packaging line
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [enip, ethernetip, cip, ics, drive, powerflex, compactlogix, packaging, ot]
+summary: >
+  A CompactLogix controller runs a packaging line: an HMI reads its tags over EtherNet/IP and the
+  controller scans a PowerFlex 525 conveyor drive over class 1 I/O (UDP 2222). During the capture a
+  host that is not an approved EtherNet/IP originator registers a session with the line's pump drive,
+  issues an unauthorized Forward_Open to seize its exclusive-owner connection and holds the frequency
+  Reference at full speed - the pump is overspeeded past its process band for the rest of the shift.
+  Who opened the drive, which adapter was it, and what did they command.
+
+briefing: |
+  You are the OT SOC analyst for the {site_name} packaging line ({domain}), {process_title}. The
+  attached capture comes from the SPAN port of the line's control switch ({sensor_subnet}). On this
+  cell only the CompactLogix I/O scanner and the HMI driver are approved EtherNet/IP originators
+  (TCP/UDP 44818, class 1 I/O on UDP 2222); the scanner runs the conveyor PowerFlex 525. During the
+  shift the line's pump PowerFlex 525 ran at full speed and tripped the overspeed interlock, yet no
+  operator commanded it. Work out who did it: find every host that opens a CIP connection
+  (Forward_Open) to a drive, identify the one that is not an approved originator, and determine which
+  drive it seized and the frequency it held the drive at. The class 1 I/O image (Logic Command,
+  Reference in 0.01 Hz) is decoded below.
+
+mitre:
+  - {framework: ics, id: T0855, name: Unauthorized Command Message}
+  - {framework: ics, id: T0831, name: Manipulation of Control}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [pk1, pk2, lne, bot]
+  start_hours: [6, 21]
+  weekdays: [0, 1, 2, 3, 4, 5]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: logix, device: rockwell-compactlogix, subnet: control, name: "plc-{code}-pk1"}
+    - {id: vfd, device: rockwell-powerflex525, subnet: control, name: "vfd-{code}-pk1"}
+    - {id: vfd2, device: rockwell-powerflex525, subnet: control, name: "vfd-{code}-pk2"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.attacker_host == 'rogue'"}
+    - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.attacker_host == 'itpc'"}
+
+actors:
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  # The packaging line: a CompactLogix controller (enip.server) with the line's tags, its HMI driver
+  # (enip.client) and two PowerFlex 525 drives (enip.adapter). The controller scans the conveyor
+  # drive over class 1 I/O (enip.scanner); this mirrors the baseline-operations vars.enip wiring
+  # (logix + vfd on the control LAN), here with a second drive for the pump the rogue host seizes.
+  - id: logix_service
+    type: enip.server
+    hosts: logix
+    params: {process: water_treatment}
+  - id: drive_adapter
+    type: enip.adapter
+    hosts: [vfd, vfd2]
+  - id: hmi_enip
+    # Approved originator: the HMI driver browses, opens a Class 3 connection to the controller and
+    # reads its tags cyclically.
+    type: enip.client
+    hosts: hmi
+    params: {targets: logix, interval: "${vars.hmi_interval}"}
+  - id: logix_io
+    # Approved originator: the CompactLogix scans the conveyor PowerFlex over unicast class 1 I/O
+    # (UDP 2222). The pump drive (vfd) is the one the rogue host seizes.
+    type: enip.scanner
+    hosts: logix
+    params: {targets: vfd2, rpi_ms: 100}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian]
+    when: vars.ntp
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The incident: an unapproved host seizes the pump PowerFlex 525 class 1 connection (Forward_Open)
+  # and holds the frequency Reference at full speed over O->T class 1 I/O for the rest of the shift.
+  - id: inject
+    type: enip.io_injection
+    hosts: "${vars.attacker_host}"
+    incident: true
+    params:
+      targets: vfd
+      start: "${vars.start}"
+      burst: "${vars.burst}"
+      writes: "${vars.writes}"
+      reference_hz: "${vars.reference_hz}"
+      rpi_ms: "${vars.attacker_rpi_ms}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      attacker_host: rogue
+      start: [0.4, 0.6]
+      burst: 0.6
+      writes: 6
+      reference_hz: 60.0
+      attacker_rpi_ms: 50
+      hmi_interval: 2.0
+      dns: false
+      ntp: true
+      chatter: false
+      ipv6: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      attacker_host: itpc
+      start: [0.4, 0.6]
+      burst: 0.8
+      writes: 8
+      reference_hz: 60.0
+      attacker_rpi_ms: 50
+      hmi_interval: 1.0
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 1
+      ipv6: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      attacker_host: itpc
+      start: [0.35, 0.6]
+      burst: 1.0
+      writes: 10
+      reference_hz: 60.0
+      attacker_rpi_ms: 50
+      hmi_interval: 1.0
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 2
+      ipv6: true
+
+questions:
+  - id: source_ip
+    text: Which IP address opened the unauthorized EtherNet/IP connection to the drive?
+    answer: "${facts.inject.source.ip}"
+    type: ip
+    points: 15
+    hint: List every host that sends a CIP Forward_Open (cip.sc == 0x54, request) to a drive. Only the CompactLogix scanner and the HMI are approved originators; any other source is the answer.
+    check:
+      filter: "cip.sc == 0x54 && cip.rr == 0 && ip.src == ${facts.inject.source.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: enip
+      spl: "index=* sourcetype=pcapforge:enip service=forward_open response=false | stats count AS opens values(dest) AS drives BY src | sort - opens"
+      kql: "service : \"forward_open\" and response : false"
+      look_for: Every host that opens a CIP connection. The CompactLogix scanner and the HMI are the approved originators; any other is the attacker.
+  - id: source_mac
+    text: Which MAC address did the sensor see on the frames carrying the Forward_Open?
+    answer: "${facts.inject.source.observed_mac}"
+    type: mac
+    points: 5
+    hint: A source outside the line's control LAN arrives with the MAC of the router that forwarded it, not of the originating host.
+    check:
+      filter: "cip.sc == 0x54 && cip.rr == 0 && ip.src == ${facts.inject.source.ip} && eth.src == ${facts.inject.source.observed_mac}"
+      expect: {min: 1}
+    hunt:
+      dataset: enip
+      spl: "index=* sourcetype=pcapforge:enip service=forward_open response=false src=${facts.inject.source.ip} | stats count BY src, src_mac"
+      kql: "service : \"forward_open\" and src : \"${facts.inject.source.ip}\""
+      look_for: The MAC on the wire; for a routed source it is the firewall's, not the host's (read eth.src on the Forward_Open frame in Wireshark).
+  - id: target_ip
+    text: Which drive (IP address) did the unauthorized Forward_Open seize?
+    answer: "${facts.inject.target.ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "cip.sc == 0x54 && cip.rr == 0 && ip.src == ${facts.inject.source.ip} && ip.dst == ${facts.inject.target.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: enip
+      spl: "index=* sourcetype=pcapforge:enip service=forward_open response=false src=${facts.inject.source.ip} | stats count BY dest"
+      kql: "service : \"forward_open\" and src : \"${facts.inject.source.ip}\""
+      look_for: The drive adapter the attacker's Forward_Open was sent to.
+  - id: commanded_reference
+    text: To what frequency reference (Hz) did the source drive the PowerFlex? (the Reference it held in the O->T image)
+    answer: "${facts.inject.commanded_reference_hz}"
+    type: set
+    points: 15
+    hint: The attacker owns the class 1 connection and sends O->T packets on UDP 2222. Decode the Connected Data after the sequence count - the run/idle header, Logic Command (Start + Forward) and Reference in 0.01 Hz - and read the frequency it held; full speed is 60 Hz, above the line's process band.
+    check:
+      filter: "cip.sc == 0x54 && cip.rr == 0 && ip.src == ${facts.inject.source.ip} && ip.dst == ${facts.inject.target.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: enip
+      spl: "index=* sourcetype=pcapforge:enip message=io_summary src=${facts.inject.source.ip} | stats sum(packets) AS packets values(connection_id) AS connection BY src, dest"
+      kql: "message : \"io_summary\" and src : \"${facts.inject.source.ip}\""
+      look_for: The attacker's O->T class 1 I/O stream to the drive on UDP 2222; decode the Reference (0.01 Hz) in the Connected Data to read the frequency it held (full speed, 60 Hz).
+  - id: first_command
+    text: At what time (UTC) was the unauthorized Forward_Open sent?
+    answer: "${facts.inject.first_command.time}"
+    type: timestamp
+    tolerance_s: 1
+    points: 10
+    check:
+      filter: "frame.number == ${facts.inject.first_command.frame} && ip.src == ${facts.inject.source.ip} && cip.sc == 0x54"
+      expect: {count: 1}
+    hunt:
+      dataset: enip
+      spl: "index=* sourcetype=pcapforge:enip service=forward_open response=false src=${facts.inject.source.ip} | sort 0 epoch | head 1 | table ts dest service transport_class frame"
+      kql: "service : \"forward_open\" and src : \"${facts.inject.source.ip}\""
+      look_for: The earliest Forward_Open from the source; its frame is the connection seizure in Wireshark.
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique best describes seizing a drive's EtherNet/IP connection and overspeeding it from an unapproved host?
+    answer: T0855
+    accept: [T0855, "Unauthorized Command Message", T0831, "Manipulation of Control"]
+    type: text
+    points: 10
+    hunt:
+      dataset: enip
+      spl: "index=* sourcetype=pcapforge:enip service=forward_open response=false | stats count BY src, dest"
+      kql: "service : \"forward_open\" and response : false"
+      look_for: A Forward_Open from a host not among the approved originators is an Unauthorized Command Message (T0855); overspeeding the drive is Manipulation of Control (T0831).
+
+translations:
+  pl:
+    title: Nieautoryzowana manipulacja napędem przez EtherNet/IP na linii pakującej
+    briefing: |
+      Jesteś analitykiem OT SOC linii pakującej {site_name} ({domain}), {process_title}. Załączone
+      nagranie pochodzi z portu SPAN przełącznika sterowania linii ({sensor_subnet}). W tej celi tylko
+      skaner I/O sterownika CompactLogix i sterownik HMI są uprawnionymi inicjatorami EtherNet/IP
+      (TCP/UDP 44818, I/O klasy 1 na UDP 2222). Zanim napęd linii włączono na zmianę, napęd PowerFlex 525
+      rozpędził pompę do maksymalnej prędkości i wyzwolił zabezpieczenie nadprędkościowe, choć żaden
+      operator tego nie polecił. Ustal, kto to zrobił: znajdź każdy host otwierający połączenie CIP
+      (Forward_Open) do napędu, wskaż ten, który nie jest uprawnionym inicjatorem, i określ, który napęd
+      przejął oraz do jakiej częstotliwości go rozpędził. Obraz I/O klasy 1 (Logic Command, Reference w
+      0,01 Hz) jest rozkodowany poniżej.
+    questions:
+      source_ip:
+        text: Z jakiego adresu IP otwarto nieautoryzowane połączenie EtherNet/IP do napędu?
+        hint: Wypisz każdy host wysyłający CIP Forward_Open (cip.sc == 0x54, żądanie) do napędu. Uprawnione są tylko skaner CompactLogix i HMI; każde inne źródło to odpowiedź.
+      source_mac:
+        text: Jaki adres MAC widział sensor na ramkach niosących Forward_Open?
+        hint: Źródło spoza sieci sterowania linii przychodzi z adresem MAC routera, który je przekazał, a nie hosta źródłowego.
+      target_ip:
+        text: Który napęd (adres IP) przejął nieautoryzowany Forward_Open?
+      commanded_reference:
+        text: Do jakiej częstotliwości (Hz) źródło rozpędziło PowerFlex? (Reference utrzymywany w obrazie O->T)
+        hint: Atakujący jest właścicielem połączenia klasy 1 i wysyła pakiety O->T na UDP 2222. Rozkoduj Connected Data po liczniku sekwencji - nagłówek run/idle, Logic Command (Start + Forward) i Reference w 0,01 Hz - i odczytaj utrzymywaną częstotliwość; pełna prędkość to 60 Hz, powyżej pasma procesowego linii.
+      first_command:
+        text: O której godzinie (UTC) wysłano nieautoryzowany Forward_Open?
+      technique:
+        text: Która technika MITRE ATT&CK for ICS najlepiej opisuje przejęcie połączenia EtherNet/IP napędu i jego rozpędzenie z nieuprawnionego hosta?
+  de:
+    title: Unautorisierte EtherNet/IP-Antriebsmanipulation an einer Verpackungslinie
+    briefing: |
+      Sie sind Analyst im OT-SOC der Verpackungslinie {site_name} ({domain}), {process_title}. Der
+      beigefügte Mitschnitt stammt vom SPAN-Port des Steuerungs-Switches der Linie ({sensor_subnet}). In
+      dieser Zelle sind nur der E/A-Scanner der CompactLogix und der HMI-Treiber zugelassene
+      EtherNet/IP-Originatoren (TCP/UDP 44818, Klasse-1-E/A auf UDP 2222). Bevor der Antrieb der Linie
+      für die Schicht online gebracht wurde, drehte ein PowerFlex 525 seine Pumpe auf Höchstdrehzahl und
+      löste die Überdrehzahl-Verriegelung aus, obwohl kein Bediener dies befahl. Klären Sie, wer es tat:
+      Finden Sie jeden Host, der eine CIP-Verbindung (Forward_Open) zu einem Antrieb öffnet, bestimmen
+      Sie den, der kein zugelassener Originator ist, und ermitteln Sie, welchen Antrieb er übernahm und
+      auf welche Frequenz er ihn trieb. Das Klasse-1-E/A-Abbild (Logic Command, Reference in 0,01 Hz) ist
+      unten dekodiert.
+    questions:
+      source_ip:
+        text: Von welcher IP-Adresse wurde die unautorisierte EtherNet/IP-Verbindung zum Antrieb geöffnet?
+        hint: Listen Sie jeden Host auf, der einen CIP Forward_Open (cip.sc == 0x54, Anfrage) an einen Antrieb sendet. Zugelassen sind nur der CompactLogix-Scanner und das HMI; jede andere Quelle ist die Antwort.
+      source_mac:
+        text: Welche MAC-Adresse sah der Sensor auf den Frames mit dem Forward_Open?
+        hint: Eine Quelle außerhalb des Steuerungs-LAN der Linie kommt mit der MAC des weiterleitenden Routers, nicht des Ursprungshosts.
+      target_ip:
+        text: Welchen Antrieb (IP-Adresse) übernahm der unautorisierte Forward_Open?
+      commanded_reference:
+        text: Auf welche Frequenz (Hz) trieb die Quelle den PowerFlex? (die im O->T-Abbild gehaltene Reference)
+        hint: Der Angreifer besitzt die Klasse-1-Verbindung und sendet O->T-Pakete auf UDP 2222. Dekodieren Sie die Connected Data nach dem Sequenzzähler - den Run/Idle-Header, Logic Command (Start + Forward) und Reference in 0,01 Hz - und lesen Sie die gehaltene Frequenz; Höchstdrehzahl ist 60 Hz, über dem Prozessband der Linie.
+      first_command:
+        text: Um welche Uhrzeit (UTC) wurde der unautorisierte Forward_Open gesendet?
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das Übernehmen der EtherNet/IP-Verbindung eines Antriebs und dessen Überdrehen von einem nicht autorisierten Host am besten?

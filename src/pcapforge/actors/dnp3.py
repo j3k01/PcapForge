@@ -53,7 +53,7 @@ from pcapforge import ports
 from pcapforge.actors import register
 from pcapforge.actors.base import Actor
 from pcapforge.actors.modbus import host_process, host_sim
-from pcapforge.plan import host_ref
+from pcapforge.plan import action_ref, host_ref
 from pcapforge.process import Point, ProcessProfile
 from pcapforge.scenario import ScenarioError
 
@@ -77,7 +77,14 @@ FRAGMENT_MAX = 5 * SEGMENT_MAX        # five full frames = 1460 bytes: one TCP s
 
 AC_FIR, AC_FIN, AC_CON, AC_UNS = 0x80, 0x40, 0x20, 0x10
 FC_CONFIRM, FC_READ, FC_WRITE = 0, 1, 2
+FC_SELECT, FC_OPERATE, FC_DIRECT_OPERATE = 3, 4, 5
 FC_ENABLE_UNSOLICITED, FC_DISABLE_UNSOLICITED, FC_RECORD_CURRENT_TIME = 20, 21, 24
+# Control relay output block (g12v1): qualifier 0x17 (one-octet object count, one-octet index
+# prefix) and an 11-octet block per point (control code, count, on time, off time, status).
+CROB_GROUP, CROB_VAR, CROB_QUALIFIER, CROB_SIZE = 12, 1, 0x17, 11
+OP_LATCH_ON, OP_LATCH_OFF = 3, 4
+DNP3_OP_NAMES = {OP_LATCH_ON: "latch_on", OP_LATCH_OFF: "latch_off"}
+DNP3_FUNCTION_NAMES = {FC_SELECT: "select", FC_OPERATE: "operate", FC_DIRECT_OPERATE: "direct_operate"}
 FC_RESPONSE, FC_UNSOLICITED_RESPONSE = 129, 130
 REPLY_TIMEOUT = 3.0                   # seconds of wall time the recording waits for the peer
 
@@ -278,6 +285,36 @@ def event_objects(events: list[Event]) -> bytes:
 def class_objects(classes: list[int]) -> bytes:
     """Class data object headers (g60v1 = class 0, g60v2-4 = classes 1-3), all objects."""
     return b"".join(struct.pack("<BBB", 60, c + 1, 0x06) for c in classes)
+
+
+def crob_blocks(controls: list[tuple[int, int]], status: int = 0) -> bytes:
+    """A g12v1 control-relay-output-block request / response body: the object header (qualifier
+    0x17) and one CROB per ``(index, control code)`` - latch the relay once with no pulse timing
+    and the given status octet (0 in a request, 0 = success when the outstation echoes it)."""
+    out = bytearray(struct.pack("<BBBB", CROB_GROUP, CROB_VAR, CROB_QUALIFIER, len(controls)))
+    for index, control_code in controls:
+        out += struct.pack("<BBBIIB", index, control_code, 1, 0, 0, status)
+    return bytes(out)
+
+
+def parse_crob(data: bytes) -> tuple[list[tuple[int, int]], bool]:
+    """(index, control code) of the CROB command objects of a control request (g12v1, qualifier
+    0x17), and whether the request held only such objects."""
+    controls: list[tuple[int, int]] = []
+    offset = 0
+    while offset < len(data):
+        if len(data) - offset < 4:
+            return controls, False
+        group, variation, qualifier, count = data[offset:offset + 4]
+        offset += 4
+        if (group, variation) != (CROB_GROUP, CROB_VAR) or qualifier != CROB_QUALIFIER:
+            return controls, False
+        for _ in range(count):
+            if len(data) - offset < 1 + CROB_SIZE:
+                return controls, False
+            controls.append((data[offset], data[offset + 1]))
+            offset += 1 + CROB_SIZE
+    return controls, True
 
 
 def _request_objects(data: bytes):
@@ -521,11 +558,32 @@ class Outstation:
                 assoc.unsolicited_classes.update(classes)
             else:
                 assoc.unsolicited_classes.difference_update(classes)
+        elif function in (FC_SELECT, FC_OPERATE, FC_DIRECT_OPERATE):
+            controls, known = parse_crob(fragment[2:])
+            if not known:
+                iin2 |= IIN2_OBJECT_UNKNOWN
+            else:
+                # SELECT only arms the point; OPERATE / DIRECT_OPERATE drive it. Echo the command
+                # objects with a success status, as an outstation acknowledges a control.
+                if function in (FC_OPERATE, FC_DIRECT_OPERATE):
+                    self._apply_controls(controls)
+                objects = crob_blocks(controls)
         elif function != FC_RECORD_CURRENT_TIME:
             iin2 |= IIN2_NO_FUNC_CODE_SUPPORT
         assoc.unconfirmed = (seq, reported) if reported else None
         response_control = AC_FIR | AC_FIN | (AC_CON if reported else 0) | seq
         return struct.pack("<BBBB", response_control, FC_RESPONSE, self._iin1(assoc, reported), iin2) + objects
+
+    def _apply_controls(self, controls: list[tuple[int, int]]) -> None:
+        """Drive the commanded binary outputs (latch on / off) into the process simulation, so the
+        outstation reports the new output state on its next scan."""
+        sim = host_sim(self.rt, self.actor, self.host, self.config.profile)
+        sim.advance(self.rt.clock.t)
+        outputs = self.points["binary_outputs"]
+        for index, control_code in controls:
+            op = control_code & 0x0F
+            if 0 <= index < len(outputs) and op in (OP_LATCH_ON, OP_LATCH_OFF):
+                sim.write("coils", outputs[index].address, [1 if op == OP_LATCH_ON else 0])
 
     def unsolicited(self, assoc: _Association) -> bytes | None:
         """The unsolicited response due on ``assoc`` now, if any: the null response that opens the
@@ -1005,6 +1063,100 @@ class Dnp3Client(Actor):
             master.request(FC_WRITE, struct.pack("<BBBB", 50, 3, 0x07, 1) + time48(a["time_ms"]))
         elif action.op == "dnp3.link_status":
             master.link_status()
+        else:
+            raise ValueError(f"unknown op {action.op}")
+
+    def close(self, rt) -> None:
+        for key in [k for k in rt.clients if k[0] == self.id]:
+            rt.clients.pop(key).close()
+
+
+# --- incident: unauthorized control ----------------------------------------------------
+
+@register
+class Dnp3ControlInjection(Actor):
+    """Unauthorized control from a host outside the approved SCADA path: the attacker opens a DNP3
+    master channel to an outstation and issues control-relay-output-block commands
+    (select-before-operate) that drive running actuators off - a process upset the SCADA master
+    never requested. The outstation applies the operate and reports the new output state. MITRE
+    ATT&CK for ICS: Unauthorized Command Message (T0855) and Manipulation of Control (T0831)."""
+
+    type = "dnp3.control_injection"
+
+    def plan(self) -> None:
+        plan, rng = self.plan_, self.rng
+        host = self.hosts[0]
+        target = rng.choice(plan.topology.select(self.param("targets")))
+        server, config = serving_outstation(plan, target.id)
+        self.servers = {target.id: server}
+        # The outstation keeps a separate association per master link address; the attacker takes a
+        # configured address other than the approved client's (``masters[0]``) so the two sessions
+        # do not share association state.
+        master = next((m for m in config.masters if m != config.masters[0]), config.masters[0])
+        # Running equipment the attacker can stop: writable binary outputs whose normal state is on.
+        outputs = point_map(config.profile)["binary_outputs"]
+        runnable = [(index, p) for index, p in enumerate(outputs)
+                    if p.writable and p.nominal >= 0.5 and p.name.endswith("_run")]
+        if not runnable:
+            raise ScenarioError(f"{self.type} '{self.id}': outstation '{config.profile.id}' has no running "
+                                "binary output to stop")
+        count = max(1, min(int(self.param("controls", 1)), len(runnable)))
+        chosen = sorted(rng.sample(runnable, count), key=lambda item: item[0])
+        start_lo, start_hi = self.span(self.param("start", [0.35, 0.6]))
+        spread = min(float(self.param("spread", 120)), plan.duration * 0.4)
+        t0 = plan.duration * rng.uniform(start_lo, start_hi)
+        t0 = min(t0, max(plan.duration - spread - 30, plan.duration * 0.1))
+
+        plan.add(t0, self.id, host.id, "dnp3ci.connect", phase="setup", target=target.id, master=master,
+                 outstation=config.address, transport_seq=rng.randrange(64), app_seq=rng.randrange(16))
+        commands, first = [], None
+        for order, (index, point) in enumerate(chosen):
+            select_t = t0 + rng.uniform(0.1, 0.4) + order * (spread / max(count - 1, 1))
+            operate_t = select_t + rng.uniform(1.0, 4.0)
+            args = {"target": target.id, "index": index}
+            select = plan.add(select_t, self.id, host.id, "dnp3ci.select", **args)
+            operate = plan.add(operate_t, self.id, host.id, "dnp3ci.operate", **args)
+            first = first or select
+            commands.append({"index": index, "point": point.name, "desc": point.desc,
+                             "function": DNP3_FUNCTION_NAMES[FC_OPERATE], "op": DNP3_OP_NAMES[OP_LATCH_OFF],
+                             "value": 0, "action": "stop", "select": action_ref(select),
+                             "request": action_ref(operate)})
+            plan.event(operate, self.id, f"Stop {point.name} on {target.id} (DNP3 latch-off)",
+                       ["T0855", "T0831"], point=point.name, index=index)
+        plan.add(plan.duration + 1.0, self.id, host.id, "dnp3ci.close", phase="teardown", target=target.id)
+
+        plan.facts[self.id] = {
+            "source": host_ref(host.id),
+            "target": host_ref(target.id),
+            "master_address": master,
+            "outstation_address": config.address,
+            "command_count": len(commands),
+            "commands": commands,
+            "points_stopped": [c["point"] for c in commands],
+            "point_names": sorted({c["point"] for c in commands}),
+            "indices": [c["index"] for c in commands],
+            "ioas": [c["index"] for c in commands],
+            "function": DNP3_FUNCTION_NAMES[FC_OPERATE],
+            "op": DNP3_OP_NAMES[OP_LATCH_OFF],
+            "first_command": action_ref(first),
+        }
+
+    def execute(self, action, rt) -> None:
+        a = action.args
+        key = (self.id, action.host, a["target"])
+        if action.op == "dnp3ci.connect":
+            rt.clients[key] = Dnp3Master(rt.loopback(action.host), rt.loopback(a["target"]), a["master"],
+                                         a["outstation"], a["transport_seq"], a["app_seq"])
+            return
+        if action.op == "dnp3ci.close":
+            rt.clients.pop(key).close()
+            return
+        master: Dnp3Master = rt.clients[key]
+        objects = crob_blocks([(a["index"], OP_LATCH_OFF)])
+        if action.op == "dnp3ci.select":
+            master.request(FC_SELECT, objects)
+        elif action.op == "dnp3ci.operate":
+            master.request(FC_OPERATE, objects)
         else:
             raise ValueError(f"unknown op {action.op}")
 

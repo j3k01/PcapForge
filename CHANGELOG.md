@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+### Scenarios
+- Incident scenarios on the non-Modbus OT protocols: `ot-iec104-command-injection` (unauthorized
+  breaker control), `ot-dnp3-control-injection` (unauthorized control-relay commands),
+  `ot-bacnet-unauthorized-write` (WriteProperty override at high priority) and
+  `ot-enip-drive-manipulation` (unapproved Forward_Open + forced drive speed reference). Each is
+  flagged by the existing "command / write / Forward_Open from an unexpected host" Suricata and Sigma
+  rules for that protocol.
+
+### Detection engineering
+- The hunting guide's SPL and KQL are tested against Splunk 10.6 and Elasticsearch 9.5 for every scenario
+  and level (`tests/test_siem_queries.py`, CI job `siem-queries`).
+- `ot-modbus-discovery`: the enumeration SPL searched `dest=` the scanner and matched nothing; it now
+  searches the scanner's transactions and shows the exception.
+- Splunk `props.conf` in the hunting guide adds `MAX_DAYS_HENCE` and `MAX_DAYS_AGO`: captures dated more than
+  two days ahead were stamped with the indexing time.
+- The IEC 104, DNP3, BACnet and EtherNet/IP SIEM records carry `src_mac` / `dest_mac`, as the Modbus
+  records do; the new scenarios' source-MAC hunts rely on them.
+
 ## 0.2.0 - 2026-10-11
 
 Seeds are not stable across versions: the same seed can give a different exercise than in 0.1.0.

@@ -255,8 +255,9 @@ questions:
   the capture. Every question that can be proven from packets needs one; `foreach: facts.x.list` repeats
   the check per item with `${item.*}`. Display-filter sets need commas: `{5, 6, 15, 16}`.
 - `hunt` (optional) is rendered into `detections/hunting.md`: the SIEM `dataset`, a `wireshark` filter for
-  questions without a check, `spl`, `kql` and `look_for`. SPL/KQL are not machine-verified; run them
-  against the export once.
+  questions without a check, `spl`, `kql` and `look_for`. Every query must run and match events in Splunk
+  and Elasticsearch, and return the answer when it is a field value: `tests/test_siem_queries.py`
+  (CI job `siem-queries`; the SPL starts with `index=* sourcetype=pcapforge:<dataset>`).
 - A question must be answerable from the capture plus the briefing alone.
 
 ### Validate

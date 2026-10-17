@@ -906,7 +906,8 @@ class _Exporter:
             apci = _int(apci_text) or 0
             kind = "I" if not apci & 1 else ("S" if apci & 3 == 1 else "U")
             record = {
-                **_stamp(epoch), **conn, "transport": "tcp", "app": "iec104",
+                **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "dest_mac": _first(row, "eth.dst"),
+                "transport": "tcp", "app": "iec104",
                 "apci": kind, "u_function": None, "send_seq": None, "recv_seq": None,
                 "type_id": None, "type": None, "category": None, "cot": None, "cause": None,
                 "negative": None, "test": None, "originator": None, "common_address": None,
@@ -936,7 +937,8 @@ class _Exporter:
             response = function is not None and function >= 129
             iin = _int(take("dnp3.al.iin")) if response else None
             record = {
-                **_stamp(epoch), **conn, "transport": transport, "app": "dnp3",
+                **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "dest_mac": _first(row, "eth.dst"),
+                "transport": transport, "app": "dnp3",
                 "link_src": _int(_first(row, "dnp3.src")), "link_dst": _int(_first(row, "dnp3.dst")),
                 "function_code": function, "function": DNP3_FUNCTIONS.get(function, f"function_{function}"),
                 "response": response,
@@ -971,7 +973,8 @@ class _Exporter:
         device = next((o[1] for o in objects if o[0] == 8), None)
         properties = list(dict.fromkeys(_int(p) for p in _all(row, "bacapp.property_identifier")))
         record = {
-            **_stamp(epoch), **conn, "transport": "udp", "app": "bacnet",
+            **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "dest_mac": _first(row, "eth.dst"),
+            "transport": "udp", "app": "bacnet",
             "bvlc_function": function, "bvlc": BVLC_FUNCTIONS.get(function, f"bvlc_{function}"),
             "bvlc_result": BVLC_RESULTS.get(result, f"result_{result}") if result is not None else None,
             "ttl_s": _int(_first(row, "bvlc.reg_ttl")),
@@ -1011,7 +1014,8 @@ class _Exporter:
         for index, text in enumerate(commands):
             command = _int(text)
             record = {
-                **_stamp(epoch), **conn, "transport": transport, "app": "enip", "message": "explicit",
+                **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "dest_mac": _first(row, "eth.dst"),
+                "transport": transport, "app": "enip", "message": "explicit",
                 "command_code": command, "command": ENIP_COMMANDS.get(command, f"command_0x{command:04x}"),
                 "session": _hex32(sessions[index] if index < len(sessions) else ""),
                 "status": _int(statuses[index]) if index < len(statuses) else None,
@@ -1037,7 +1041,8 @@ class _Exporter:
         summary = self.enip_io.get((*stream, window))
         if summary is None:
             summary = self.enip_io[(*stream, window)] = {
-                **_stamp(epoch), **conn, "transport": "udp", "app": "enip", "message": "io_summary",
+                **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "dest_mac": _first(row, "eth.dst"),
+                "transport": "udp", "app": "enip", "message": "io_summary",
                 "window_start": iso_utc(window * 60), "window_s": 60, "connection_id": _hex32(str(connid)),
                 "packets": 0, "bytes": 0, "first_seq": seq, "last_seq": seq, "seq_missing": 0, "seq_repeated": 0,
                 "interval_ms_mean": None, "interval_ms_min": None, "interval_ms_max": None,

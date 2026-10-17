@@ -1,0 +1,273 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-iec104-command-injection
+title: Unauthorized IEC 104 breaker control at a distribution substation
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [iec104, iec60870, ics, telecontrol, substation, breaker, power, ot]
+summary: >
+  A SCADA master polls a distribution-substation RTU over IEC 60870-5-104 and issues approved
+  control (tap changes, scheduled switching). During the capture a host that is not the control
+  centre opens a persistent session to the RTU, sends STARTDT and issues breaker control commands
+  (select-before-operate) that trip closed feeders. The RTU opens the breakers and reports the new
+  position; the operators never requested it. Who sent the commands, to which RTU, and which
+  feeders went dark.
+
+briefing: |
+  You are the OT SOC analyst for the {site_name} distribution substation ({domain}),
+  {process_title}. The attached capture comes from the SPAN port of the station LAN switch
+  ({sensor_subnet}). Only the SCADA master at the control centre is authorised to control the RTU
+  over IEC 60870-5-104 (TCP 2404). During the shift one or more feeder breakers opened and dropped
+  load, yet the control centre logged no switching order. Work out who commanded the breakers: find
+  every host that sent control commands (type C_SC_NA_1, cause activation) to the RTU, identify the
+  one that is not the control-centre master, and list the breakers it opened. The RTU signal list
+  (information object addresses) is included below.
+
+mitre:
+  - {framework: ics, id: T0855, name: Unauthorized Command Message}
+  - {framework: ics, id: T0831, name: Manipulation of Control}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [gpz, rpz, sde, nse]
+  start_hours: [6, 21]
+  weekdays: [0, 1, 2, 3, 4, 5]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: rtu, device: abb-rtu560, subnet: control, name: "rtu-{code}-01"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "SCADA-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.attacker_host == 'rogue'"}
+    - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.attacker_host == 'itpc'"}
+
+actors:
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: rtu_104
+    type: iec104.server
+    hosts: rtu
+    params: {process: power_substation}
+  - id: scada_104
+    type: iec104.client
+    hosts: hmi
+    # Approved control centre: clock sync, general interrogation, scheduled tap / switching, counters.
+    params: {targets: rtu, setpoint_interval_s: "${vars.setpoint_interval_s}", switching_interval_s: "${vars.switching_interval_s}"}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian]
+    when: vars.ntp
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The incident: an unapproved host opens feeder breakers over IEC 104 (select-before-operate).
+  - id: inject
+    type: iec104.command_injection
+    hosts: "${vars.attacker_host}"
+    incident: true
+    params:
+      targets: rtu
+      breakers: "${vars.breakers}"
+      start: "${vars.start}"
+      spread: "${vars.spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      attacker_host: rogue
+      breakers: 1
+      start: [0.45, 0.65]
+      spread: 60
+      setpoint_interval_s: 0
+      switching_interval_s: 0
+      dns: false
+      ntp: true
+      chatter: false
+      ipv6: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      attacker_host: itpc
+      breakers: 1
+      start: [0.35, 0.6]
+      spread: 300
+      setpoint_interval_s: 1200
+      switching_interval_s: 2700
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 1
+      ipv6: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      attacker_host: itpc
+      breakers: 2
+      start: [0.25, 0.7]
+      spread: 1800
+      setpoint_interval_s: 1200
+      switching_interval_s: 2700
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 2
+      ipv6: true
+
+questions:
+  - id: source_ip
+    text: Which IP address issued the IEC 104 breaker control commands?
+    answer: "${facts.inject.source.ip}"
+    type: ip
+    points: 15
+    hint: List every host sending type C_SC_NA_1 (TypeId 45) with cause activation to the RTU. Only the control-centre master is approved; any other source is the answer.
+    check:
+      filter: "iec60870_asdu.typeid == 45 && iec60870_asdu.causetx == 6 && iec60870_asdu.sco.se == 0 && ip.src == ${facts.inject.source.ip}"
+      expect: {min: "${facts.inject.command_count}"}
+    hunt:
+      dataset: iec104
+      spl: "index=* sourcetype=pcapforge:iec104 category=control cot=6 | stats count AS commands values(type) AS types values(dest) AS rtus BY src | sort - commands"
+      kql: "category : \"control\" and cot : 6"
+      look_for: Every host that sends control commands to the RTU. The control-centre master is the approved source; any other is the attacker.
+  - id: source_mac
+    text: Which MAC address did the sensor see on the frames carrying those commands?
+    answer: "${facts.inject.source.observed_mac}"
+    type: mac
+    points: 5
+    hint: A source outside the station LAN arrives with the MAC of the router that forwarded it, not of the originating host.
+    check:
+      filter: "iec60870_asdu.typeid == 45 && iec60870_asdu.causetx == 6 && ip.src == ${facts.inject.source.ip} && eth.src == ${facts.inject.source.observed_mac}"
+      expect: {min: 1}
+    hunt:
+      dataset: iec104
+      spl: "index=* sourcetype=pcapforge:iec104 category=control cot=6 src=${facts.inject.source.ip} | stats count BY src, src_mac"
+      kql: "category : \"control\" and src : \"${facts.inject.source.ip}\""
+      look_for: src_mac is the MAC on the wire; for a routed source it is the firewall's, not the host's.
+  - id: target_ip
+    text: Which RTU (IP address) received the unauthorized breaker commands?
+    answer: "${facts.inject.target.ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "iec60870_asdu.typeid == 45 && iec60870_asdu.causetx == 6 && ip.src == ${facts.inject.source.ip} && ip.dst == ${facts.inject.target.ip}"
+      expect: {min: "${facts.inject.command_count}"}
+    hunt:
+      dataset: iec104
+      spl: "index=* sourcetype=pcapforge:iec104 category=control cot=6 src=${facts.inject.source.ip} | stats count BY dest"
+      kql: "category : \"control\" and src : \"${facts.inject.source.ip}\""
+      look_for: The RTU the attacker's commands were sent to.
+  - id: breakers_opened
+    text: Which breaker control points did the source open? (register map names)
+    answer: "${facts.inject.breakers_opened}"
+    type: set
+    points: 15
+    hint: Each executed command (S/E = execute, SCS = off) carries an information object address. Map the IOAs to the breaker close commands in the RTU signal list.
+    check:
+      filter: "iec60870_asdu.typeid == 45 && iec60870_asdu.causetx == 6 && iec60870_asdu.sco.se == 0 && iec60870_asdu.sco.on == 0 && ip.src == ${facts.inject.source.ip}"
+      expect: {min: "${facts.inject.command_count}"}
+    hunt:
+      dataset: iec104
+      spl: "index=* sourcetype=pcapforge:iec104 type=C_SC_NA_1 cot=6 select=false src=${facts.inject.source.ip} | stats count BY ioa{}"
+      kql: "type : \"C_SC_NA_1\" and src : \"${facts.inject.source.ip}\""
+      look_for: The IOAs the attacker executed; map each to its breaker close command (switch commands are numbered from 6001) in the signal list.
+  - id: first_command
+    text: At what time (UTC) was the first unauthorized command (the first select) sent?
+    answer: "${facts.inject.first_command.time}"
+    type: timestamp
+    tolerance_s: 1
+    points: 10
+    check:
+      filter: "frame.number == ${facts.inject.first_command.frame} && ip.src == ${facts.inject.source.ip} && iec60870_asdu.typeid == 45"
+      expect: {count: 1}
+    hunt:
+      dataset: iec104
+      spl: "index=* sourcetype=pcapforge:iec104 category=control cot=6 src=${facts.inject.source.ip} | sort 0 epoch | head 1 | table ts type ioa{} select frame"
+      kql: "category : \"control\" and src : \"${facts.inject.source.ip}\""
+      look_for: The earliest control frame from the source; its frame is the select to open in Wireshark.
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique best describes opening breakers with IEC 104 commands from an unapproved host?
+    answer: T0855
+    accept: [T0855, "Unauthorized Command Message", T0831, "Manipulation of Control"]
+    type: text
+    points: 10
+    hunt:
+      dataset: iec104
+      spl: "index=* sourcetype=pcapforge:iec104 category=control cot=6 | stats count BY src, dest"
+      kql: "category : \"control\" and cot : 6"
+      look_for: Commands from a host not authorised to issue them are Unauthorized Command Message (T0855); tripping the feeders is Manipulation of Control (T0831).
+
+translations:
+  pl:
+    title: Nieautoryzowane sterowanie wyłącznikami przez IEC 104 w stacji rozdzielczej
+    briefing: |
+      Jesteś analitykiem OT SOC stacji rozdzielczej {site_name} ({domain}), {process_title}.
+      Załączone nagranie pochodzi z portu SPAN przełącznika sieci stacyjnej ({sensor_subnet}).
+      Sterować RTU przez IEC 60870-5-104 (TCP 2404) może wyłącznie master SCADA w centrum sterowania.
+      W trakcie zmiany jeden lub więcej wyłączników pól otworzyło się i zrzuciło obciążenie, a centrum
+      sterowania nie zarejestrowało żadnego polecenia łączeniowego. Ustal, kto wydał polecenia:
+      znajdź każdy host wysyłający polecenia sterujące (typ C_SC_NA_1, przyczyna aktywacja) do RTU,
+      wskaż ten, który nie jest masterem centrum sterowania, i wypisz otwarte wyłączniki. Lista
+      sygnałów RTU (adresy obiektów informacji) znajduje się poniżej.
+    questions:
+      source_ip:
+        text: Z jakiego adresu IP wysłano polecenia sterujące wyłącznikami przez IEC 104?
+        hint: Wypisz każdy host wysyłający typ C_SC_NA_1 (TypeId 45) z przyczyną aktywacja do RTU. Uprawniony jest tylko master centrum sterowania; każdy inny to odpowiedź.
+      source_mac:
+        text: Jaki adres MAC widział sensor na ramkach niosących te polecenia?
+        hint: Źródło spoza sieci stacyjnej przychodzi z adresem MAC routera, który je przekazał, a nie hosta źródłowego.
+      target_ip:
+        text: Który RTU (adres IP) otrzymał nieautoryzowane polecenia wyłącznikowe?
+      breakers_opened:
+        text: Które punkty sterowania wyłącznikami źródło otworzyło? (nazwy z mapy rejestrów)
+        hint: Każde wykonane polecenie (S/E = wykonanie, SCS = otwórz) niesie adres obiektu informacji. Zmapuj IOA na polecenia zamknięcia wyłączników z listy sygnałów RTU.
+      first_command:
+        text: O której godzinie (UTC) wysłano pierwsze nieautoryzowane polecenie (pierwszy wybór)?
+      technique:
+        text: Która technika MITRE ATT&CK for ICS najlepiej opisuje otwieranie wyłączników poleceniami IEC 104 z nieuprawnionego hosta?
+  de:
+    title: Unautorisierte IEC-104-Leistungsschaltersteuerung in einem Verteilumspannwerk
+    briefing: |
+      Sie sind Analyst im OT-SOC des Verteilumspannwerks {site_name} ({domain}), {process_title}.
+      Der beigefügte Mitschnitt stammt vom SPAN-Port des Stationsnetz-Switches ({sensor_subnet}).
+      Nur der SCADA-Master in der Leitstelle darf die RTU über IEC 60870-5-104 (TCP 2404) steuern.
+      Während der Schicht öffneten sich ein oder mehrere Abgangsschalter und warfen Last ab, obwohl die
+      Leitstelle keinen Schaltbefehl protokollierte. Klären Sie, wer die Schalter befehligt hat: Finden
+      Sie jeden Host, der Steuerbefehle (Typ C_SC_NA_1, Ursache Aktivierung) an die RTU sendet,
+      bestimmen Sie den, der nicht der Leitstellen-Master ist, und listen Sie die geöffneten Schalter
+      auf. Die Signalliste der RTU (Informationsobjektadressen) finden Sie unten.
+    questions:
+      source_ip:
+        text: Von welcher IP-Adresse wurden die IEC-104-Leistungsschalter-Steuerbefehle gesendet?
+        hint: Listen Sie jeden Host auf, der Typ C_SC_NA_1 (TypeId 45) mit Ursache Aktivierung an die RTU sendet. Berechtigt ist nur der Leitstellen-Master; jede andere Quelle ist die Antwort.
+      source_mac:
+        text: Welche MAC-Adresse sah der Sensor auf den Frames mit diesen Befehlen?
+        hint: Eine Quelle außerhalb des Stationsnetzes kommt mit der MAC des weiterleitenden Routers, nicht des Ursprungshosts.
+      target_ip:
+        text: Welche RTU (IP-Adresse) erhielt die unautorisierten Leistungsschalterbefehle?
+      breakers_opened:
+        text: Welche Leistungsschalter-Steuerpunkte hat die Quelle geöffnet? (Namen aus der Registertabelle)
+        hint: Jeder ausgeführte Befehl (S/E = Ausführung, SCS = Aus) trägt eine Informationsobjektadresse. Ordnen Sie die IOAs den Schalter-Schließbefehlen in der Signalliste der RTU zu.
+      first_command:
+        text: Um welche Uhrzeit (UTC) wurde der erste unautorisierte Befehl (die erste Auswahl) gesendet?
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das Öffnen von Leistungsschaltern per IEC-104-Befehl von einem nicht autorisierten Host am besten?

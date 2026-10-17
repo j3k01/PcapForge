@@ -744,8 +744,8 @@ def _hunting(answers: dict, rules: list[Rule]) -> str:
         "Instructor material: contains the answers.",
         "",
         "Wireshark display filters come from the answer key and are machine-verified by "
-        "`pcapforge verify` (expected frame counts shown). **SPL and KQL queries are generated "
-        "from scenario templates and have not been machine-verified against Splunk or Elastic.**",
+        "`pcapforge verify` (expected frame counts shown). The SPL and KQL queries come from the "
+        "scenario and are tested against Splunk and Elasticsearch loaded as described below.",
         "",
         "## Loading the SIEM export",
         "",
@@ -761,6 +761,9 @@ def _hunting(answers: dict, rules: list[Rule]) -> str:
         "  TIMESTAMP_FIELDS = ts",
         "  TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%6NZ",
         "  TZ = UTC",
+        "  # capture dates are drawn per seed and can lie months ahead of (or years behind) today",
+        "  MAX_DAYS_HENCE = 3650",
+        "  MAX_DAYS_AGO = 10951",
         "  ```",
         "",
         "- Elastic: one index per file named `pcapforge-<dataset>` (e.g. `pcapforge-modbus`); map "
@@ -802,9 +805,9 @@ def _hunting(answers: dict, rules: list[Rule]) -> str:
                       f"- `{hunt['wireshark']}`", ""]
         dataset = hunt.get("dataset", "modbus")
         if hunt.get("spl"):
-            lines += ["**Splunk SPL** (not machine-verified):", "", "```spl", hunt["spl"], "```", ""]
+            lines += ["**Splunk SPL**:", "", "```spl", hunt["spl"], "```", ""]
         if hunt.get("kql"):
-            lines += [f"**Kibana KQL** on `pcapforge-{dataset}` (not machine-verified):", "",
+            lines += [f"**Kibana KQL** on `pcapforge-{dataset}`:", "",
                       "```kql", hunt["kql"], "```", ""]
         if hunt.get("look_for"):
             lines += [f"**What to look for:** {hunt['look_for']}", ""]

@@ -223,8 +223,8 @@ questions:
       expect: {min: 1}
     hunt:
       dataset: modbus
-      spl: "index=* sourcetype=pcapforge:modbus exception=illegal_data_address dest=${facts.scan.source.ip}"
-      kql: "exception : \"illegal_data_address\""
+      spl: "index=* sourcetype=pcapforge:modbus exception=illegal_data_address src=${facts.scan.source.ip} | stats count BY dest, exception, table, address, quantity"
+      kql: "exception : \"illegal_data_address\" and src : \"${facts.scan.source.ip}\""
       look_for: The PLC answers an out-of-range read with exception 2 (illegal data address) until the scanner finds the real table size.
   - id: technique
     text: Which MITRE ATT&CK for ICS technique best describes reading the PLC identities and register map?

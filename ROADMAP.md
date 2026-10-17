@@ -19,7 +19,6 @@ Effort: **S** = hours, **M** = 1–3 days, **L** = a week or more.
 Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ### Next up (open items, highest value first)
-- Detection: validated SPL/KQL (section 5).
 - IT line: benign HTTPS, DHCP and AD baselines, then IT scenarios (section 3).
 - Platform: PyPI distribution name, Docker image, docs site, macOS check (section 6).
 
@@ -55,8 +54,22 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
   - [x] alarm-threshold masking followed by a setpoint change (T0878, T0836, T0855):
     `ot-modbus-alarm-masking` (`modbus.alarm_mask` actor — blinds an alarm threshold, then pushes the
     setpoint it guarded out of band, in that order).
+  - [x] IEC 60870-5-104 unauthorized breaker control (T0855, T0831): `ot-iec104-command-injection`
+    (`iec104.command_injection` actor — an unapproved host opens feeder breakers on a substation RTU
+    with select-before-operate C_SC_NA_1 commands);
+  - [x] DNP3 unauthorized control (T0855, T0831): `ot-dnp3-control-injection`
+    (`dnp3.control_injection` actor — a non-master latches actuators off on a water/wastewater
+    outstation with select-before-operate CROB commands);
+  - [x] BACnet unauthorized write (T0855, T0836): `ot-bacnet-unauthorized-write`
+    (`bacnet.write_injection` actor — a non-BMS host overrides building-controller setpoints with
+    WriteProperty at a high command priority);
+  - [x] EtherNet/IP drive manipulation (T0855, T0831): `ot-enip-drive-manipulation`
+    (`enip.io_injection` actor — an unapproved originator opens a Forward_Open to a PowerFlex drive
+    and forces its speed reference over class 1 I/O).
+  The non-Modbus incidents are detected by the generic "command / write / Forward_Open from a host
+  other than the approved master" Suricata and Sigma rules already generated for each protocol.
 - [x] **Baseline-only scenario** (S): `ot-baseline-operations` covers normal operation for all four process profiles, with no incident. The questions cover HMI, poll cycle, PLC count, read function codes, approved writes and writer, time source and OPC UA server.
-- [x] **More protocols as background actors** (M each): IEC 60870-5-104 (`iec104.*`, substation RTU), DNP3 (`dnp3.*`, RTAC at water/wastewater plants), BACnet/IP (`bacnet.*`, building controllers with COV) and EtherNet/IP/CIP (`enip.*`, CompactLogix tag reads). Hand-written with the standard library rather than `c104` / `bacpypes3` (deterministic, no background timers); wired into `ot-baseline-operations` and `ot-modbus-write-manipulation` on medium/hard (`vars.telecontrol` picks the outstation for the drawn process, `vars.enip`). Also done: IEC 104 setpoint / switching commands and counter interrogation, DNP3 unsolicited responses (used in the shipped scenarios), BACnet WriteProperty with priority array and a BBMD with a foreign-device BMS server, EtherNet/IP class 1 implicit I/O to a PowerFlex 525 (UDP 2222), SIEM datasets (`iec104`, `dnp3`, `bacnet`, `enip`) and Suricata / Sigma rules for these protocols. Still open: incident scenarios over these protocols.
+- [x] **More protocols as background actors** (M each): IEC 60870-5-104 (`iec104.*`, substation RTU), DNP3 (`dnp3.*`, RTAC at water/wastewater plants), BACnet/IP (`bacnet.*`, building controllers with COV) and EtherNet/IP/CIP (`enip.*`, CompactLogix tag reads). Hand-written with the standard library rather than `c104` / `bacpypes3` (deterministic, no background timers); wired into `ot-baseline-operations` and `ot-modbus-write-manipulation` on medium/hard (`vars.telecontrol` picks the outstation for the drawn process, `vars.enip`). Also done: IEC 104 setpoint / switching commands and counter interrogation, DNP3 unsolicited responses, BACnet WriteProperty with priority array and a BBMD with a foreign-device BMS server, EtherNet/IP class 1 implicit I/O to a PowerFlex 525 (UDP 2222), SIEM datasets (`iec104`, `dnp3`, `bacnet`, `enip`) and Suricata / Sigma rules for these protocols. Incident scenarios over all four now ship (see above).
 - [x] **Process-model polish** (S): translated process titles (pl), point descriptions on every register, and a vendor register-numbering convention in the handout (`register_style`, Modicon 4xxxx/3xxxx/1xxxx; the wire stays 0-based). 32-bit floats across two registers: a point may be `type: float32` (IEEE 754 in two registers, profile `word_order` `big` = ABCD or `little` = CDAB); `power_substation` (ABCD) and `hvac_building` (CDAB) use them for their analog values. Facts carry the written words as `registers`, the SIEM export decodes per point, the handout map shows the type, and float setpoints get exact Suricata band rules (`byte_test` on the IEEE 754 bit pattern of a Write Multiple Registers request starting at the point).
 
 ## 3. IT line (benign equivalents only, see CONTRIBUTING.md)
@@ -82,7 +95,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 ## 5. Detection engineering
 
 - [~] **Suricata rules.** Generated rules exist and are tested against Suricata 7 in WSL. Still to do: confirm in the CI log that the Suricata tests run rather than being skipped.
-- [ ] **Validate SPL/KQL hunting queries** (M) against real Splunk and Elastic, e.g. Docker images in a separate CI job.
+- [x] **Validate SPL/KQL hunting queries** (M): `tests/test_siem_queries.py` loads the export of every scenario and level into Splunk Enterprise 10.6 (oneshot inputs with the documented `props.conf`) and Elasticsearch 9.5 (mappings and timestamp pipeline from the find-structure API Kibana's file upload uses) and runs every hunt query (KQL through the Elasticsearch `kql` query): no errors, at least one match, and a text answer that is a field value of the dataset must be in the results. Separate CI job `siem-queries` with the official Docker images; verified locally against the same versions in WSL. It found an enumeration SPL that filtered on the wrong side of the transaction and future-dated captures that Splunk stamped with the indexing time (fixed with `MAX_DAYS_HENCE` / `MAX_DAYS_AGO` in the props). Still open: the CI job has not run yet (no Docker on the dev machine), and Kibana's own KQL parser is not exercised.
 - [x] **Zeek output** (M): `generate --zeek` / `export --zeek` run a local Zeek (or the `zeek/zeek:lts` Docker image) in deterministic mode and keep its JSON logs in `zeek/` (conn, dns, ntp, dhcp, modbus, dnp3, known hosts/services/Modbus masters and slaves, Modbus register changes); `Site::local_nets` = the scenario's subnets. Tested against Zeek 8.0.10 LTS in WSL: every incident write is in modbus.log at its frame's time, and on easy Zeek's Modbus requests equal the pcapforge export and there is no weird.log. Still open: the Docker path is untested (no Docker on the dev machine), and Zeek has no default analyzers for S7comm, OPC UA, IEC 104, BACnet or EtherNet/IP (ICSNPP packages would add them).
 - [x] **Sigma rules** (S): `detections/sigma/*.yml` over the exported JSONL (`logsource: {product: pcapforge, service: <dataset>}`): unapproved writer, out-of-band write, device identification, Modbus connection from an unexpected host (flows dataset), new host on the control LAN (DHCP), and per scenario: reads rejected with Illegal Data Address (register enumeration, discovery), alarm acknowledge / reset coil write (coil manipulation), alarm threshold written out of band (alarm masking), plus two Sigma 2.0 correlations shipped with their base rules — a port-502 sweep (value_count of destinations per source, discovery) and the same point set to the same value by two hosts (command replay). Generated from `answers.json`; converted with sigma-cli 3.1 (splunk, esql); the tests evaluate every rule on the export of its scenario and on `ot-baseline-operations` (no hits).
 

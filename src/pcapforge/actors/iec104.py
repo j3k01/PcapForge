@@ -30,7 +30,7 @@ from pcapforge import ports
 from pcapforge.actors import register
 from pcapforge.actors.base import Actor
 from pcapforge.actors.modbus import host_process, host_sim
-from pcapforge.plan import host_ref
+from pcapforge.plan import action_ref, host_ref
 from pcapforge.process import Point, ProcessProfile
 from pcapforge.scenario import ScenarioError
 
@@ -917,6 +917,101 @@ class Iec104Client(Actor):
             command = self.servers[a["target"]].stations[a["target"]].command(a["ioa"])
             rt.clients[key].operate(command, a["ca"], a["value"], action.op == "iec104.select", now)
         elif action.op == "iec104.close":
+            session = rt.clients.pop(key)
+            try:
+                session.stop(now)
+            finally:
+                session.close()
+        else:
+            raise ValueError(f"unknown op {action.op}")
+
+    def close(self, rt) -> None:
+        for key in [k for k in rt.clients if k[0] == self.id]:
+            rt.clients.pop(key).close()
+
+
+@register
+class Iec104CommandInjection(Actor):
+    """Unauthorized control from a host outside the approved telecontrol path: the attacker opens
+    the TCP session to an RTU, issues STARTDT and sends one or more breaker control commands
+    (C_SC_NA_1, select-before-operate) that open feeder breakers that were closed - an outage the
+    SCADA master never requested. The RTU returns the new breaker position, which the master sees
+    as a spontaneous change. MITRE ATT&CK for ICS: Unauthorized Command Message (T0855) and
+    Manipulation of Control (T0831)."""
+
+    type = "iec104.command_injection"
+
+    def plan(self) -> None:
+        plan, rng = self.plan_, self.rng
+        host = self.hosts[0]
+        target = rng.choice(plan.topology.select(self.param("targets")))
+        server, station = serving_rtu(plan, target.id)
+        self.servers = {target.id: server}
+        ca = station.common_address
+        # Closed breakers the attacker can trip: single commands with a position feedback whose
+        # normal state is closed (nominal >= 0.5). Opening them (value 0) drops the feeder.
+        breakers = [c for c in station.commands if c.type_id == C_SC_NA_1 and c.feedback is not None
+                    and c.point.name.endswith("_cb_close") and c.point.nominal >= 0.5]
+        if not breakers:
+            raise ScenarioError(f"{self.type} '{self.id}': RTU '{station.profile.id}' has no closed feeder "
+                                "breaker to open")
+        count = max(1, min(int(self.param("breakers", 1)), len(breakers)))
+        chosen = sorted(rng.sample(breakers, count), key=lambda c: c.ioa)
+        start_lo, start_hi = self.span(self.param("start", [0.35, 0.6]))
+        spread = min(float(self.param("spread", 120)), plan.duration * 0.4)
+        t0 = plan.duration * rng.uniform(start_lo, start_hi)
+        t0 = min(t0, max(plan.duration - spread - 30, plan.duration * 0.1))
+
+        plan.add(t0, self.id, host.id, "iec104ci.connect", phase="setup", target=target.id)
+        commands, first = [], None
+        t = t0 + rng.uniform(0.05, 0.3)
+        for index, command in enumerate(chosen):
+            select_t = t if count == 1 else t0 + rng.uniform(0.1, 0.4) + index * (spread / max(count - 1, 1))
+            execute_t = select_t + rng.uniform(1.0, 4.0)
+            args = {"target": target.id, "ca": ca, "ioa": command.ioa, "value": 0}
+            select = plan.add(select_t, self.id, host.id, "iec104ci.select", **args)
+            operate = plan.add(execute_t, self.id, host.id, "iec104ci.execute", **args)
+            plan.add(execute_t + rng.uniform(0.2, 0.8), server.id, target.id, "iec104.terminate",
+                     ioa=command.ioa, lag_ms=round(rng.uniform(1.0, 20.0), 1))
+            first = first or select
+            commands.append({"ioa": command.ioa, "point": command.point.name, "desc": command.point.desc,
+                             "type": TYPE_NAMES[C_SC_NA_1], "value": 0, "action": "open",
+                             "feedback_ioa": command.feedback.ioa, "status_point": command.feedback.point.name,
+                             "select_before_operate": True, "select": action_ref(select),
+                             "request": action_ref(operate)})
+            plan.event(operate, self.id, f"Open breaker {command.point.name} on {target.id}",
+                       ["T0855", "T0831"], point=command.point.name, ioa=command.ioa)
+        plan.add(plan.duration + 1.0, self.id, host.id, "iec104ci.close", phase="teardown", target=target.id)
+
+        plan.facts[self.id] = {
+            "source": host_ref(host.id),
+            "target": host_ref(target.id),
+            "common_address": ca,
+            "command_count": len(commands),
+            "commands": commands,
+            "breakers_opened": [c["point"] for c in commands],
+            "status_points": [c["status_point"] for c in commands],
+            "ioas": [c["ioa"] for c in commands],
+            "type": TYPE_NAMES[C_SC_NA_1],
+            "first_command": action_ref(first),
+        }
+
+    def execute(self, action, rt) -> None:
+        a = action.args
+        key = (self.id, action.host, a["target"])
+        now = rt.clock.t
+        if action.op == "iec104ci.connect":
+            session = Iec104Session(rt.loopback(action.host), rt.loopback(a["target"]))
+            try:
+                session.start(now, self.servers[a["target"]].links)
+            except BaseException:
+                session.close()
+                raise
+            rt.clients[key] = session
+        elif action.op in ("iec104ci.select", "iec104ci.execute"):
+            command = self.servers[a["target"]].stations[a["target"]].command(a["ioa"])
+            rt.clients[key].operate(command, a["ca"], a["value"], action.op == "iec104ci.select", now)
+        elif action.op == "iec104ci.close":
             session = rt.clients.pop(key)
             try:
                 session.stop(now)

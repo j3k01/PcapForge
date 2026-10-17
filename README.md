@@ -111,6 +111,10 @@ And the matching entry in `answers.json`:
 | `ot-modbus-command-replay` | T0855, T0831 | An unapproved host re-sends operator commands off-cycle; every value is in band. |
 | `ot-modbus-coil-manipulation` | T0855, T0831 (+T0878 with ack) | Coil writes force actuators out of their normal state; medium/hard also acknowledge the alarm. |
 | `ot-modbus-alarm-masking` | T0878, T0836, T0855 | An alarm threshold is moved out of band first, then the setpoint it was guarding. |
+| `ot-iec104-command-injection` | T0855, T0831 | An unapproved host opens feeder breakers on a substation RTU over IEC 60870-5-104. |
+| `ot-bacnet-unauthorized-write` | T0855, T0836 | An unapproved host overrides building-controller setpoints with BACnet WriteProperty at high priority. |
+| `ot-dnp3-control-injection` | T0855, T0831 | An unapproved host latches actuators off on a water/wastewater outstation with DNP3 control-relay commands. |
+| `ot-enip-drive-manipulation` | T0855, T0831 | An unapproved host opens an EtherNet/IP I/O connection to a PowerFlex drive and forces its speed reference. |
 | `ot-baseline-operations` | none | Normal operations only, for baselining and false-positive tuning. |
 
 Every scenario has easy, medium and hard. In `ot-modbus-write-manipulation`, easy is 15 minutes with two

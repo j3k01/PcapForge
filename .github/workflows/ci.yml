@@ -33,4 +33,57 @@ jobs:
           /opt/zeek/bin/zeek --version
       - run: pip install -e .[test,opcua,s7]
       - run: pcapforge validate
-      - run: pytest -q
+      - run: pytest -q --ignore=tests/test_siem_queries.py  # runs in the siem-queries job
+
+  siem-queries:
+    # The hunting guide's SPL and KQL against a real Splunk and Elasticsearch (tests/test_siem_queries.py).
+    runs-on: ubuntu-24.04
+    services:
+      splunk:
+        image: splunk/splunk:10.6.0.5
+        env:
+          SPLUNK_START_ARGS: --accept-license
+          SPLUNK_GENERAL_TERMS: --accept-sgt-current-at-splunk-com
+          SPLUNK_PASSWORD: pcapforge-ci-1
+        ports:
+          - 8089:8089
+        volumes:
+          # oneshot inputs read the exported files from the same path inside the container
+          - /tmp/pcapforge-spool:/tmp/pcapforge-spool
+      elasticsearch:
+        image: elasticsearch:9.5.5
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms1g -Xmx1g
+        ports:
+          - 9200:9200
+    env:
+      PCAPFORGE_SPLUNK_URL: https://localhost:8089
+      PCAPFORGE_SPLUNK_AUTH: admin:pcapforge-ci-1
+      PCAPFORGE_SPLUNK_SPOOL: /tmp/pcapforge-spool
+      PCAPFORGE_ELASTIC_URL: http://localhost:9200
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Wireshark >= 4.4 CLI tools with loopback capture rights
+        run: |
+          sudo add-apt-repository -y ppa:wireshark-dev/stable
+          echo "wireshark-common wireshark-common/install-setuid boolean false" | sudo debconf-set-selections
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
+          sudo setcap cap_net_raw,cap_net_admin=eip "$(command -v dumpcap)"
+          sudo ip route add local 127.77.0.0/16 dev lo table local quickack 1
+      - run: pip install -e .[test,opcua,s7]
+      - name: Wait for Splunk and Elasticsearch
+        run: |
+          sudo chmod 777 /tmp/pcapforge-spool
+          for i in $(seq 120); do
+            curl -sfk -u "$PCAPFORGE_SPLUNK_AUTH" "$PCAPFORGE_SPLUNK_URL/services/server/info" > /dev/null \
+              && curl -sf "$PCAPFORGE_ELASTIC_URL/_cluster/health?wait_for_status=yellow" > /dev/null && exit 0
+            sleep 5
+          done
+          exit 1
+      - run: pytest -q -rs tests/test_siem_queries.py

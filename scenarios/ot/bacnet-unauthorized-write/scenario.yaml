@@ -1,0 +1,278 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: ot-bacnet-unauthorized-write
+title: Unauthorized BACnet setpoint override at a building-automation controller
+line: ot
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [bacnet, bacnet-ip, ics, building-automation, hvac, bms, setpoint, ot]
+summary: >
+  A BMS operator workstation polls the building controllers over BACnet/IP and issues approved
+  setpoint overrides (WriteProperty at priority 8, relinquished later). During the capture a host
+  that is not the BMS workstation sends WriteProperty requests at a high command priority to
+  commandable setpoints on a controller, driving zone and plant setpoints outside their normal
+  band. The controller accepts the commands and writes the new present value; the operators never
+  requested it. Who sent the writes, to which controller, and which setpoints were overridden.
+
+briefing: |
+  You are the OT SOC analyst for the {site_name} building-automation system ({domain}),
+  {process_title}. The attached capture comes from the SPAN port of the building LAN switch
+  ({sensor_subnet}). Only the BMS operator workstation is authorised to command the controllers
+  over BACnet/IP (UDP 47808). During the shift several HVAC setpoints jumped outside their normal
+  operating band, yet the BMS logged no operator override. Work out who commanded the controller:
+  find every host that sent WriteProperty requests (confirmed service 15) to a controller, identify
+  the one that is not the BMS workstation, and list the setpoints it overrode. The controller's
+  object list (BACnet object identifiers) is included below.
+
+mitre:
+  - {framework: ics, id: T0855, name: Unauthorized Command Message}
+  - {framework: ics, id: T0836, name: Modify Parameter}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [bmc, nca, wsc, hub]
+  start_hours: [7, 20]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: control
+  subnets:
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+    - {id: plant_it, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [control, plant_it], name: "fw-{code}-01", router: true}
+    - {id: ddc, count: 2, device: siemens-pxc, subnet: control, name: "pxc-{code}-{index:02d}"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "BMS-{CODE}-WS01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: bmssrv, device: windows-server-vm, subnet: plant_it, name: "BMSSRV-{CODE}-01"}
+    - {id: dc, device: windows-server-vm, subnet: plant_it, name: "DC-{CODE}-01"}
+    - {id: rogue, device: raspberry-pi, subnet: control, name: "raspberrypi", when: "vars.attacker_host == 'rogue'"}
+    - {id: itpc, device: linux-laptop, subnet: plant_it, name: "lt-{code}-ops07", when: "vars.attacker_host == 'itpc'"}
+
+actors:
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: ddc_bacnet
+    type: bacnet.server
+    hosts: ddc
+    params: {process: hvac_building}
+  - id: bms_bacnet
+    type: bacnet.client
+    hosts: hmi
+    # Approved BMS operator workstation: discovery, COV subscriptions, polls and setpoint overrides
+    # (WriteProperty at priority 8, relinquished later).
+    params: {targets: ddc, poll_s: 30, writes: 3}
+  - id: bmssrv_bacnet
+    type: bacnet.client
+    hosts: bmssrv
+    # Approved BMS server in plant IT: foreign device registered with the BBMD on pxc-01, trend collection.
+    params: {targets: ddc, bbmd: ddc1, poll_s: 300, cov: 0, whois_s: 900}
+  - id: name_lookups
+    type: dns.client
+    hosts: [hmi, historian]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [hmi, historian]
+    when: vars.ntp
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [hmi, historian]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The incident: an unapproved host overrides setpoints out of band over BACnet/IP (WriteProperty).
+  - id: inject
+    type: bacnet.write_injection
+    hosts: "${vars.attacker_host}"
+    incident: true
+    params:
+      targets: ddc
+      writes: "${vars.writes}"
+      priority: "${vars.priority}"
+      start: "${vars.start}"
+      spread: "${vars.spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      attacker_host: rogue
+      writes: 1
+      priority: 1
+      start: [0.45, 0.65]
+      spread: 60
+      dns: false
+      ntp: true
+      chatter: false
+      ipv6: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 20, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      attacker_host: itpc
+      writes: 2
+      priority: 2
+      start: [0.35, 0.6]
+      spread: 300
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 1
+      ipv6: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 120, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      attacker_host: itpc
+      writes: 3
+      priority: 1
+      start: [0.25, 0.7]
+      spread: 1800
+      dns: true
+      ntp: true
+      chatter: true
+      chatter_rate: 2
+      ipv6: true
+
+questions:
+  - id: source_ip
+    text: Which IP address issued the BACnet setpoint override commands?
+    answer: "${facts.inject.source.ip}"
+    type: ip
+    points: 15
+    hint: List every host sending WriteProperty (confirmed service 15) to a controller. Only the BMS operator workstation is approved; any other source is the answer.
+    check:
+      filter: "bacapp.confirmed_service == 15 && ip.dst == ${facts.inject.target.ip} && ip.src == ${facts.inject.source.ip}"
+      expect: {min: "${facts.inject.command_count}"}
+    hunt:
+      dataset: bacnet
+      spl: "index=* sourcetype=pcapforge:bacnet apdu_type=confirmed_request service=write_property | stats count AS writes values(object_type) AS object_types values(dest) AS controllers BY src | sort - writes"
+      kql: "apdu_type : \"confirmed_request\" and service : \"write_property\""
+      look_for: Every host that writes to a controller. The BMS operator workstation is the approved source; any other is the attacker.
+  - id: source_mac
+    text: Which MAC address did the sensor see on the frames carrying those writes?
+    answer: "${facts.inject.source.observed_mac}"
+    type: mac
+    points: 5
+    hint: A source outside the building LAN arrives with the MAC of the router that forwarded it, not of the originating host.
+    check:
+      filter: "bacapp.confirmed_service == 15 && ip.src == ${facts.inject.source.ip} && eth.src == ${facts.inject.source.observed_mac}"
+      expect: {min: 1}
+    hunt:
+      dataset: bacnet
+      spl: "index=* sourcetype=pcapforge:bacnet service=write_property src=${facts.inject.source.ip} | stats count BY src, src_mac"
+      kql: "service : \"write_property\" and src : \"${facts.inject.source.ip}\""
+      look_for: src_mac is the MAC on the wire; for a routed source it is the firewall's, not the host's.
+  - id: target_ip
+    text: Which controller (IP address) received the unauthorized setpoint overrides?
+    answer: "${facts.inject.target.ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "bacapp.confirmed_service == 15 && ip.src == ${facts.inject.source.ip} && ip.dst == ${facts.inject.target.ip}"
+      expect: {min: "${facts.inject.command_count}"}
+    hunt:
+      dataset: bacnet
+      spl: "index=* sourcetype=pcapforge:bacnet service=write_property src=${facts.inject.source.ip} | stats count BY dest"
+      kql: "service : \"write_property\" and src : \"${facts.inject.source.ip}\""
+      look_for: The controller the attacker's writes were sent to.
+  - id: overridden_points
+    text: Which setpoints did the source override out of band? (object list point names)
+    answer: "${facts.inject.overridden_points}"
+    type: set
+    points: 15
+    hint: Each WriteProperty carries a BACnet object identifier (type and instance) and a present-value. Map the written objects to the setpoint names in the controller object list.
+    check:
+      filter: "bacapp.confirmed_service == 15 && ip.src == ${facts.inject.source.ip} && bacapp.present_value.real"
+      expect: {min: "${facts.inject.command_count}"}
+    hunt:
+      dataset: bacnet
+      spl: "index=* sourcetype=pcapforge:bacnet service=write_property src=${facts.inject.source.ip} | stats values(value) AS values BY object_type, instance"
+      kql: "service : \"write_property\" and src : \"${facts.inject.source.ip}\""
+      look_for: The objects (type and instance) the attacker wrote and their out-of-band values; map each instance to its setpoint name in the controller object list.
+  - id: first_command
+    text: At what time (UTC) was the first unauthorized write sent?
+    answer: "${facts.inject.first_command.time}"
+    type: timestamp
+    tolerance_s: 1
+    points: 10
+    check:
+      filter: "frame.number == ${facts.inject.first_command.frame} && ip.src == ${facts.inject.source.ip} && bacapp.confirmed_service == 15"
+      expect: {count: 1}
+    hunt:
+      dataset: bacnet
+      spl: "index=* sourcetype=pcapforge:bacnet service=write_property src=${facts.inject.source.ip} | sort 0 epoch | head 1 | table ts object_type instance value priority frame"
+      kql: "service : \"write_property\" and src : \"${facts.inject.source.ip}\""
+      look_for: The earliest WriteProperty from the source; its frame is the first override in Wireshark.
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique best describes overriding setpoints with BACnet WriteProperty from an unapproved host?
+    answer: T0855
+    accept: [T0855, "Unauthorized Command Message", T0836, "Modify Parameter"]
+    type: text
+    points: 10
+    hunt:
+      dataset: bacnet
+      spl: "index=* sourcetype=pcapforge:bacnet service=write_property | stats count BY src, dest"
+      kql: "service : \"write_property\""
+      look_for: Writes from a host not authorised to issue them are Unauthorized Command Message (T0855); changing the setpoints is Modify Parameter (T0836).
+
+translations:
+  pl:
+    title: Nieautoryzowana zmiana nastaw przez BACnet w sterowniku automatyki budynkowej
+    briefing: |
+      Jesteś analitykiem OT SOC systemu automatyki budynkowej {site_name} ({domain}), {process_title}.
+      Załączone nagranie pochodzi z portu SPAN przełącznika sieci budynkowej ({sensor_subnet}).
+      Sterować sterownikami przez BACnet/IP (UDP 47808) może wyłącznie stacja operatorska BMS.
+      W trakcie zmiany kilka nastaw HVAC wyskoczyło poza normalny zakres pracy, a BMS nie zarejestrował
+      żadnej zmiany operatorskiej. Ustal, kto wydał polecenia: znajdź każdy host wysyłający polecenia
+      WriteProperty (potwierdzona usługa 15) do sterownika, wskaż ten, który nie jest stacją operatorską
+      BMS, i wypisz nadpisane nastawy. Lista obiektów sterownika (identyfikatory obiektów BACnet)
+      znajduje się poniżej.
+    questions:
+      source_ip:
+        text: Z jakiego adresu IP wysłano polecenia zmiany nastaw przez BACnet?
+        hint: Wypisz każdy host wysyłający WriteProperty (potwierdzona usługa 15) do sterownika. Uprawniona jest tylko stacja operatorska BMS; każdy inny host to odpowiedź.
+      source_mac:
+        text: Jaki adres MAC widział sensor na ramkach niosących te zapisy?
+        hint: Źródło spoza sieci budynkowej przychodzi z adresem MAC routera, który je przekazał, a nie hosta źródłowego.
+      target_ip:
+        text: Który sterownik (adres IP) otrzymał nieautoryzowane zmiany nastaw?
+      overridden_points:
+        text: Które nastawy źródło nadpisało poza zakresem? (nazwy punktów z listy obiektów)
+        hint: Każde WriteProperty niesie identyfikator obiektu BACnet (typ i instancję) oraz wartość bieżącą. Zmapuj zapisane obiekty na nazwy nastaw z listy obiektów sterownika.
+      first_command:
+        text: O której godzinie (UTC) wysłano pierwszy nieautoryzowany zapis?
+      technique:
+        text: Która technika MITRE ATT&CK for ICS najlepiej opisuje nadpisywanie nastaw poleceniem BACnet WriteProperty z nieuprawnionego hosta?
+  de:
+    title: Unautorisierte BACnet-Sollwertänderung an einem Gebäudeautomations-Controller
+    briefing: |
+      Sie sind Analyst im OT-SOC des Gebäudeautomationssystems {site_name} ({domain}), {process_title}.
+      Der beigefügte Mitschnitt stammt vom SPAN-Port des Gebäudenetz-Switches ({sensor_subnet}).
+      Nur die BMS-Bedienstation darf die Controller über BACnet/IP (UDP 47808) steuern.
+      Während der Schicht sprangen mehrere HLK-Sollwerte aus ihrem normalen Betriebsbereich, obwohl das
+      BMS keine Bedienereingabe protokollierte. Klären Sie, wer den Controller befehligt hat: Finden Sie
+      jeden Host, der WriteProperty-Anfragen (bestätigter Dienst 15) an einen Controller sendet,
+      bestimmen Sie den, der nicht die BMS-Bedienstation ist, und listen Sie die geänderten Sollwerte
+      auf. Die Objektliste des Controllers (BACnet-Objektkennungen) finden Sie unten.
+    questions:
+      source_ip:
+        text: Von welcher IP-Adresse wurden die BACnet-Sollwertänderungsbefehle gesendet?
+        hint: Listen Sie jeden Host auf, der WriteProperty (bestätigter Dienst 15) an einen Controller sendet. Berechtigt ist nur die BMS-Bedienstation; jede andere Quelle ist die Antwort.
+      source_mac:
+        text: Welche MAC-Adresse sah der Sensor auf den Frames mit diesen Schreibvorgängen?
+        hint: Eine Quelle außerhalb des Gebäudenetzes kommt mit der MAC des weiterleitenden Routers, nicht des Ursprungshosts.
+      target_ip:
+        text: Welcher Controller (IP-Adresse) erhielt die unautorisierten Sollwertänderungen?
+      overridden_points:
+        text: Welche Sollwerte hat die Quelle außerhalb des Bereichs überschrieben? (Punktnamen aus der Objektliste)
+        hint: Jedes WriteProperty trägt eine BACnet-Objektkennung (Typ und Instanz) und einen Gegenwartswert. Ordnen Sie die geschriebenen Objekte den Sollwertnamen in der Objektliste des Controllers zu.
+      first_command:
+        text: Um welche Uhrzeit (UTC) wurde der erste unautorisierte Schreibvorgang gesendet?
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das Überschreiben von Sollwerten per BACnet-WriteProperty von einem nicht autorisierten Host am besten?

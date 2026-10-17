@@ -500,7 +500,11 @@
                   "ntp",
                   "name_resolution",
                   "arp",
-                  "dhcp"
+                  "dhcp",
+                  "iec104",
+                  "dnp3",
+                  "bacnet",
+                  "enip"
                 ],
                 "description": "SIEM export file the SPL/KQL queries search"
               },

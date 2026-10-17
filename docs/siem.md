@@ -35,6 +35,8 @@ out/ot-modbus-write-manipulation_easy_42/siem/ntp.jsonl  (33 records)
 
 Every record has `ts` (ISO-8601 UTC, microseconds, `Z`) for Splunk `_time` / Elastic `@timestamp`
 and `epoch`; field names follow the Splunk CIM (`src`, `dest`, `src_port`, `dest_port`, `transport`, `app`).
+Modbus, IEC 104, DNP3, BACnet and EtherNet/IP records also carry `src_mac` / `dest_mac`, the MACs the
+sensor saw (for a routed source, the router's).
 A write from the easy run above:
 
 ```json
@@ -45,8 +47,10 @@ A write from the easy run above:
 ```
 
 Loading: in Splunk use sourcetype `pcapforge:<file stem>` (e.g. `pcapforge:modbus`) with
-`INDEXED_EXTRACTIONS = json`, `TIMESTAMP_FIELDS = ts`, `TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%6NZ`; in Elastic
-use one index per file (`pcapforge-modbus`, ...) with `ts` as the timestamp field.
+`INDEXED_EXTRACTIONS = json`, `TIMESTAMP_FIELDS = ts`, `TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%6NZ`,
+`MAX_DAYS_HENCE = 3650` and `MAX_DAYS_AGO = 10951` (capture dates are drawn per seed and can lie months ahead;
+with Splunk's default of 2 days those events get the indexing time); in Elastic use one index per file
+(`pcapforge-modbus`, ...) with `ts` as the timestamp field.
 
 `detections/` is generated from the site model in `answers.json`:
 - `suricata.rules` (sids 9100000+): any Modbus write to a PLC from a host that is not an approved writer
@@ -80,7 +84,12 @@ use one index per file (`pcapforge-modbus`, ...) with `ts` as the timestamp fiel
   none fires on `ot-baseline-operations`.
 - `hunting.md`: per question, the answer, the verified Wireshark filters from the answer key, and a
   Splunk SPL search and Kibana KQL filter over the export with a "what to look for" note. The SPL/KQL
-  are templates from the scenario's `hunt` blocks and are not machine-verified.
+  come from the scenario's `hunt` blocks; `tests/test_siem_queries.py` runs them for every scenario and
+  level against Splunk Enterprise 10.6 and Elasticsearch 9.5 (KQL through the Elasticsearch `kql` query;
+  index mappings from the find-structure API that Kibana's file upload uses): each must run without
+  errors and match events, and an answer that is a field value of the dataset must be in what it returns.
+  The CI job `siem-queries` runs it against the official Docker images; locally set
+  `PCAPFORGE_SPLUNK_URL` / `PCAPFORGE_SPLUNK_AUTH` and `PCAPFORGE_ELASTIC_URL` (see the module docstring).
 
 On the hard level the unauthorized writes come from the approved engineering workstation, so only
 the out-of-band rules fire; the unapproved-writer rule fires on easy and medium.
