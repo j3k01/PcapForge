@@ -102,8 +102,20 @@ the out-of-band rules fire; the unapproved-writer rule fires on easy and medium.
 `known_services.log`, `known_modbus.log` (Modbus masters and slaves) and `modbus_register_change.log`.
 `Site::local_nets` is set to the scenario's subnets, so `local_orig` / `local_resp` and the `known_*`
 logs describe the site. Zeek runs with `-D` (deterministic mode), so the same capture always gives
-byte-identical logs; `packet_filter.log` (wall-clock start time only) is not kept. Zeek has no default
-analyzer for S7comm, OPC UA, IEC 104, BACnet or EtherNet/IP; those flows appear in `conn.log` only.
+byte-identical logs; `packet_filter.log` (wall-clock start time only) is not kept.
+
+Zeek itself has no analyzer for S7comm, OPC UA, IEC 104, BACnet or EtherNet/IP. CISA's
+[ICSNPP](https://github.com/cisagov/icsnpp) packages add them, and pcapforge loads every one of these that
+zkg installed: `icsnpp-s7comm` (`s7comm.log`, `s7comm_read_szl.log`, `cotp.log`), `icsnpp-opcua-binary`
+(`opcua_binary*.log`), `icsnpp-bacnet` (`bacnet.log`, `bacnet_property.log` with WriteProperty values),
+`icsnpp-enip` (`enip.log`, `cip.log` with Forward_Open, `cip_io.log` per class 1 I/O packet) and
+`icsnpp-dnp3` (`dnp3_control.log` with each select / operate and its point, `dnp3_objects.log`). The
+versions are pinned in `src/pcapforge/zeek.py` (`ICSNPP`); install them as root after Zeek with the
+`ICSNPP_INSTALL` command there (zkg, cmake and the Zeek headers, then a build of each package; CI does
+the same). The ENIP and OPC UA packages draw the ids that link their logs (`packet_correlation_id`,
+`*_link_id`) from the OS random source, which `-D` does not seed, so pcapforge renumbers them in order of
+first appearance. IEC 104 has no ICSNPP parser and stays in `conn.log` only; the `zeek/zeek` image has
+no ICSNPP packages (point `PCAPFORGE_ZEEK_IMAGE` at an image that has them).
 
 Zeek is found as `PCAPFORGE_ZEEK` (path to the binary), `zeek` on `PATH` or `/opt/zeek/bin/zeek`, and on Windows
 in the default WSL distribution (`zeek` on its `PATH` or `/opt/zeek/bin/zeek`, run through `wsl.exe`); otherwise
@@ -117,12 +129,23 @@ Ubuntu 24.04, Homebrew on macOS).
 $ pcapforge generate -s ot-baseline-operations -d medium --seed zeek-smoke --duration 10m --siem --zeek
 $ pcapforge export out/ot-baseline-operations_medium_zeek-smoke --zeek
 ...
+out/ot-baseline-operations_medium_zeek-smoke/zeek/bacnet.log  (189 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/bacnet_property.log  (7464 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/cip.log  (5282 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/cip_io.log  (10634 records)
 out/ot-baseline-operations_medium_zeek-smoke/zeek/conn.log  (215 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/cotp.log  (1340 records)
 out/ot-baseline-operations_medium_zeek-smoke/zeek/dns.log  (193 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/enip.log  (2644 records)
 out/ot-baseline-operations_medium_zeek-smoke/zeek/known_hosts.log  (5 records)
 out/ot-baseline-operations_medium_zeek-smoke/zeek/known_modbus.log  (6 records)
-out/ot-baseline-operations_medium_zeek-smoke/zeek/known_services.log  (7 records)
-out/ot-baseline-operations_medium_zeek-smoke/zeek/modbus.log  (14892 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/known_services.log  (11 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/modbus.log  (14890 records)
 out/ot-baseline-operations_medium_zeek-smoke/zeek/modbus_register_change.log  (5 records)
 out/ot-baseline-operations_medium_zeek-smoke/zeek/ntp.log  (28 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/opcua_binary.log  (719 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/opcua_binary_read.log  (238 records)
+...
+out/ot-baseline-operations_medium_zeek-smoke/zeek/s7comm.log  (1340 records)
+out/ot-baseline-operations_medium_zeek-smoke/zeek/s7comm_read_szl.log  (20 records)
 ```

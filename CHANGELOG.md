@@ -15,10 +15,13 @@
 ### Traffic realism
 - The Raspberry Pi and Linux laptop profiles have IPv6 (Raspberry Pi OS: modified EUI-64, no temporary
   address; Ubuntu Desktop: stable-privacy identifiers and a temporary address) and run avahi-daemon,
-  which announces their addresses over IPv4 and IPv6 mDNS when the interface comes up. The shipped
-  scenarios never put either on the sensor segment with IPv6 on, so their captures are unchanged.
+  which announces their addresses over IPv4 and IPv6 mDNS when the interface comes up (shipped with the
+  Pi scanner on medium of `ot-modbus-discovery`).
 
 ### Detection engineering
+- `--zeek` loads CISA's ICSNPP packages when they are installed (versions pinned in `zeek.py`, installed in
+  CI): S7comm/COTP, OPC UA Binary, BACnet, EtherNet/IP/CIP and DNP3 control logs. Their random link ids
+  are renumbered so the logs stay deterministic.
 - The hunting guide's SPL and KQL are tested against Splunk 10.6 and Elasticsearch 9.5 for every scenario
   and level (`tests/test_siem_queries.py`, CI job `siem-queries`).
 - `ot-modbus-discovery`: the enumeration SPL searched `dest=` the scanner and matched nothing; it now

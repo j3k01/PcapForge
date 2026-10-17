@@ -7,12 +7,18 @@ zero), so the same capture always gives the same logs. ``Site::local_nets`` is t
 subnets, which fills ``local_orig`` / ``local_resp`` in conn.log and the ``known_*`` logs. Besides the
 base scripts, the Modbus policy scripts (master/slave pairs, register change tracking) and known
 hosts / services are loaded.
+
+Zeek has no analyzers for S7comm, OPC UA, BACnet or EtherNet/IP. CISA's ICSNPP packages add them (and
+detailed DNP3 control and object logs); each one installed with zkg (``ICSNPP``, versions pinned) is
+loaded, the others are skipped, so the logs depend on what the Zeek installation has. IEC 60870-5-104
+has no ICSNPP parser.
 """
 
 from __future__ import annotations
 
 import functools
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +33,15 @@ SCRIPTS = (
     "policy/protocols/modbus/known-masters-slaves",
     "policy/protocols/modbus/track-memmap",
 )
+# zkg package -> pinned version (tag or commit): S7comm / COTP, OPC UA Binary, BACnet, EtherNet/IP and
+# CIP (also class 0/1 I/O), and detailed DNP3 logging over Zeek's own DNP3 analyzer.
+ICSNPP = {
+    "icsnpp-s7comm": "7ebeb03a0f954541369361651d1c27d09a64b5a3",
+    "icsnpp-opcua-binary": "v2.0.0",
+    "icsnpp-bacnet": "804ecefa23f65de59cd4f955738361c45795724f",
+    "icsnpp-enip": "808f90b0d834481a1368dbcad650f63c88550991",
+    "icsnpp-dnp3": "b31dbadeceb1cbcda16aef89c650559cd177dd7e",
+}
 SITE_SCRIPT = "pcapforge-site.zeek"
 LOCATIONS = ("/opt/zeek/bin/zeek", "/usr/local/zeek/bin/zeek")
 TIMEOUT_S = 1800
@@ -70,6 +85,9 @@ def site_script(subnets: list[str]) -> str:
     if subnets:
         lines.append(f"redef Site::local_nets += {{ {', '.join(subnets)} }};")
     lines += [f"@load {script}" for script in SCRIPTS]
+    # An ICSNPP package is loaded when zkg installed it (its scripts are in ZEEKPATH's site/packages).
+    for package in ICSNPP:
+        lines += [f'@if ( find_in_zeekpath("packages/{package}") != "" )', f"@load packages/{package}", "@endif"]
     return "\n".join(lines) + "\n"
 
 
@@ -79,6 +97,12 @@ _APT_INSTALL = ("echo 'deb http://download.opensuse.org/repositories/security:/z
                 "https://download.opensuse.org/repositories/security:zeek/xUbuntu_24.04/Release.key "
                 "| gpg --dearmor > /etc/apt/trusted.gpg.d/security_zeek.gpg && apt-get update "
                 "&& apt-get install -y zeek-lts-core")
+# As root after the above: zkg, plus the headers and cmake the ICSNPP plugins build with, then the
+# pinned ICSNPP packages (CI runs this; docs/siem.md shows it).
+ICSNPP_INSTALL = ("apt-get install -y zeek-lts-zkg cmake && export PATH=/opt/zeek/bin:$PATH "
+                  "&& zkg autoconfig --force && zkg refresh && "
+                  + " && ".join(f"zkg install --force --skiptests --version {version} {package}"
+                                for package, version in ICSNPP.items()))
 
 
 def install_hint() -> str:
@@ -140,4 +164,29 @@ def write_zeek_logs(pcap: Path, answers: dict, out_dir: Path) -> dict[str, Path]
     # packet_filter.log only records the BPF filter with the wall-clock time Zeek started: it says
     # nothing about the capture and would make two runs over the same pcap differ.
     (out_dir / "packet_filter.log").unlink(missing_ok=True)
-    return {path.stem: path for path in sorted(out_dir.glob("*.log"))}
+    logs = {path.stem: path for path in sorted(out_dir.glob("*.log"))}
+    _number_link_ids(logs.values())
+    return logs
+
+
+# ICSNPP's ENIP and OPC UA analyzers tie records of different logs together with ids drawn from
+# std::random_device, which -D does not seed: the same capture gives other ids every run.
+_LINK_ID = re.compile(rb'"((?:packet_correlation_id|[a-z_]*link_id))":"([0-9a-f]+)"')
+
+
+def _number_link_ids(paths) -> None:
+    """Replace the random link ids by their order of first appearance (same width, hex), so the links
+    between logs stay and two runs over one capture give identical logs."""
+    numbers: dict[bytes, bytes] = {}
+
+    def number(match: re.Match) -> bytes:
+        raw = match.group(2)
+        new = numbers.get(raw)
+        if new is None:
+            new = numbers[raw] = f"{len(numbers) + 1:0{len(raw)}x}".encode()
+        return b'"' + match.group(1) + b'":"' + new + b'"'
+
+    for path in paths:
+        data = path.read_bytes()
+        if b"link_id" in data or b"packet_correlation_id" in data:
+            path.write_bytes(_LINK_ID.sub(number, data))
