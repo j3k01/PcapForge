@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-18
+
+Seeds are not stable across versions: medium and hard exercises of the same seed differ from 0.2.0.
+
 ### Scenarios
 - Incident scenarios on the non-Modbus OT protocols: `ot-iec104-command-injection` (unauthorized
   breaker control), `ot-dnp3-control-injection` (unauthorized control-relay commands),
