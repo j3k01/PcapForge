@@ -216,7 +216,7 @@ questions:
       expect: {min: 1}
     hunt:
       dataset: dhcp
-      spl: "index=* sourcetype=pcapforge:dhcp message=ack | stats count BY src, router"
+      spl: "index=* sourcetype=pcapforge:dhcp message=ack | stats count BY src, router{}"
       kql: "message : \"ack\" and router : *"
       look_for: The Router option (3) of the server's replies.
   - id: domain_name
@@ -249,8 +249,8 @@ questions:
       expect: {min: "${vars.pc_count}"}
     hunt:
       dataset: dhcp
-      spl: "index=* sourcetype=pcapforge:dhcp message=request NOT server_id=* | stats count BY client_mac, host_name, requested_addr"
-      kql: "message : \"request\" and not server_id : *"
+      spl: "index=* sourcetype=pcapforge:dhcp message=request | where (isnull(server_id) OR server_id=\"null\") AND isnotnull(requested_addr) AND requested_addr!=\"null\" | stats count BY client_mac, host_name, requested_addr"
+      kql: "message : \"request\" and requested_addr : * and not server_id : *"
       zeek: {log: dhcp, show: [ts, mac, host_name, requested_addr, assigned_addr, msg_types]}
       look_for: >-
         Requests without a server identifier and without a Discover in the same transaction (Zeek msg_types
