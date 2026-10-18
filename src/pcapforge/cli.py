@@ -124,7 +124,8 @@ def cmd_export_ctfd(args) -> int:
     paths = export_ctfd(directory, Path(args.out) if args.out else None)
     for path in paths:
         print(path)
-    print(f"{len(paths)} challenges; install each with: ctf challenge install <dir>", file=sys.stderr)
+    print(f"{len(paths)} challenges; in the ctfd directory run `ctf init`, then `ctf challenge install <dir>` for each, Q01 first",
+          file=sys.stderr)
     return 0
 
 

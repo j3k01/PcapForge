@@ -1,6 +1,6 @@
 """Export a generated run as CTFd challenges in the `ctfcli` format (one `challenge.yml` per question).
 
-Install into CTFd with `ctf challenge install <dir>` for each challenge directory. The first
+Install into CTFd with `ctf challenge install <dir>` for each challenge directory, Q01 first. The first
 challenge carries the capture and the briefing as files; the others point to it. Answers
 that CTFd cannot compare natively (sets, maps, timestamps with tolerance) get a canonical
 flag format, which the challenge description spells out.
@@ -8,6 +8,7 @@ flag format, which the challenge description spells out.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import math
 import re
@@ -62,9 +63,14 @@ def flags_for(question: dict) -> list[dict]:
             values.add(f"{float(answer):.1f}")
         return [_static(v) for v in sorted(values)]
     if kind == "timestamp":
-        second = str(answer)[:19]  # YYYY-MM-DDTHH:MM:SS
-        date, time = second.split("T")
-        return [_regex(rf"^\s*{re.escape(date)}[T ]{re.escape(time)}(\.\d+)?Z?\s*$")]
+        # Every whole second within tolerance_s of the answer (what `pcapforge grade` accepts), fractions optional.
+        exact = dt.datetime.fromisoformat(str(answer))
+        tolerance = dt.timedelta(seconds=float(question.get("tolerance_s", 0)))
+        second, seconds = (exact - tolerance).replace(microsecond=0), []
+        while second <= exact + tolerance:
+            seconds.append(f"{second:%Y-%m-%d}[T ]{second:%H:%M:%S}")
+            second += dt.timedelta(seconds=1)
+        return [_regex(rf"^\s*(?:{'|'.join(seconds)})(\.\d+)?Z?\s*$")]
     if kind == "set":
         items = sorted(str(v).strip() for v in answer)
         return [_static(",".join(items))]
@@ -89,7 +95,8 @@ def export_ctfd(run_dir: Path, out_dir: Path | None = None) -> list[Path]:
         kind = question.get("type", "text")
         description = [question["text"], "", FORMAT_NOTES.get(kind, FORMAT_NOTES["text"])]
         if kind == "timestamp":
-            description.append("Exact to the second.")
+            tolerance = float(question.get("tolerance_s", 0))
+            description.append(f"Within {_num(tolerance)} s of the answer." if tolerance else "Exact to the second.")
         challenge = {
             "name": name,
             "author": "pcapforge",

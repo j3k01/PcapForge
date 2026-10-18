@@ -89,7 +89,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
   - before/after charts of the affected process values, from `siem/modbus.jsonl`;
   - the questions with answers, and the class score summary from `pcapforge grade --json`.
 - [x] **Graded hints** (S): the submission template shows each hint with its cost (20 % of the points, rounded up, same as the CTFd export); students list the ids they used under `hints_used`, and `grade` deducts the cost (never below 0). Honour system for offline use.
-- [x] **CTF platform export** (S): `pcapforge export-ctfd <run>` writes ctfcli `challenge.yml` files with static/regex flags, hint costs, and the capture attached to the first challenge. Still open: tested only by unit tests, not yet imported into a live CTFd instance.
+- [x] **CTF platform export** (S): `pcapforge export-ctfd <run>` writes ctfcli `challenge.yml` files with static/regex flags, hint costs, and the capture attached to the first challenge. Imported with ctfcli 0.1.8 into CTFd 3.8.8 and played as a student (IEC 104 and Modbus medium runs): files, unlock order, hint costs, scoring and every flag form accepted or rejected as `pcapforge grade` would. Timestamp flags accept every second within the question's `tolerance_s`.
 - [~] **More languages** (S per language): the UI strings in `i18n.py` and the scenario `translations`. Done: Polish (`pl`) and German (`de`) for every scenario, UI string and process title; `tests/test_scenario.py` checks every non-English language for complete question translations with the same `${...}` references.
 
 ## 5. Detection engineering

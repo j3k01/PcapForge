@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+### Training workflow
+- `pcapforge export-ctfd` is checked against a live CTFd 3.8.8 (ctfcli 0.1.8). Timestamp flags now accept
+  every second within the question's `tolerance_s`, as `pcapforge grade` does; they accepted only the
+  answer's own second, so a student one second off was right in `grade` and wrong in CTFd.
+
 ## 0.3.0 - 2026-10-18
 
 Seeds are not stable across versions: medium and hard exercises of the same seed differ from 0.2.0.

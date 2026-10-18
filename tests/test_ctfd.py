@@ -29,6 +29,14 @@ def test_timestamp_flag_matches_the_same_second_only():
     assert not matches(flags, "2025-02-04T11:16:13Z")
 
 
+def test_timestamp_flag_accepts_the_seconds_within_tolerance_across_midnight():
+    flags = flags_for({"type": "timestamp", "answer": "2025-02-04T23:59:59.4Z", "tolerance_s": 1})
+    for given in ("2025-02-04T23:59:58Z", "2025-02-04T23:59:59.9", "2025-02-05T00:00:00Z"):
+        assert matches(flags, given), given
+    for given in ("2025-02-04T23:59:57Z", "2025-02-05T00:00:01Z"):
+        assert not matches(flags, given), given
+
+
 def test_set_and_map_flags_use_a_canonical_sorted_form():
     assert matches(flags_for({"type": "set", "answer": ["ph_sp", "chlorine_dose_sp"]}), "chlorine_dose_sp,ph_sp")
     flags = flags_for({"type": "map", "answer": {"b": 3.0, "a": 3.72}})
