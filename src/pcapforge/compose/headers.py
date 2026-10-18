@@ -360,6 +360,8 @@ class Headers:
                 payload = dhcp.rewrite(payload, lambda ip: self._dhcp_address(ip, flow), mac)
                 if delivery is not None and delivery.giaddr is not None:
                     payload = payload[:3] + bytes((delivery.hops,)) + payload[4:24] + delivery.giaddr + payload[28:]
+                if delivery is not None and delivery.agent_info is not None:
+                    payload = dhcp.with_agent_info(payload, delivery.agent_info)
             elif self._sender_port(p) == ports.ENIP:
                 payload = rewrite_list_identity(payload, lambda ip: self._announced_address(ip, p))
             elif self._sender_port(p) == ports.BACNET:

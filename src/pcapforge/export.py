@@ -105,7 +105,7 @@ FIELDS = [
     # TLS handshakes (a server flight carries ServerHello, Certificate, ... in one frame) and HTTP.
     "tls.handshake.type", "tls.handshake.version", "tls.handshake.ciphersuite", "tls.handshake.extensions_server_name",
     "tls.handshake.extensions_alpn_str", "tls.handshake.ja4", "x509sat.uTF8String", "x509ce.dNSName",
-    "http.host", "http.user_agent", "http.content_type", "http.content_length_header",
+    "http.host", "http.user_agent", "http.content_type", "http.content_length_header", "http.content_encoding",
 ]
 F = {name: index for index, name in enumerate(FIELDS)}
 
@@ -610,7 +610,7 @@ class _Exporter:
                 "soap_action": (_header(headers, "SOAPAction") or "").strip('"') or None,
                 "range": _header(headers, "Range"),
                 "request_bytes": _int(_first(row, "http.content_length_header")),
-                "status": None, "content_type": None, "response_bytes": None,
+                "status": None, "content_type": None, "content_encoding": None, "response_bytes": None,
                 "request_frame": number, "response_frame": None,
             }
             self.http.append(record)
@@ -622,6 +622,7 @@ class _Exporter:
         record = pending.popleft()
         record["status"] = _int(_first(row, "http.response.code"))
         record["content_type"] = _first(row, "http.content_type") or None
+        record["content_encoding"] = _first(row, "http.content_encoding") or None
         record["response_bytes"] = _int(_first(row, "http.content_length_header"))
         record["response_frame"] = number
 

@@ -205,6 +205,7 @@ def test_a_relay_agent_carries_the_exchange_between_the_client_subnet_and_the_se
     assert at(discover, 0) == dhcp.Delivery(dhcp.UNSPECIFIED_BYTES, True)
     reply = at(offer, 1)
     assert (reply.source, reply.broadcast, reply.relay, reply.giaddr) == (giaddr, True, fw, giaddr)
+    assert reply.agent_info is None  # the relay strips option 82 before the clients' side
     assert at(renewal, 0) is None  # a client with an address talks to the server directly
     # On the server's subnet: relay to server and back, unicast port 67 to 67, giaddr set.
     topo.sensor = "servers"
@@ -213,3 +214,10 @@ def test_a_relay_agent_carries_the_exchange_between_the_client_subnet_and_the_se
     assert (forwarded.ports, forwarded.giaddr, forwarded.hops, forwarded.relay) == ((67, 67), giaddr, 1, fw)
     answered = at(offer, 1)
     assert (answered.dest, answered.ports, answered.relay, answered.broadcast) == (giaddr, (67, 67), None, False)
+    # Option 82 toward the server and in its echo: circuit ID (VLAN 0, relay, port), remote ID (the client's MAC).
+    mac = bytes.fromhex(pc.interface_on("office").mac.replace(":", ""))
+    port = fw.subnets.index("office") + 1
+    assert forwarded.agent_info == answered.agent_info == b"\x01\x04\x00\x00\x00" + bytes((port,)) + b"\x02\x06" + mac
+    padded = dhcp.with_agent_info(discover, forwarded.agent_info)
+    assert len(padded) == len(discover) and parse(padded).options[82] == forwarded.agent_info
+    assert list(parse(padded).options)[-1] == 82

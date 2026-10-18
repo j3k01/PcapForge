@@ -3,17 +3,23 @@ server over plain HTTP on port 8530 ([MS-WUSP]), and downloads approved update c
 
 Scan (one keep-alive connection, SOAP 1.1 over HTTP/1.1): GetConfig and GetCookie on
 /ClientWebService/client.asmx, GetAuthorizationCookie on /SimpleAuthWebService/SimpleAuth.asmx,
-SyncUpdates, and GetExtendedUpdateInfo when an approved update applies. The message bodies follow
-the [MS-WUSP] section 4 examples; the server's replies the IIS / ASP.NET headers and bodies of
-GoSecure's pywsus (a WSUS server Windows clients accept). The approved update is a Microsoft
-Defender Antivirus security intelligence update (KB2267602), whose file BITS fetches from
-/Content/<last two hex digits of its SHA-1>/<SHA-1>.exe: a HEAD, then a GET for the whole file.
+SyncUpdates, and GetExtendedUpdateInfo when an approved update applies; the client sends protocol
+version 2.4 (Windows 10 20H2 and later, [MS-WUSP] product behavior note 11). On those two services
+the client asks for xpress compression (``Accept-Encoding: xpress``) and the server sends its
+replies Xpress-compressed (``Content-Encoding: xpress``, ``xpress.py``, section 2.1.1). After a
+short delay that batches its events, the client reports to /ReportingWebService/ReportingWebService.asmx
+(ReportEventBatch, uncompressed): AGENT_DETECTION_STARTED (141) and AGENT_DETECTION_FINISHED (147,
+with the number of updates found) after the scan, AGENT_DOWNLOAD_SUCCEEDED (162) after a download.
+The message bodies follow the [MS-WUSP] section 4 examples; the server's replies the IIS / ASP.NET
+headers and bodies of GoSecure's pywsus (a WSUS server Windows clients accept). The approved update
+is a Microsoft Defender Antivirus security intelligence update (KB2267602), whose file BITS fetches
+from /Content/<last two hex digits of its SHA-1>/<SHA-1>.exe: a HEAD, then a GET for the whole file.
 IIS closes the idle connections after its connectionTimeout of 120 s.
 
-Workstations that boot during the capture scan 5 to 15 minutes after their address is configured;
-ones that were running scan with the probability of their 22-hour detection interval falling into
-the capture. Not modelled: the Windows Update Agent self-update check, RegisterComputer, driver
-synchronization and event reporting (ReportEventBatch); response compression (xpress).
+Workstations that boot during the capture scan ``scan_after`` seconds after their address is
+configured; ones that were running scan with the probability of their 22-hour detection interval
+falling into the capture. Not modelled: the Windows Update Agent self-update check,
+RegisterComputer and driver synchronization.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ import datetime as dt
 import hashlib
 import uuid
 
-from pcapforge import ports
+from pcapforge import ports, xpress
 from pcapforge.actors import register
 from pcapforge.actors.base import Actor
 from pcapforge.actors.dns import query_server
@@ -40,7 +46,12 @@ IDLE_TIMEOUT = 120.0
 DNS_TTL = 1200.0
 NS_CLIENT = "http://www.microsoft.com/SoftwareDistribution/Server/ClientWebService"
 NS_AUTH = "http://www.microsoft.com/SoftwareDistribution/Server/SimpleAuthWebService"
+NS_REPORTING = "http://www.microsoft.com/SoftwareDistribution"
 CLIENT_PATH, AUTH_PATH = "/ClientWebService/client.asmx", "/SimpleAuthWebService/SimpleAuth.asmx"
+REPORTING_PATH = "/ReportingWebService/ReportingWebService.asmx"
+PROTOCOL_VERSION = "2.4"
+DETECTION_STARTED, DETECTION_FINISHED, DOWNLOAD_SUCCEEDED = 141, 147, 162
+NO_UPDATE = "00000000-0000-0000-0000-000000000000"
 ENVELOPE = ('<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" '
             'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema"'
             '{extra}><soap:Body>{body}</soap:Body></soap:Envelope>')
@@ -61,18 +72,20 @@ def _b64(label: str, size: int) -> str:
     return base64.b64encode(stream(label, size)).decode()
 
 
-def request(path: str, host: str, action: str, body: str) -> bytes:
+def request(path: str, host: str, action: str, body: str, compressed: bool = True) -> bytes:
     data = body.encode()
+    encoding = "Accept-Encoding: xpress\r\n" if compressed else ""
     head = (f"POST {path} HTTP/1.1\r\nCache-Control: no-cache\r\nConnection: Keep-Alive\r\nPragma: no-cache\r\n"
-            f"Content-Type: text/xml; charset=utf-8\r\nUser-Agent: {USER_AGENT}\r\n"
+            f"Content-Type: text/xml; charset=utf-8\r\n{encoding}User-Agent: {USER_AGENT}\r\n"
             f'SOAPAction: "{action}"\r\nContent-Length: {len(data)}\r\nHost: {host}:{PORT}\r\n\r\n')
     return head.encode() + data
 
 
-def response(body: str, epoch: float) -> bytes:
-    data = body.encode()
+def response(body: str, epoch: float, compressed: bool = True) -> bytes:
+    data = xpress.compress(body.encode()) if compressed else body.encode()
+    encoding = "Content-Encoding: xpress\r\n" if compressed else ""
     head = ("HTTP/1.1 200 OK\r\nCache-Control: private\r\nContent-Type: text/xml; charset=utf-8\r\n"
-            "Server: Microsoft-IIS/10.0\r\nX-AspNet-Version: 4.0.30319\r\nX-Powered-By: ASP.NET\r\n"
+            f"{encoding}Server: Microsoft-IIS/10.0\r\nX-AspNet-Version: 4.0.30319\r\nX-Powered-By: ASP.NET\r\n"
             f"Date: {_http_date(epoch)}\r\nContent-Length: {len(data)}\r\n\r\n")
     return head.encode() + data
 
@@ -151,21 +164,40 @@ class WsusClient(Actor):
             plan.add(at, self.id, host.id, "wsus.resolve", name=server.fqdn, server=resolver,
                      txid=rng.randrange(1, 65536), txid6=rng.randrange(1, 65536))
             scan = plan.add(at + rng.uniform(0.005, 0.03), self.id, host.id, "wsus.scan", **common)
-            plan.add(min(at + 5.0 + IDLE_TIMEOUT, plan.duration + 1.0), self.id, host.id, "wsus.timeout",
-                     conn="scan", **({"phase": "teardown"} if at + 5.0 + IDLE_TIMEOUT >= plan.duration else {}))
+            found = 1 if server.update is not None else 0
+            started, finished = at + 0.01, at + rng.uniform(0.3, 1.2)
+            reported = at + rng.uniform(5.0, 30.0)  # the client batches its events after a short delay
+            if reported < plan.duration:
+                plan.add(reported, self.id, host.id, "wsus.report", conn="scan", connect=False, scan_at=scan.t,
+                         **common,
+                         events=[[DETECTION_STARTED, started, None, None],
+                                 [DETECTION_FINISHED, finished, None, found]])
+            self._close(host.id, "scan", max(min(reported, plan.duration), finished) + IDLE_TIMEOUT)
             scans.append({"host": host_ref(host.id), "scan": action_ref(scan)})
             if server.update is not None:
                 when = at + rng.uniform(20.0, 90.0)
                 if when < end:
                     download = plan.add(when, self.id, host.id, "wsus.download", **common)
-                    close = when + 10.0 + IDLE_TIMEOUT
-                    plan.add(min(close, plan.duration + 1.0), self.id, host.id, "wsus.timeout", conn="download",
-                             **({"phase": "teardown"} if close >= plan.duration else {}))
+                    self._close(host.id, "download", when + 10.0 + IDLE_TIMEOUT)
+                    done = when + 2.0 + rng.uniform(5.0, 30.0)
+                    if done < plan.duration:
+                        plan.add(done, self.id, host.id, "wsus.report", conn="report", connect=True, scan_at=scan.t,
+                                 **common,
+                                 events=[[DOWNLOAD_SUCCEEDED, when + 1.0, server.update["update_id"], None]])
+                        self._close(host.id, "report", done + IDLE_TIMEOUT)
                     downloads.append({"host": host_ref(host.id), "download": action_ref(download)})
         plan.facts[self.id] = {"server": host_ref(server_host.id), "scans": scans, "downloads": downloads,
                                "scanned": [s["host"] for s in scans],
                                "soap_actions": ["GetConfig", "GetAuthorizationCookie", "GetCookie", "SyncUpdates"]
-                               + (["GetExtendedUpdateInfo"] if server.update else [])}
+                               + (["GetExtendedUpdateInfo"] if server.update else []),
+                               "reported_events": [DETECTION_STARTED, DETECTION_FINISHED]
+                               + ([DOWNLOAD_SUCCEEDED] if downloads else [])}
+
+    def _close(self, host: str, conn: str, at: float) -> None:
+        """IIS closes the connection ``conn`` once it has been idle for its connectionTimeout."""
+        plan = self.plan_
+        plan.add(min(at, plan.duration + 1.0), self.id, host, "wsus.timeout", conn=conn,
+                 **({"phase": "teardown"} if at >= plan.duration else {}))
 
     # -- recording ------------------------------------------------------------------
     def execute(self, action, rt) -> None:
@@ -178,14 +210,54 @@ class WsusClient(Actor):
         if action.op == "wsus.timeout":
             rt.clients.pop(key).server_close()
             return
-        conn = rt.clients[key] = ScriptedConnection(rt, self.wsus.server, rt.loopback(action.host),
-                                                    rt.loopback(a["wsus"]), ports.WSUS)
+        if action.op == "wsus.report" and not a["connect"]:
+            conn = rt.clients[key]
+        else:
+            conn = rt.clients[key] = ScriptedConnection(rt, self.wsus.server, rt.loopback(action.host),
+                                                        rt.loopback(a["wsus"]), ports.WSUS)
         now = rt.plan.start_epoch + rt.clock.t
         if action.op == "wsus.scan":
             for path, soap_action, body, reply in self._scan(a, now):
                 conn.exchange(request(path, self.wsus.fqdn, soap_action, body), response(reply, now))
+        elif action.op == "wsus.report":
+            body = self._report(a, rt.plan.start_epoch, now, rt.plan.topology.by_id[action.host])
+            reply = ENVELOPE.format(extra="", body=f'<ReportEventBatchResponse xmlns="{NS_REPORTING}">'
+                                    "<ReportEventBatchResult>true</ReportEventBatchResult></ReportEventBatchResponse>")
+            conn.exchange(request(REPORTING_PATH, self.wsus.fqdn, f"{NS_REPORTING}/ReportEventBatch", body,
+                                  compressed=False), response(reply, now, compressed=False))
         else:
             self._download(conn, now)
+
+    def _report(self, a: dict, start: float, now: float, host) -> str:
+        """ReportEventBatch request ([MS-WUSP] 2.2.2.3.1, after the section 4 EventID 147 example)."""
+        label = f"{self.rng.key}\x1f{a['client_id']}"
+        expire = _iso(start + a["scan_at"] + 86400.0, 7)
+        cookie = _b64(f"wsus-cookie\x1f{label}", 168)
+        events = []
+        for event_id, at, update_id, count in a["events"]:
+            instance = str(uuid.UUID(bytes=stream(f"wsus-event\x1f{label}\x1f{event_id}\x1f{at}", 16),
+                                     version=4)).upper()
+            strings = ("" if count is None else
+                       f'<ReplacementStrings soapenc:arrayType="xsd:string[1]"><string>{count}</string>'
+                       "</ReplacementStrings>")
+            revision = 0 if update_id is None else 200  # the update's revision as SyncUpdates named it
+            events.append(
+                f"<ReportingEvent><BasicData><TargetID><Sid>{a['client_id']}</Sid></TargetID>"
+                f"<SequenceNumber>0</SequenceNumber><TimeAtTarget>{_iso(start + at)[:-1]}</TimeAtTarget>"
+                f"<EventInstanceID>{instance}</EventInstanceID><NamespaceID>1</NamespaceID>"
+                f"<EventID>{event_id}</EventID><SourceID>101</SourceID><UpdateID><UpdateID>{update_id or NO_UPDATE}"
+                f"</UpdateID><RevisionNumber>{revision}</RevisionNumber></UpdateID>"
+                + "<Win32HResult>0</Win32HResult><AppName>AutomaticUpdates</AppName></BasicData>"
+                f"<ExtendedData>{strings}<ComputerBrand>{host.device.vendor}</ComputerBrand>"
+                "<ProcessorArchitecture>Amd64Compatible</ProcessorArchitecture><OSVersion><Major>10</Major>"
+                "<Minor>0</Minor><Build>19045</Build><Revision>0</Revision><ServicePackMajor>0</ServicePackMajor>"
+                "<ServicePackMinor>0</ServicePackMinor></OSVersion><OSLocaleID>1033</OSLocaleID><DeviceID />"
+                "</ExtendedData><PrivateData><ComputerDnsName /><UserAccountName /></PrivateData></ReportingEvent>")
+        return ENVELOPE.format(extra=SOAPENC, body=(
+            f'<ReportEventBatch xmlns="{NS_REPORTING}"><cookie><Expiration>{expire}</Expiration>'
+            f"<EncryptedData>{cookie}</EncryptedData></cookie><clientTime>{_iso(now)[:-1]}</clientTime>"
+            f'<eventBatch xmlns:q1="{NS_REPORTING}" soapenc:arrayType="q1:ReportingEvent[{len(events)}]">'
+            + "".join(events) + "</eventBatch></ReportEventBatch>"))
 
     def _scan(self, a: dict, now: float) -> list[tuple[str, str, str, str]]:
         """(path, SOAPAction, request body, response body) of one detection."""
@@ -207,7 +279,8 @@ class WsusClient(Actor):
                   + "</Properties></GetConfigResult></GetConfigResponse>")
         calls = [
             (CLIENT_PATH, f"{NS_CLIENT}/GetConfig",
-             envelope(f'<GetConfig xmlns="{NS_CLIENT}"><protocolVersion>1.0</protocolVersion></GetConfig>'),
+             envelope(f'<GetConfig xmlns="{NS_CLIENT}"><protocolVersion>{PROTOCOL_VERSION}</protocolVersion>'
+                      "</GetConfig>"),
              reply(config)),
             (AUTH_PATH, f"{NS_AUTH}/GetAuthorizationCookie",
              envelope(f'<GetAuthorizationCookie xmlns="{NS_AUTH}"><clientId>{a["client_id"]}</clientId>'
@@ -220,7 +293,8 @@ class WsusClient(Actor):
                       'soapenc:arrayType="q1:AuthorizationCookie[1]"><AuthorizationCookie>'
                       f"<PlugInId>SimpleTargeting</PlugInId><CookieData>{auth}</CookieData></AuthorizationCookie>"
                       f'</authCookies><oldCookie xsi:nil="true" /><lastChange>{last_change}</lastChange>'
-                      f"<currentTime>{_iso(now, 0)}</currentTime><protocolVersion>1.8</protocolVersion></GetCookie>"),
+                      f"<currentTime>{_iso(now, 0)}</currentTime><protocolVersion>{PROTOCOL_VERSION}</protocolVersion>"
+                      "</GetCookie>"),
              reply(f'<GetCookieResponse xmlns="{NS_CLIENT}"><GetCookieResult><Expiration>{expire}</Expiration>'
                    f"<EncryptedData>{cookie}</EncryptedData></GetCookieResult></GetCookieResponse>")),
         ]

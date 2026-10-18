@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-baseline-operations
 title: Baseline of an office LAN at the start of the working day (no incident)
 line: it
-version: 2
+version: 3
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [baseline, it, dhcp, dhcp-relay, dns, ntp, https, tls, wsus, windows-update, windows, active-directory, kerberos, ldap, smb]
@@ -420,10 +420,47 @@ questions:
     accept: ["KB${facts.update_service.update.kb}", "${facts.update_service.update.kb}"]
     type: text
     points: 5
-    hint: GetExtendedUpdateInfo returns the update's properties (KBArticleID) and title.
+    hint: >-
+      GetExtendedUpdateInfo returns the update's properties (KBArticleID) and title. The reply is
+      Xpress-compressed; Wireshark decompresses it (Content-encoded entity body).
     check:
       filter: 'http.file_data contains "KBArticleID&gt;${facts.update_service.update.kb}"'
       expect: {min: 1}
+  - id: wsus_encoding
+    text: >-
+      The update server compresses its SOAP replies on the client and authorization services. Which
+      HTTP content encoding does it use?
+    answer: xpress
+    accept: [xpress, "Content-Encoding: xpress"]
+    type: text
+    points: 5
+    hint: The client offers it in its Accept-Encoding header; the server names it in Content-Encoding ([MS-WUSP] 2.1.1).
+    check:
+      filter: 'http.content_encoding == "xpress"'
+      expect: {min: 1}
+    hunt:
+      dataset: http
+      spl: "index=* sourcetype=pcapforge:http content_encoding=* | stats count BY uri, content_encoding"
+      kql: "content_encoding : *"
+      look_for: Xpress-compressed responses on client.asmx and SimpleAuth.asmx; the reporting service answers in plain XML.
+  - id: wsus_report
+    text: After a scan the workstation reports its result to the update server. Which SOAP method does it call?
+    answer: ReportEventBatch
+    accept: [ReportEventBatch]
+    type: text
+    points: 5
+    hint: The report goes to the reporting web service (/ReportingWebService/ReportingWebService.asmx).
+    check:
+      filter: 'http.request.uri contains "ReportingWebService" && http.request.line contains "ReportEventBatch"'
+      expect: {min: 1}
+    hunt:
+      dataset: http
+      spl: "index=* sourcetype=pcapforge:http uri=\"/ReportingWebService/*\" | stats count BY src, soap_action"
+      kql: "uri : \"/ReportingWebService/ReportingWebService.asmx\""
+      zeek: {log: http, where: {uri: /ReportingWebService/ReportingWebService.asmx}, count_by: [id.orig_h, uri]}
+      look_for: >-
+        A ReportEventBatch with AGENT_DETECTION_STARTED (141) and AGENT_DETECTION_FINISHED (147) events after
+        each scan, AGENT_DOWNLOAD_SUCCEEDED (162) after a download.
 
 translations:
   pl:
@@ -482,7 +519,13 @@ translations:
         hint: Zawartość przychodzi tym samym portem HTTP z /Content/, pobiera ją BITS (User-Agent Microsoft BITS).
       update_kb:
         text: Którego artykułu bazy wiedzy (numer KB) dotyczy ta aktualizacja?
-        hint: GetExtendedUpdateInfo zwraca właściwości aktualizacji (KBArticleID) i jej tytuł.
+        hint: GetExtendedUpdateInfo zwraca właściwości aktualizacji (KBArticleID) i jej tytuł. Odpowiedź jest skompresowana Xpress; Wireshark ją rozpakowuje (Content-encoded entity body).
+      wsus_encoding:
+        text: Serwer aktualizacji kompresuje swoje odpowiedzi SOAP z usług klienta i autoryzacji. Jakiego kodowania treści HTTP używa?
+        hint: Klient proponuje je w nagłówku Accept-Encoding, serwer podaje je w Content-Encoding ([MS-WUSP] 2.1.1).
+      wsus_report:
+        text: Po skanowaniu stacja robocza zgłasza wynik serwerowi aktualizacji. Jaką metodę SOAP wywołuje?
+        hint: Zgłoszenie trafia do usługi raportowania (/ReportingWebService/ReportingWebService.asmx).
   de:
     title: Baseline eines Büronetzes zu Beginn des Arbeitstages (kein Vorfall)
     briefing: |
@@ -540,4 +583,10 @@ translations:
         hint: Der Inhalt kommt über denselben HTTP-Port aus /Content/, abgerufen von BITS (User-Agent Microsoft BITS).
       update_kb:
         text: Zu welchem Knowledge-Base-Artikel (KB-Nummer) gehört dieses Update?
-        hint: GetExtendedUpdateInfo liefert die Eigenschaften des Updates (KBArticleID) und seinen Titel.
+        hint: GetExtendedUpdateInfo liefert die Eigenschaften des Updates (KBArticleID) und seinen Titel. Die Antwort ist Xpress-komprimiert; Wireshark entpackt sie (Content-encoded entity body).
+      wsus_encoding:
+        text: Der Update-Server komprimiert seine SOAP-Antworten auf den Client- und Autorisierungsdiensten. Welche HTTP-Inhaltscodierung verwendet er?
+        hint: Der Client bietet sie im Header Accept-Encoding an, der Server nennt sie in Content-Encoding ([MS-WUSP] 2.1.1).
+      wsus_report:
+        text: Nach einer Suche meldet der Arbeitsplatz sein Ergebnis an den Update-Server. Welche SOAP-Methode ruft er auf?
+        hint: Die Meldung geht an den Reporting-Webdienst (/ReportingWebService/ReportingWebService.asmx).

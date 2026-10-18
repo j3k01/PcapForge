@@ -7,7 +7,10 @@ h2 (False Start: its first request rides with its Finished), loads the page, the
 resources on the same connection, a smaller set on later page views of the same visit (browser
 cache). IIS (http.sys) closes a connection that has been idle for its connectionTimeout of
 120 s: an HTTP/2 GOAWAY, then the TCP close. A page view within that time reuses the connection.
-The names are cached for the DNS TTL the site DNS gives (1200 s).
+The names are cached for the DNS TTL the site DNS gives (1200 s). A later connection to a site
+resumes the TLS session of the last full handshake with it (abbreviated handshake, session ID)
+while that session is younger than BoringSSL's default TLS 1.2 session lifetime of 2 hours;
+Schannel keeps its server sessions for 10 hours (ServerCacheTime), so the browser's limit decides.
 
 HTTP/2 framing sizes: the client preface (24 bytes), SETTINGS (4 settings), WINDOW_UPDATE and a
 first HEADERS block of 290-430 bytes, later requests' HPACK-compressed HEADERS of 50-120 bytes;
@@ -29,6 +32,7 @@ from pcapforge.scenario import ScenarioError
 
 IDLE_TIMEOUT = 120.0     # IIS connectionTimeout: http.sys closes an idle connection
 DNS_TTL = 1200.0         # what the site DNS answers (dns.py)
+SESSION_LIFETIME = 7200.0  # BoringSSL SSL_DEFAULT_SESSION_TIMEOUT for TLS 1.2 sessions
 FRAME = 9                # HTTP/2 frame header
 PREFACE = 24
 GOAWAY = FRAME + 8
@@ -140,7 +144,8 @@ class HttpsClient(Actor):
             rate = rng.uniform(rate_lo, rate_hi) / 3600.0
             resolved: dict[str, float] = {}
             open_: dict[str, tuple[int, float]] = {}   # fqdn -> (connection number, last activity)
-            connections, visits = 0, []
+            sessions: dict[str, tuple[int, float]] = {}  # fqdn -> (full handshake connection, its time)
+            connections, visits, resumed = 0, [], 0
             t = begin + rng.uniform(0.0, min(1.0 / rate, 0.4 * max(end - begin, 0.0)))
             while t < end:
                 fqdn, profile, server = sites[rng.randrange(len(sites))]
@@ -169,8 +174,14 @@ class HttpsClient(Actor):
                     if fqdn not in open_:
                         connections += 1
                         number = connections
+                        held = sessions.get(fqdn)
+                        resume = held[0] if held and t - held[1] < SESSION_LIFETIME else None
+                        if resume is None:
+                            sessions[fqdn] = (number, t)
+                        else:
+                            resumed += 1
                         action = plan.add(t, self.id, host.id, "https.connect", site=fqdn, server=target,
-                                          conn=number, first_request=rng.randint(290, 430),
+                                          conn=number, resume=resume, first_request=rng.randint(290, 430),
                                           order=rng.sample(range(16), 16), **page_args)
                     else:
                         number = open_[fqdn][0]
@@ -185,11 +196,16 @@ class HttpsClient(Actor):
                 at = last + IDLE_TIMEOUT
                 plan.add(at if at < plan.duration else plan.duration + 1.0, self.id, host.id, "https.timeout",
                          site=name, conn=number, **({} if at < plan.duration else {"phase": "teardown"}))
-            clients.append({"host": host_ref(host.id), "visits": visits, "connections": connections})
+            clients.append({"host": host_ref(host.id), "visits": visits, "connections": connections,
+                            "resumed": resumed})
         self._servers = {s.hosts[0].id: s for s in servers}
         self._site_server = {fqdn: server for fqdn, _, server in sites}
         plan.facts[self.id] = {"clients": clients, "sites_visited": sorted(visited),
+                               "resumed": sum(c["resumed"] for c in clients),
                                "hosts": [host_ref(h.id) for h in self.hosts]}
+
+    def _label(self, host: str, site: str, conn: int) -> str:
+        return f"https\x1f{self.rng.key}\x1f{host}\x1f{site}\x1f{conn}"
 
     # -- recording ------------------------------------------------------------------
     def execute(self, action, rt) -> None:
@@ -205,19 +221,25 @@ class HttpsClient(Actor):
             return
         if action.op == "https.connect":
             server = self._site_server[a["site"]]
-            label = f"https\x1f{self.rng.key}\x1f{action.host}\x1f{a['site']}\x1f{a['conn']}"
+            label = self._label(action.host, a["site"], a["conn"])
             conn = ScriptedConnection(rt, server.server, rt.loopback(action.host), rt.loopback(a["server"]),
                                       ports.HTTPS)
             browser = rt.clients[key] = _Browser(conn, label)
             order = a["order"]
-            flight, _session = tls.server_flight(label, server.chain)
-            conn.exchange(tls.client_hello(a["site"], label, lambda n: order[:n]), flight)
-            # False Start: the first request goes with the Finished; the server sends its SETTINGS,
-            # acknowledges the client's, then answers.
+            # The server sends its SETTINGS, acknowledges the client's, then answers the first request.
             first = PREFACE + FRAME + 24 + FRAME + 4 + FRAME + a["first_request"]
-            reply = (tls.server_finish(label) + browser.data(FRAME + 18 + FRAME + 4 + FRAME)
-                     + browser.data(FRAME + a["headers"][0] + _data(a["html"])))
-            conn.exchange(tls.client_finish(label) + browser.data(first), reply)
+            answer = (browser.data(FRAME + 18 + FRAME + 4 + FRAME)
+                      + browser.data(FRAME + a["headers"][0] + _data(a["html"])))
+            if a["resume"] is None:
+                conn.exchange(tls.client_hello(a["site"], label, lambda n: order[:n]),
+                              tls.server_flight(label, server.chain))
+                # False Start: the first request goes with the client's Finished.
+                conn.exchange(tls.client_finish(label) + browser.data(first), tls.server_finish(label) + answer)
+            else:
+                session = tls.session_id(self._label(action.host, a["site"], a["resume"]))
+                conn.exchange(tls.client_hello(a["site"], label, lambda n: order[:n], session),
+                              tls.server_resume(label, session))
+                conn.exchange(tls.client_resume_finish(label) + browser.data(first), answer)
             self._resources(browser, a, settings_ack=True)
             return
         browser = rt.clients[key]

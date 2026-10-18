@@ -36,14 +36,22 @@ def test_edge_negotiates_tls_1_2_with_iis_and_the_chain_comes_from_the_domain_ca
     hellos = tshark(result.pcap, "tls.handshake.type == 1", "tls.handshake.ja4", "tls.handshake.extensions_server_name")
     assert hellos and {ja4 for ja4, _ in hellos} == {CHROMIUM_JA4}
     assert {sni for _, sni in hellos} <= set(web["sites"])
-    servers = tshark(result.pcap, "tls.handshake.type == 2", "tls.handshake.version", "tls.handshake.ciphersuite",
-                     "tls.handshake.extensions_alpn_str", "x509sat.uTF8String", "x509ce.dNSName")
-    assert servers
-    for version, suite, alpn, names, sans in servers:
+    servers = tshark(result.pcap, "tls.handshake.type == 2", "ip.dst", "tls.handshake.type", "tls.handshake.version",
+                     "tls.handshake.ciphersuite", "tls.handshake.extensions_alpn_str", "tls.handshake.session_id",
+                     "x509sat.uTF8String", "x509ce.dNSName")
+    full = {}  # client -> session IDs of its full handshakes
+    resumed = 0
+    for client, types, version, suite, alpn, session, names, sans in servers:
         assert (version, suite, alpn) == ("0x0303", "0xc030", "h2")
-        issuer, subject = names.split(",")[:2]
-        assert issuer == web["ca"]["name"] and subject == web["sites"][0]
-        assert sans.split(",") == web["sites"]
+        if "11" in types.split(","):
+            issuer, subject = names.split(",")[:2]
+            assert issuer == web["ca"]["name"] and subject == web["sites"][0]
+            assert sans.split(",") == web["sites"]
+            full.setdefault(client, set()).add(session)
+        else:  # abbreviated handshake: a session ID of an earlier full handshake of the same client
+            assert session in full.get(client, set())
+            resumed += 1
+    assert full and resumed > 0 and answers["facts"]["browsing"]["resumed"] > 0
 
 
 @pytest.mark.skipif(not capture_tools, reason="requires tshark >= 4.4 and dumpcap/tcpdump with loopback capture rights")
@@ -55,7 +63,13 @@ def test_windows_update_scans_over_soap_and_bits_fetches_the_approved_file(run):
                for _, lines in posts for line in lines.split(",") if line.startswith("SOAPAction")]
     assert posts and all(agent.startswith("Windows-Update-Agent/") for agent, _ in posts)
     scan = ["GetConfig", "GetAuthorizationCookie", "GetCookie", "SyncUpdates", "GetExtendedUpdateInfo"]
-    assert actions[:5] == scan and len(actions) % 5 == 0
+    assert actions[:5] == scan and set(actions) == set(scan) | {"ReportEventBatch"}
+    # The client and authorization services answer Xpress-compressed; Wireshark's own decoder unpacks them.
+    bodies = tshark(result.pcap, 'http.content_encoding == "xpress"', "http.file_data")
+    assert bodies and all(bytes.fromhex(data).startswith(b"<soap:Envelope") for (data,) in bodies)
+    reports = tshark(result.pcap, 'http.request.uri contains "ReportingWebService"', "http.file_data")
+    events = b"".join(bytes.fromhex(data) for (data,) in reports)
+    assert reports and all(f"<EventID>{e}</EventID>".encode() in events for e in (141, 147, 162))
     gets = tshark(result.pcap, 'http.request.method in {"HEAD", "GET"}', "http.request.method", "http.request.uri",
                   "http.user_agent")
     assert gets and {(method, uri) for method, uri, _ in gets} == {("HEAD", update["path"]), ("GET", update["path"])}

@@ -17,14 +17,19 @@
   route itself.
 - DHCP relay: a `dhcp.server` scope for a subnet the server host is not on is served through that subnet's
   router (giaddr, hops, the relay's own address and stack on the clients' side; relay to server port 67 to
-  67 on the server's side). One host can serve several scopes.
+  67 on the server's side, with relay agent information option 82 — circuit ID VLAN / module / port and
+  the client's MAC as remote ID, the format FortiOS documents — which the server echoes). One host can
+  serve several scopes.
 - `dhcp.client` `reboot`: a joining host that held a lease confirms it (INIT-REBOOT: broadcast Request with
   the requested address, no server identifier, no Discover).
 - `https.server` / `https.client`: intranet sites on IIS (Windows Server 2019, TLS 1.2) with an AD CS
   certificate, browsed by Edge (Chromium ClientHello, JA4 `t13d1516h2_8daaf6152771_d8a2da3f94cd`) over
-  HTTP/2; no real cryptography, the handshake structure is exact and Zeek / Wireshark parse the chain.
-- `wsus.server` / `wsus.client`: Windows Update Agent scans against WSUS (SOAP over HTTP on 8530) and BITS
-  content downloads.
+  HTTP/2; no real cryptography, the handshake structure is exact and Zeek / Wireshark parse the chain. A
+  later connection to a site resumes the browser's TLS session (session ID, abbreviated handshake) for
+  2 hours.
+- `wsus.server` / `wsus.client`: Windows Update Agent scans against WSUS (SOAP over HTTP on 8530, protocol
+  version 2.4) with Xpress-compressed replies (`xpress.py`, [MS-WUSP] 2.1.1; Wireshark decompresses
+  them), ReportEventBatch reporting (events 141, 147, 162) and BITS content downloads.
 - Topology hosts: `aliases` (further A records in the site DNS), `role` and `inventory: false` for the
   students' asset inventory.
 - `dns.client` and `ntp.client` of a host that joins over DHCP start once its address is configured and
@@ -35,7 +40,7 @@
 ### Detection engineering
 - SIEM export: `siem/tls.jsonl` (one record per TLS handshake: SNI, JA4, version, cipher, ALPN, certificate
   subject / issuer / SAN) and `siem/http.jsonl` (one per HTTP/1.1 request and response: method, URI, host,
-  user agent, SOAPAction, range, status, sizes); `dhcp.jsonl` has `relay_addr`.
+  user agent, SOAPAction, range, status, content type and encoding, sizes); `dhcp.jsonl` has `relay_addr`.
 
 ### Training workflow
 - `pcapforge export-ctfd` is checked against a live CTFd 3.8.8 (ctfcli 0.1.8). Timestamp flags now accept

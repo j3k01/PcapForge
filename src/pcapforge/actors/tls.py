@@ -17,6 +17,11 @@ right size, as with the Kerberos ciphertext of the domain traffic.
   rsa_pss_rsae_sha256, ServerHelloDone, all in one record.
 * Client: ClientKeyExchange, ChangeCipherSpec, Finished, and with False Start its first
   application data in the same flight; server ChangeCipherSpec and Finished.
+* Resumption: Schannel keeps server sessions in its session ID cache (no session tickets by
+  default), so a browser that already has a session with the site offers that session ID in its
+  ClientHello (``session``); the server answers with the same ID and goes straight to
+  ChangeCipherSpec and Finished (RFC 5246 abbreviated handshake, ``server_resume``), and the client
+  answers with its ChangeCipherSpec and Finished (``client_resume_finish``).
 * Application data: AES-GCM records, 8-byte explicit nonce + ciphertext + 16-byte tag, at most
   16384 bytes of plaintext each.
 
@@ -75,9 +80,12 @@ def _extension(kind: int, body: bytes = b"") -> bytes:
     return _u16(kind) + _vec16(body)
 
 
-def client_hello(server_name: str, label: str, order) -> bytes:
-    """Chromium's ClientHello record for ``server_name``; ``order(n)`` permutes the n inner extensions."""
+def client_hello(server_name: str, label: str, order, session: bytes | None = None) -> bytes:
+    """Chromium's ClientHello record for ``server_name``; ``order(n)`` permutes the n inner extensions,
+    ``session`` is the TLS 1.2 session ID to resume (else a random 32-byte legacy session ID)."""
     rnd = stream(f"tls-client\x1f{label}", 64)
+    if session is not None:
+        rnd = rnd[:32] + session
     # Independent GREASE values (RFC 8701) for the cipher, the group, the version and the two extensions.
     grease = [GREASE[b % 16] for b in stream(f"tls-grease\x1f{label}", 5)]
     if grease[4] == grease[3]:  # BoringSSL: the two GREASE extensions differ
@@ -116,20 +124,39 @@ def client_hello(server_name: str, label: str, order) -> bytes:
     return record(HANDSHAKE, handshake(CLIENT_HELLO, body), TLS10)
 
 
-def server_flight(label: str, chain: list[bytes], alpn: bytes = b"h2") -> tuple[bytes, bytes]:
-    """(Schannel's ServerHello ... ServerHelloDone record, the session ID)."""
-    rnd = stream(f"tls-server\x1f{label}", 64)
-    session = rnd[32:]
+def _server_hello(label: str, session: bytes, alpn: bytes) -> bytes:
+    rnd = stream(f"tls-server\x1f{label}", 32)
     extensions = _extension(0xFF01, b"\x00") + _extension(23) + _extension(16, _vec16(_vec8(alpn)))
-    hello = handshake(SERVER_HELLO, _u16(TLS12) + rnd[:32] + _vec8(session) + _u16(SCHANNEL_SUITE) + b"\x00"
-                      + _vec16(extensions))
+    return handshake(SERVER_HELLO, _u16(TLS12) + rnd + _vec8(session) + _u16(SCHANNEL_SUITE) + b"\x00"
+                     + _vec16(extensions))
+
+
+def session_id(label: str) -> bytes:
+    """The session ID Schannel gives the full handshake of the connection ``label``."""
+    return stream(f"tls-session\x1f{label}", 32)
+
+
+def server_flight(label: str, chain: list[bytes], alpn: bytes = b"h2") -> bytes:
+    """Schannel's ServerHello ... ServerHelloDone of a full handshake."""
+    hello = _server_hello(label, session_id(label), alpn)
     certificate = handshake(CERTIFICATE, _vec24(b"".join(_vec24(c) for c in chain)))
     params = b"\x03" + _u16(X25519) + _vec8(stream(f"tls-ske\x1f{label}", 32))
     signature = _u16(RSA_PSS_RSAE_SHA256) + _vec16(stream(f"tls-ske-signature\x1f{label}", 256))
     key_exchange = handshake(SERVER_KEY_EXCHANGE, params + signature)
     messages = hello + certificate + key_exchange + handshake(SERVER_HELLO_DONE, b"")
     return b"".join(record(HANDSHAKE, messages[i:i + MAX_PLAINTEXT])
-                    for i in range(0, len(messages), MAX_PLAINTEXT)), session
+                    for i in range(0, len(messages), MAX_PLAINTEXT))
+
+
+def server_resume(label: str, session: bytes, alpn: bytes = b"h2") -> bytes:
+    """Abbreviated handshake: ServerHello with the resumed session ID, ChangeCipherSpec, Finished."""
+    return record(HANDSHAKE, _server_hello(label, session, alpn)) + server_finish(label)
+
+
+def client_resume_finish(label: str) -> bytes:
+    """The client's ChangeCipherSpec and Finished closing an abbreviated handshake."""
+    return record(CHANGE_CIPHER_SPEC, b"\x01") + record(HANDSHAKE, stream(f"tls-client-finished\x1f{label}",
+                                                                           16 + GCM_OVERHEAD))
 
 
 def client_finish(label: str) -> bytes:
