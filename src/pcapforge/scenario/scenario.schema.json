@@ -264,6 +264,11 @@
                 "type": "boolean",
                 "description": "Listed in the students' asset inventory (default true; false: a host the site does not know yet)"
               },
+              "aliases": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Further names of the host in the site DNS zone (A records), e.g. a web site name; {code} {CODE} allowed"
+              },
               "when": {
                 "$ref": "#/$defs/condition"
               }
@@ -518,7 +523,9 @@
                   "bacnet",
                   "enip",
                   "kerberos",
-                  "smb"
+                  "smb",
+                  "tls",
+                  "http"
                 ],
                 "description": "SIEM export file the SPL/KQL queries search"
               },

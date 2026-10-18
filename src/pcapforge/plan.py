@@ -109,7 +109,8 @@ class Plan:
             "behaviour": self.rng.key,
             # Names travel inside payloads (DNS, S7 SZL, OPC UA), so they must key the recording.
             "site": (self.topology.site_name, self.topology.site_code, self.topology.domain),
-            "hosts": [(h.id, h.name, h.device.name, h.loopback) for h in self.topology.hosts],
+            "hosts": [(h.id, h.name, h.device.name, h.loopback) + ((tuple(h.aliases),) if h.aliases else ())
+                      for h in self.topology.hosts],
         }
         digest = hashlib.sha256(b'{"actions": [')  # "actions" sorts before every other key
         for index, a in enumerate(self.actions):

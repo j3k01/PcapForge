@@ -26,8 +26,10 @@ QTYPES = {"A": 1, "SRV": 33, "AAAA": 28}
 
 
 def zone_records(topology) -> dict[str, str]:
-    """FQDN -> host id for every named host of the site."""
-    return {f"{h.name.lower()}.{topology.domain}": h.id for h in topology.hosts}
+    """FQDN -> host id for every named host of the site and its aliases."""
+    zone = {f"{h.name.lower()}.{topology.domain}": h.id for h in topology.hosts}
+    zone.update({f"{a.lower()}.{topology.domain}": h.id for h in topology.hosts for a in h.aliases})
+    return zone
 
 
 def query_server(rt, host_id: str, server_id: str, name: str, qtype: str, txid: int) -> None:

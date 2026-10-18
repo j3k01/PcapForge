@@ -61,7 +61,7 @@ FIELDS = [
     "http.request.method", "http.request.uri", "http.response.code", "http.request.line",
     "http.response.line",
     "browser.command", "browser.server", "nbdgm.source_name", "nbdgm.destination_name",
-    "dhcp.option.dhcp", "dhcp.id", "dhcp.flags.bc", "dhcp.hw.mac_addr", "dhcp.ip.client", "dhcp.ip.your",
+    "dhcp.option.dhcp", "dhcp.id", "dhcp.flags.bc", "dhcp.hw.mac_addr", "dhcp.ip.client", "dhcp.ip.your", "dhcp.ip.relay",
     "dhcp.option.requested_ip_address", "dhcp.option.dhcp_server_id", "dhcp.option.hostname",
     "dhcp.fqdn.name", "dhcp.option.vendor_class_id", "dhcp.option.ip_address_lease_time",
     "dhcp.option.router", "dhcp.option.domain_name_server", "dhcp.option.domain_name",
@@ -102,6 +102,10 @@ FIELDS = [
     # SMB 2/3: header, tree and file names (tshark tracks them across the session), sizes.
     "smb2.cmd", "smb2.flags.response", "smb2.msg_id", "smb2.sesid", "smb2.tid", "smb2.nt_status", "smb2.tree",
     "smb2.share_type", "smb2.filename", "smb2.flags.signature", "smb2.dialect", "smb2.eof", "smb2.read_length",
+    # TLS handshakes (a server flight carries ServerHello, Certificate, ... in one frame) and HTTP.
+    "tls.handshake.type", "tls.handshake.version", "tls.handshake.ciphersuite", "tls.handshake.extensions_server_name",
+    "tls.handshake.extensions_alpn_str", "tls.handshake.ja4", "x509sat.uTF8String", "x509ce.dNSName",
+    "http.host", "http.user_agent", "http.content_type", "http.content_length_header",
 ]
 F = {name: index for index, name in enumerate(FIELDS)}
 
@@ -155,6 +159,10 @@ KRB_ERRORS = {6: "KDC_ERR_C_PRINCIPAL_UNKNOWN", 7: "KDC_ERR_S_PRINCIPAL_UNKNOWN"
               24: "KDC_ERR_PREAUTH_FAILED", 25: "KDC_ERR_PREAUTH_REQUIRED", 32: "KRB_AP_ERR_TKT_EXPIRED",
               37: "KRB_AP_ERR_SKEW", 52: "KRB_ERR_RESPONSE_TOO_BIG", 68: "KDC_ERR_WRONG_REALM"}
 PA_ENC_TIMESTAMP = 2
+TLS_VERSIONS = {0x0301: "TLS 1.0", 0x0302: "TLS 1.1", 0x0303: "TLS 1.2", 0x0304: "TLS 1.3"}
+TLS_SUITES = {0xC030: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", 0xC02F: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+              0xC02C: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", 0xC02B: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+              0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA384", 0x1303: "TLS_CHACHA20_POLY1305_SHA256"}
 SMB2_COMMANDS = {0: "negotiate", 1: "session_setup", 2: "logoff", 3: "tree_connect", 4: "tree_disconnect",
                  5: "create", 6: "close", 7: "flush", 8: "read", 9: "write", 10: "lock", 11: "ioctl", 12: "cancel",
                  13: "echo", 14: "query_directory", 15: "change_notify", 16: "query_info", 17: "set_info",
@@ -410,7 +418,7 @@ def _is_service_port(port: int | None) -> bool:
 
 # JSON-lines files written as the capture streams by (flows.jsonl is written at the end).
 DATASETS = ("modbus", "dns", "ntp", "name_resolution", "arp", "dhcp", "iec104", "dnp3", "bacnet", "enip",
-            "kerberos", "smb")
+            "kerberos", "smb", "tls", "http")
 
 
 class ExportError(RuntimeError):
@@ -489,6 +497,10 @@ class _Exporter:
         self.kerberos_pending: dict[tuple, deque[dict]] = defaultdict(deque)
         self.smb = self.datasets["smb"]
         self.smb_pending: dict[tuple, deque[dict]] = defaultdict(deque)
+        self.tls = self.datasets["tls"]
+        self.tls_pending: dict[tuple, dict] = {}
+        self.http = self.datasets["http"]
+        self.http_pending: dict[tuple, deque[dict]] = defaultdict(deque)
 
     # -- per frame -------------------------------------------------------------------
     def frame(self, row: list[str]) -> None:
@@ -547,6 +559,71 @@ class _Exporter:
             self._kerberos(row, key, transport, number, epoch, conn)
         elif row[F["smb2.cmd"]]:
             self._smb(row, key, number, epoch, conn)
+        elif row[F["tls.handshake.type"]] and transport == "tcp":
+            self._tls(row, key, number, epoch, conn)
+        elif app == "http" and (row[F["http.request.method"]] or row[F["http.response.code"]]):
+            self._http(row, key, number, epoch, conn)
+
+    # -- tls ---------------------------------------------------------------------------
+    def _tls(self, row, key, number, epoch, conn) -> None:
+        """One record per TLS handshake: the ClientHello (SNI, ALPN offer, JA4), then what the server
+        flight negotiated (version, cipher suite, ALPN) and its certificate (subject / issuer CN, SAN)."""
+        types = {_int(t) for t in _all(row, "tls.handshake.type")}
+        if 1 in types:
+            record = {
+                **_stamp(epoch), **conn, "transport": "tcp", "app": "tls",
+                "server_name": _first(row, "tls.handshake.extensions_server_name") or None,
+                "ja4": _first(row, "tls.handshake.ja4") or None, "version": None, "cipher": None, "alpn": None,
+                "cert_subject": None, "cert_issuer": None, "cert_san": [], "established": False,
+                "client_hello_frame": number, "server_hello_frame": None,
+            }
+            self.tls.append(record)
+            self.tls_pending[key] = record
+            return
+        record = self.tls_pending.get(key)
+        if record is None:
+            return
+        if 2 in types:
+            version = _int(_first(row, "tls.handshake.version"))
+            suite = _int(_first(row, "tls.handshake.ciphersuite"))
+            record["version"] = TLS_VERSIONS.get(version, f"0x{version:04x}" if version is not None else None)
+            record["cipher"] = TLS_SUITES.get(suite, f"0x{suite:04x}" if suite is not None else None)
+            record["alpn"] = _first(row, "tls.handshake.extensions_alpn_str") or None
+            record["server_hello_frame"] = number
+            record["established"] = True
+        if 11 in types:
+            names = _all(row, "x509sat.uTF8String")  # issuer CN, then subject CN, of each certificate
+            if len(names) >= 2:
+                record["cert_issuer"], record["cert_subject"] = names[0], names[1]
+            record["cert_san"] = _all(row, "x509ce.dNSName")
+
+    # -- http --------------------------------------------------------------------------
+    def _http(self, row, key, number, epoch, conn) -> None:
+        """One record per HTTP/1.1 request and its response (in order on the connection)."""
+        method = _first(row, "http.request.method")
+        if method:
+            headers = _all(row, "http.request.line")
+            record = {
+                **_stamp(epoch), **conn, "transport": "tcp", "app": "http",
+                "method": method, "uri": _first(row, "http.request.uri") or None,
+                "host": _first(row, "http.host") or None, "user_agent": _first(row, "http.user_agent") or None,
+                "soap_action": (_header(headers, "SOAPAction") or "").strip('"') or None,
+                "range": _header(headers, "Range"),
+                "request_bytes": _int(_first(row, "http.content_length_header")),
+                "status": None, "content_type": None, "response_bytes": None,
+                "request_frame": number, "response_frame": None,
+            }
+            self.http.append(record)
+            self.http_pending[key].append(record)
+            return
+        pending = self.http_pending.get(key)
+        if not pending:
+            return
+        record = pending.popleft()
+        record["status"] = _int(_first(row, "http.response.code"))
+        record["content_type"] = _first(row, "http.content_type") or None
+        record["response_bytes"] = _int(_first(row, "http.content_length_header"))
+        record["response_frame"] = number
 
     def _flow(self, row, key, transport, number, epoch, src, dst, sport, dport, app) -> None:
         flow = self.flows.get(key)
@@ -914,6 +991,7 @@ class _Exporter:
             "client_mac": _first(row, "dhcp.hw.mac_addr") or None,
             "client_addr": address("dhcp.ip.client"),
             "assigned_addr": address("dhcp.ip.your"),
+            "relay_addr": address("dhcp.ip.relay"),
             "requested_addr": address("dhcp.option.requested_ip_address"),
             "server_id": address("dhcp.option.dhcp_server_id"),
             "host_name": _first(row, "dhcp.option.hostname") or None,

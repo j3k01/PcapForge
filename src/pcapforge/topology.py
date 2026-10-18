@@ -94,6 +94,7 @@ class Host:
     present: tuple[float, float] | None = None
     role: str = ""          # role in the students' asset inventory (default: the group id)
     listed: bool = True     # in the students' asset inventory (False: a host the site does not know yet)
+    aliases: list[str] = field(default_factory=list)  # further names in the site DNS zone (A records)
 
     @property
     def ip(self) -> str:
@@ -150,6 +151,8 @@ class Topology:
                     arrives=bool(spec.get("arrives", False)),
                     role=spec.get("role", spec["id"]),
                     listed=bool(spec.get("inventory", True)),
+                    aliases=[a.format(code=self.site_code, CODE=self.site_code.upper())
+                             for a in spec.get("aliases", [])],
                     name_template=spec.get("name", f"{spec['id']}-{{index:02d}}"),
                     subnets=list(spec.get("subnets", [spec.get("subnet")])),
                 )

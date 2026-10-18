@@ -151,7 +151,7 @@ def test_a_windows_server_orders_its_options_like_windows_and_answers_the_client
     server = next(a for a in plan.actors if a.id == "dhcp_service")
     pc = plan.topology.by_id["pc1"]
     sent = []
-    protocol = _DhcpServerProtocol(server, server.hosts[0].loopback)
+    protocol = _DhcpServerProtocol([server], server.hosts[0].loopback)
     protocol.transport = SimpleNamespace(sendto=lambda data, addr: sent.append(parse(data)))
     chaddr = placeholder_mac(pc.loopback)
     asked = (PARAMETERS, bytes(STYLES["windows"].parameters))
@@ -182,3 +182,34 @@ def test_a_host_that_held_a_lease_confirms_it_and_talks_only_once_its_address_is
         talk = [a for a in own if a.actor in ("name_lookups", "time_sync", "windows_chatter")
                 and a.op != "dhcpv6.solicit"]
         assert talk and min(a.t for a in talk) >= joined.t + JOIN_SETTLE
+
+
+def test_a_relay_agent_carries_the_exchange_between_the_client_subnet_and_the_server():
+    plan = it_plan()
+    topo = plan.topology
+    topo.assign_addresses(Rng("test", "addresses"))
+    dc, pc, fw = topo.by_id["dc"], topo.by_id["pc1"], topo.by_id["firewall"]
+    giaddr = ip(fw.interface_on("office").ip)
+    leases = dhcp.Dhcp(plan, Rng("test", "dhcp"))
+    flow = SimpleNamespace(proto=UDP, server_port=ports.DHCP_SERVER, hosts=(pc, dc))
+
+    def at(payload, side):
+        return leases.delivery(SimpleNamespace(flow=flow, side=side, payload=payload))
+
+    discover = message(BOOTREQUEST, DISCOVER, flags=BROADCAST_FLAG)
+    offer = message(BOOTREPLY, OFFER, flags=BROADCAST_FLAG, yiaddr="10.1.2.3",
+                    options=[(51, (3600).to_bytes(4, "big"))])
+    renewal = message(BOOTREQUEST, REQUEST, ciaddr="10.1.2.3")
+    # On the clients' subnet: the client broadcasts, the relay answers from its address there.
+    topo.sensor = "office"
+    assert at(discover, 0) == dhcp.Delivery(dhcp.UNSPECIFIED_BYTES, True)
+    reply = at(offer, 1)
+    assert (reply.source, reply.broadcast, reply.relay, reply.giaddr) == (giaddr, True, fw, giaddr)
+    assert at(renewal, 0) is None  # a client with an address talks to the server directly
+    # On the server's subnet: relay to server and back, unicast port 67 to 67, giaddr set.
+    topo.sensor = "servers"
+    forwarded = at(discover, 0)
+    assert forwarded.source == ip(fw.interface_on("servers").ip) and not forwarded.broadcast
+    assert (forwarded.ports, forwarded.giaddr, forwarded.hops, forwarded.relay) == ((67, 67), giaddr, 1, fw)
+    answered = at(offer, 1)
+    assert (answered.dest, answered.ports, answered.relay, answered.broadcast) == (giaddr, (67, 67), None, False)

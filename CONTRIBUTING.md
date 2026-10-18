@@ -132,7 +132,8 @@ topology:
 
 - `id` is a role; `count` creates several instances (`plc` then means all of them in actor `hosts`/`targets`).
   The students' asset inventory in `briefing.md` shows `role` (default: the `id`), so two groups can share
-  one role there; `inventory: false` leaves a host out (a device the site does not know yet).
+  one role there; `inventory: false` leaves a host out (a device the site does not know yet); `aliases`
+  adds names of the host to the site DNS zone (A records, e.g. web site names served by `https.server`).
 - `device` is a profile name from `src/pcapforge/profiles/devices.yaml`, or a list the seed picks from.
   The device decides vendor MAC OUIs, the OS stack (TTL, TCP options, ephemeral ports, delayed ACK,
   retransmission timeout), application processing latency and, for field devices, the identity it reports.

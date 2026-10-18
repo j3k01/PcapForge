@@ -186,10 +186,13 @@ def _ips(*addresses: str) -> bytes:
 # -- server --------------------------------------------------------------------------------
 
 class _DhcpServerProtocol(asyncio.DatagramProtocol):
-    def __init__(self, actor: DhcpServer, server_loopback: str) -> None:
-        self.actor = actor
+    """The DHCP service of one host: one scope per ``dhcp.server`` actor on it, picked by the client's subnet
+    (its own, or one a relay agent forwards from)."""
+
+    def __init__(self, scopes: list[DhcpServer], server_loopback: str) -> None:
+        self.scopes = {actor.subnet: actor for actor in scopes}
         self.server_id = socket.inet_aton(server_loopback)
-        topology = actor.plan_.topology
+        topology = scopes[0].plan_.topology
         self.clients = {placeholder_mac(h.loopback): h for h in topology.hosts}
 
     def connection_made(self, transport) -> None:
@@ -199,27 +202,27 @@ class _DhcpServerProtocol(asyncio.DatagramProtocol):
         request = parse(data)
         if request is None or request.op != BOOTREQUEST:
             return
+        client = self.clients.get(request.chaddr)
+        actor = next((self.scopes[s] for s in client.subnets if s in self.scopes), None) if client else None
+        if actor is None:
+            return
         kind = request.type
         if kind in (DISCOVER, REQUEST):
-            client = self.clients.get(request.chaddr)
-            if client is None:
-                return
             # The lease is the address the topology gives the host; renewals keep it.
             yiaddr = request.ciaddr if request.ciaddr != bytes(4) else socket.inet_aton(client.loopback)
             reply_type = OFFER if kind == DISCOVER else ACK
             reply = encode(BOOTREPLY, request.xid, request.chaddr,
-                           self._options(reply_type, request, lease=True), flags=request.flags,
+                           self._options(actor, reply_type, request, lease=True), flags=request.flags,
                            ciaddr=request.ciaddr, yiaddr=yiaddr)
         elif kind == INFORM:
             # RFC 2131 4.3.5: configuration only, no lease time, no yiaddr.
-            reply = encode(BOOTREPLY, request.xid, request.chaddr, self._options(ACK, request, lease=False),
+            reply = encode(BOOTREPLY, request.xid, request.chaddr, self._options(actor, ACK, request, lease=False),
                            flags=request.flags, ciaddr=request.ciaddr)
         else:
             return  # RELEASE / DECLINE: no answer
         self.transport.sendto(reply, addr)
 
-    def _options(self, reply_type: int, request: Message, lease: bool) -> list[tuple[int, bytes]]:
-        actor = self.actor
+    def _options(self, actor: DhcpServer, reply_type: int, request: Message, lease: bool) -> list[tuple[int, bytes]]:
         configured = actor.configured()
         requested = [code for code in request.options.get(PARAMETERS, b"") if code in configured and code != SUBNET_MASK]
         message_type, server_id = (MESSAGE_TYPE, bytes((reply_type,))), (SERVER_ID, self.server_id)
@@ -253,6 +256,12 @@ class DhcpServer(Actor):
     ``windows``; T1/T2 = 50/87.5 %), ``dns`` and ``ntp`` (host references handed out as options 6
     and 42; ``dns`` also hands out the site domain, option 15). The router option (3) is the
     subnet's router: the server host itself when it routes for the subnet.
+
+    A ``subnet`` the server host has no interface on is served through a DHCP relay agent (RFC 2131
+    4.1, RFC 1542): the subnet's router, which must also have an interface on the server's subnet,
+    forwards the clients' broadcasts to the server with its own address on the clients' subnet in
+    ``giaddr``, and delivers the server's replies on that subnet from that address. One host may run
+    several ``dhcp.server`` actors, one per scope.
     """
 
     type = "dhcp.server"
@@ -267,8 +276,13 @@ class DhcpServer(Actor):
         if self.style not in SERVER_STYLES:
             raise ScenarioError(f"{self.type} '{self.id}': unknown style '{self.style}' ({', '.join(SERVER_STYLES)})")
         self.subnet = self.param("subnet", host.subnets[0])
+        self.relay = None
         if self.subnet not in host.subnets:
-            raise ScenarioError(f"{self.type} '{self.id}': '{host.id}' has no interface on '{self.subnet}'")
+            self.relay = next((h for h in topology.hosts if h.router and self.subnet in h.subnets
+                               and set(h.subnets) & set(host.subnets)), None)
+            if self.relay is None:
+                raise ScenarioError(f"{self.type} '{self.id}': '{host.id}' has no interface on '{self.subnet}' "
+                                    f"and no router connects the two to relay DHCP")
         spec = topology.subnet_specs[self.subnet]
         prefix = ipaddress.ip_network(spec["cidr"]).prefixlen if "cidr" in spec else int(spec["prefix"])
         self.mask = ipaddress.IPv4Network(f"0.0.0.0/{prefix}").netmask.packed
@@ -286,6 +300,7 @@ class DhcpServer(Actor):
         self.plan_.facts[self.id] = {
             "hosts": [host_ref(host.id)],
             "subnet": self.subnet,
+            "relay": host_ref(self.relay.id) if self.relay else None,
             "style": self.style,
             "lease_s": self.lease_s,
             "renewal_s": int(self.lease_s * T1),
@@ -309,10 +324,13 @@ class DhcpServer(Actor):
         return options
 
     async def serve(self, rt) -> None:
-        loop = asyncio.get_running_loop()
         host = self.hosts[0]
+        scopes = [a for a in self.plan_.actors if isinstance(a, DhcpServer) and a.hosts[0].id == host.id]
+        if scopes[0] is not self:
+            return  # the host's first dhcp.server listens for all its scopes
+        loop = asyncio.get_running_loop()
         transport, _ = await loop.create_datagram_endpoint(
-            lambda: _DhcpServerProtocol(self, host.loopback), local_addr=(host.loopback, ports.DHCP_SERVER))
+            lambda: _DhcpServerProtocol(scopes, host.loopback), local_addr=(host.loopback, ports.DHCP_SERVER))
         rt.transports.append(transport)
 
 
@@ -356,20 +374,21 @@ class DhcpClient(Actor):
         plan = self.plan_
         topology = plan.topology
         server_host = topology.select(self.param("server"))[0]
-        server = next((a for a in plan.actors if isinstance(a, DhcpServer) and a.hosts[0].id == server_host.id), None)
-        if server is None:
+        scopes = [a for a in plan.actors if isinstance(a, DhcpServer) and a.hosts[0].id == server_host.id]
+        if not scopes:
             raise ScenarioError(f"{self.type} '{self.id}': '{server_host.id}' runs no dhcp.server")
         join, leave = self.param("join"), self.param("leave")
         release = bool(self.param("release", False))
         reboot = bool(self.param("reboot", False))
         if reboot and join is None:
             raise ScenarioError(f"{self.type} '{self.id}': reboot needs join (when the host comes back)")
-        renewal = server.lease_s * T1
         facts = []
         for host in self.hosts:
-            if server.subnet not in host.subnets or host.router:
-                raise ScenarioError(f"{self.type} '{self.id}': '{host.id}' is not a host on the "
-                                    f"'{server.subnet}' subnet served by '{server_host.id}'")
+            server = next((a for a in scopes if a.subnet in host.subnets), None)
+            if server is None or host.router:
+                raise ScenarioError(f"{self.type} '{self.id}': '{host.id}' is not a host on a subnet "
+                                    f"'{server_host.id}' serves")
+            renewal = server.lease_s * T1
             style = self.param("style") or DEFAULT_STYLE.get(host.device.stack.name)
             if style not in STYLES:
                 raise ScenarioError(f"{self.type} '{self.id}': no DHCP client style for '{host.id}' "

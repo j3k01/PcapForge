@@ -287,6 +287,9 @@ class Headers:
             value = state.ipid[side]
             state.ipid[side] = (value + 1) & 0xFFFF
             return value
+        return self._host_ipid(host)
+
+    def _host_ipid(self, host: Host) -> int:
         value = self.host_ipid.get(host.id)
         if value is None:
             value = self.rng.randrange(65536)
@@ -328,12 +331,19 @@ class Headers:
         side = p.side
         src, dst = state.addrs[side], state.addrs[1 - side]
         sport, dport = state.ports[side], state.ports[1 - side]
+        stack, sender = state.stacks[side], p.src
         ttl, df = state.ttl[side], state.df[side]
         if delivery is not None:
+            if delivery.relay is not None:  # a packet the relay agent sends itself: one hop, its own stack
+                sender, stack, hops = delivery.relay, delivery.relay.device.stack, 0
+                ttl, df = stack.ttl, stack.df
             if delivery.source is not None:
                 src = delivery.source
+            if delivery.dest is not None:
+                dst = delivery.dest
+            if delivery.ports is not None:
+                sport, dport = delivery.ports
             if delivery.broadcast:
-                stack = state.stacks[side]
                 dst = dhcp.BROADCAST_BYTES
                 ttl, df = stack.link_local.ttl.get(LIMITED_BROADCAST, stack.ttl), stack.link_local.df
         if flow.proto == TCP:
@@ -348,6 +358,8 @@ class Headers:
                 client, server = flow.hosts
                 mac = mac_bytes(self.topology.address_towards(client, server).mac)
                 payload = dhcp.rewrite(payload, lambda ip: self._dhcp_address(ip, flow), mac)
+                if delivery is not None and delivery.giaddr is not None:
+                    payload = payload[:3] + bytes((delivery.hops,)) + payload[4:24] + delivery.giaddr + payload[28:]
             elif self._sender_port(p) == ports.ENIP:
                 payload = rewrite_list_identity(payload, lambda ip: self._announced_address(ip, p))
             elif self._sender_port(p) == ports.BACNET:
@@ -359,7 +371,8 @@ class Headers:
             csum = 0xFFFF
         offset = 16 if flow.proto == TCP else 6
         l4 = l4[:offset] + csum.to_bytes(2, "big") + l4[offset + 2:]
-        header = _IP.pack(0x45, 0, 20 + len(l4), self._ipid(state, side, p.src),
+        ipid = self._ipid(state, side, p.src) if sender is p.src else self._host_ipid(sender)
+        header = _IP.pack(0x45, 0, 20 + len(l4), ipid,
                           0x4000 if df else 0, max(ttl - hops, 1), flow.proto, 0, src, dst)
         header = header[:10] + checksum(header).to_bytes(2, "big") + header[12:]
         return header + l4

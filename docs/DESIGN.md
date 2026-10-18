@@ -104,9 +104,13 @@ Done and committed (verify with `git log --oneline`):
   `dhcp.server|client` (DHCPv4 over real UDP sockets between the loopback addresses; reply formats of
   the FortiGate DHCP service and the Windows Server DHCP role; joins as a new lease (DORA) or as the
   INIT-REBOOT confirmation of a held lease; the composer rewrites addresses and chaddr / client id,
-  delivers 0.0.0.0 → 255.255.255.255 broadcasts or unicast to yiaddr by the broadcast flag, adds RFC 5227
-  ARP probes / announcements after the ACK of a new lease, see `compose/dhcp.py`, and keeps the ARP a
-  unicast reply needs after the broadcast it answers, see `compose/link.py`),
+  delivers 0.0.0.0 → 255.255.255.255 broadcasts or unicast to yiaddr by the broadcast flag, puts a relay
+  agent (the router) between a client and a server on different subnets, adds RFC 5227 ARP probes /
+  announcements after the ACK of a new lease, see `compose/dhcp.py`, and keeps the ARP a unicast reply
+  needs after the broadcast it answers, see `compose/link.py`),
+  `https.server|client` and `wsus.server|client` (TCP conversations the client scripts: it hands the
+  server each request's size and the reply bytes before sending, `actors/scripted.py`; TLS 1.2 records
+  and AD CS certificates without real cryptography, `actors/tls.py`, `actors/x509.py`),
   `windows.chatter` (LLMNR, NBNS, mDNS, SSDP M-SEARCH, browser host announcements; timing,
   ports and payloads checked against a Windows 10 capture). Lookups only use names the site
   DNS zone does not resolve; hosts with a `dns.client` first query the site server for

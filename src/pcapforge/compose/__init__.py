@@ -207,13 +207,14 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
                 frame6 = eth[:12] + ETHERTYPE_IPV6 + headers.build6(p, hops, src6, dst6)
                 sorter.packet(p.time, pad(frame6), _info(p))
             elif ipv4:
-                delivery = dhcp.delivery(p)
-                if delivery is None:
+                delivery = leases.delivery(p)
+                if delivery is None or delivery.arp:
                     for t, arp in link.arp_before(p.time, p.src, p.dst):
                         synthesized(t, arp)
-                elif delivery.broadcast:
+                if delivery is not None and delivery.broadcast:
                     eth = BROADCAST + eth[6:]
-                    link.heard[p.src.id] = p.time
+                    if p.side == 0:
+                        link.heard[p.src.id] = p.time
                 sorter.packet(p.time, pad(eth + headers.build(p, hops, delivery)), _info(p))
                 for t, arp in leases.after(p):
                     synthesized(t, arp)

@@ -3,23 +3,26 @@ schema: pcapforge/scenario@1
 id: it-baseline-operations
 title: Baseline of an office LAN at the start of the working day (no incident)
 line: it
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
-tags: [baseline, it, dhcp, dns, ntp, windows, active-directory, kerberos, ldap, smb]
+tags: [baseline, it, dhcp, dhcp-relay, dns, ntp, https, tls, wsus, windows-update, windows, active-directory, kerberos, ldap, smb]
 summary: >
-  An office LAN in the morning: the domain controller serves DHCP (Windows Server), DNS and time;
-  office PCs boot and confirm the leases they held, a newly delivered PC leases its first address,
-  and (medium/hard) the Windows hosts resolve names, chatter on the link and work as members of an
-  Active Directory domain, with an employee's logon. There is no incident. Use it to learn how a
-  Windows office network comes up and to baseline DHCP before hunting for rogue devices.
+  An office LAN in the morning, captured on the office switch. The domain controller on the server
+  subnet serves DHCP (Windows Server, through the firewall's DHCP relay), DNS and time; office PCs
+  boot and confirm the leases they held and a newly delivered PC leases its first address. The
+  workstations open the intranet sites over HTTPS (Edge to IIS, a certificate from the domain's
+  AD CS root CA) and scan for Windows updates at the WSUS server (on medium/hard they download an
+  approved Defender update); on medium/hard they also resolve names, chatter on the link and work as
+  members of an Active Directory domain, with an employee's logon. There is no incident. Use it to
+  learn what a Windows office network does and to baseline it before hunting.
 
 briefing: |
   You are joining the SOC of {site_name} ({domain}). The attached capture comes from the SPAN
   port of the office access switch ({sensor_subnet}) as the working day starts. The sensor keeps
   internal traffic only; Internet-bound sessions are logged by the firewall instead.
-  Document how hosts get their addresses on this LAN: which server leases them, with which
-  settings, and which hosts came online during the capture.
+  Document what normal looks like on this LAN: how hosts get their addresses, which hosts came
+  online during the capture, which internal web sites they use and how they get their updates.
 
 mitre: []
 
@@ -34,9 +37,14 @@ topology:
   sensor: office
   subnets:
     - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
   hosts:
-    - {id: firewall, device: fortigate, subnets: [office], name: "fw-{code}-01", router: true}
-    - {id: dc, device: windows-server-vm, subnet: office, name: "DC-{CODE}-01"}
+    # The firewall routes between the office LAN and the server subnet and relays DHCP for the office.
+    - {id: firewall, device: fortigate, subnets: [office, servers], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    # IIS intranet web server (the portal and the helpdesk sites) and the WSUS server.
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
     # Office PCs that boot during the capture, and the ones that were already running.
     - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
     - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
@@ -44,8 +52,9 @@ topology:
     - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
 
 actors:
-  # Windows Server DHCP role on the domain controller: scope options router (the firewall),
-  # DNS server and domain name; the Windows Server default lease of 8 days.
+  # Windows Server DHCP role on the domain controller, serving the office scope through the firewall's
+  # DHCP relay: scope options router (the firewall), DNS server and domain name; the Windows Server
+  # default lease of 8 days.
   - id: dhcp_service
     type: dhcp.server
     hosts: dc
@@ -85,6 +94,25 @@ actors:
     hosts: [pc, ws, newpc]
     when: vars.domain
     params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  # Intranet sites over HTTPS: IIS with a certificate from the AD CS enterprise root CA on the DC;
+  # Edge on the workstations.
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, newpc]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  # Windows Update against WSUS; on medium/hard a Defender security intelligence update is approved.
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, newpc]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
 
 difficulty:
   easy:
@@ -97,6 +125,8 @@ difficulty:
       chatter: false
       domain: false
       ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
   medium:
     duration: 45m
     impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 30, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
@@ -108,6 +138,8 @@ difficulty:
       chatter_rate: 1
       domain: true
       ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
   hard:
     duration: 2h
     impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 130, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
@@ -119,6 +151,8 @@ difficulty:
       chatter_rate: 2
       domain: true
       ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
 
 questions:
   - id: dhcp_server
@@ -126,16 +160,37 @@ questions:
     answer: "${facts.dhcp_service.hosts[0].ip}"
     type: ip
     points: 10
-    hint: DHCP servers answer from UDP port 67 with Offer and ACK messages (dhcp.option.dhcp in {2, 5}).
+    hint: >-
+      The replies on this LAN do not come from the server itself. The DHCP Server Identifier option (54)
+      of an Offer or ACK names it.
     check:
-      filter: "dhcp.option.dhcp == 5 && ip.src == ${facts.dhcp_service.hosts[0].ip}"
+      filter: "dhcp.option.dhcp == 5 && dhcp.option.dhcp_server_id == ${facts.dhcp_service.hosts[0].ip}"
       expect: {min: 1}
     hunt:
       dataset: dhcp
-      spl: "index=* sourcetype=pcapforge:dhcp message IN (offer, ack) | stats count BY src, server_id"
+      spl: "index=* sourcetype=pcapforge:dhcp message IN (offer, ack) | stats count BY src, relay_addr, server_id"
       kql: "message : (\"offer\" or \"ack\")"
       zeek: {log: dhcp, count_by: [server_addr]}
-      look_for: The source of every Offer and ACK; the server identifier option (54) names the same address.
+      look_for: >-
+        The server identifier (option 54) of every Offer and ACK. The packets come from the relay agent
+        (`src`, the giaddr); Zeek's server_addr is that sender too.
+  - id: relay_agent
+    text: >-
+      The DHCP server is on another subnet. Which address relays its replies onto this LAN (the relay
+      agent address in the messages)?
+    answer: "${facts.dhcp_service.relay.ip}"
+    type: ip
+    points: 10
+    hint: A relay agent puts its address on the clients' subnet into the giaddr field (dhcp.ip.relay) and sends the replies from it.
+    check:
+      filter: "dhcp.option.dhcp in {2, 5} && dhcp.ip.relay == ${facts.dhcp_service.relay.ip} && ip.src == ${facts.dhcp_service.relay.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message IN (offer, ack) | stats count BY src, relay_addr"
+      kql: "message : (\"offer\" or \"ack\") and relay_addr : *"
+      zeek: {log: dhcp, count_by: [server_addr]}
+      look_for: The relay agent address (giaddr) of the replies, and the address they come from.
   - id: lease_time
     text: How long are the leases this server grants? Give the lease time in seconds.
     answer: "${facts.dhcp_service.lease_s}"
@@ -248,6 +303,127 @@ questions:
       look_for: >-
         Successful AS exchanges (a new TGT). Computer accounts end with `$`; the account without `$` is
         the person who logged on at that host.
+  - id: web_sites
+    text: Which intranet site names do the workstations open over HTTPS? (the names they ask the server for)
+    answer: "${facts.browsing.sites_visited}"
+    type: set
+    points: 10
+    hint: A TLS ClientHello names the site in its Server Name Indication extension (tls.handshake.extensions_server_name).
+    check:
+      filter: "tls.handshake.type == 1 && tls.handshake.extensions_server_name"
+      expect: {min: 1}
+    hunt:
+      dataset: tls
+      spl: "index=* sourcetype=pcapforge:tls | stats count BY server_name, dest"
+      kql: "server_name : *"
+      zeek: {log: ssl, count_by: [server_name, id.resp_h]}
+      look_for: The SNI of every TLS session; both names point at the same web server.
+  - id: web_ca
+    text: Which certificate authority issued the intranet web server's certificate? Give its name (CN).
+    answer: "${facts.web_service.ca.name}"
+    accept: ["${facts.web_service.ca.name}"]
+    type: text
+    points: 10
+    hint: TLS 1.2 sends the certificate chain in clear text (tls.handshake.type == 11); read the issuer of the server certificate.
+    check:
+      filter: 'tls.handshake.type == 11 && x509sat.uTF8String == "${facts.web_service.ca.name}"'
+      expect: {min: 1}
+    hunt:
+      dataset: tls
+      spl: "index=* sourcetype=pcapforge:tls cert_issuer=* | stats count BY cert_subject, cert_issuer"
+      kql: "cert_issuer : *"
+      zeek: {log: x509, count_by: [certificate.subject, certificate.issuer]}
+      look_for: >-
+        The issuer of the server certificate: the domain's enterprise root CA (AD CS names it
+        <domain>-<server>-CA). The chain also carries the CA certificate itself.
+  - id: tls_cipher
+    text: Which TLS cipher suite does the intranet web server choose?
+    answer: TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    accept: [TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, ECDHE-RSA-AES256-GCM-SHA384, "0xc030", c030]
+    type: text
+    points: 10
+    hint: The ServerHello (tls.handshake.type == 2) carries the cipher suite the server picked from the client's list.
+    check:
+      filter: "tls.handshake.type == 2 && tls.handshake.ciphersuite == 0xc030"
+      expect: {min: 1}
+    hunt:
+      dataset: tls
+      spl: "index=* sourcetype=pcapforge:tls | stats count BY dest, version, cipher"
+      kql: "cipher : *"
+      zeek: {log: ssl, count_by: [id.resp_h, version, cipher]}
+      look_for: >-
+        Every session ends up on TLS 1.2 with the same suite: the browser offers TLS 1.3, the Windows
+        Server 2019 web server does not support it and picks the first ECDHE-RSA suite of its order.
+  - id: wsus_server
+    text: Which server do the workstations ask for Windows updates? Give its IP address.
+    answer: "${facts.update_service.hosts[0].ip}"
+    type: ip
+    points: 10
+    hint: The Windows Update Agent talks SOAP over plain HTTP to its WSUS server (User-Agent Windows-Update-Agent).
+    check:
+      filter: 'http.request.method == "POST" && http.user_agent contains "Windows-Update-Agent" && ip.dst == ${facts.update_service.hosts[0].ip}'
+      expect: {min: 1}
+    hunt:
+      dataset: http
+      spl: "index=* sourcetype=pcapforge:http user_agent=\"Windows-Update-Agent*\" | stats count BY dest, dest_port, uri"
+      kql: "user_agent : Windows-Update-Agent*"
+      zeek: {log: http, count_by: [id.resp_h, id.resp_p, uri]}
+      look_for: The server and port the Windows Update Agent posts its SOAP calls to.
+  - id: wsus_port
+    text: On which TCP port does that update server listen?
+    answer: "${facts.update_service.port}"
+    type: number
+    points: 5
+    check:
+      filter: "tcp.dstport == ${facts.update_service.port} && http.request"
+      expect: {min: 1}
+  - id: wsus_calls
+    text: >-
+      Which SOAP methods does a workstation call on the update server during a scan? (the last part of
+      the SOAPAction header)
+    answer: "${facts.windows_update.soap_actions}"
+    type: set
+    points: 10
+    hint: Each POST carries a SOAPAction header such as "http://www.microsoft.com/SoftwareDistribution/Server/ClientWebService/GetCookie".
+    check:
+      filter: 'http.request.line contains "SOAPAction"'
+      expect: {min: 4}
+    hunt:
+      dataset: http
+      spl: "index=* sourcetype=pcapforge:http soap_action=* | stats count BY soap_action"
+      kql: "soap_action : *"
+      zeek: {log: http, where: {method: POST}, count_by: [id.orig_h, uri]}
+      look_for: >-
+        GetConfig, GetAuthorizationCookie (on the SimpleAuth service), GetCookie and SyncUpdates, then
+        GetExtendedUpdateInfo when an approved update applies.
+  - id: update_file
+    when: vars.wsus_update
+    text: An approved update was downloaded from the update server. Which file did the workstations fetch? (file name)
+    answer: "${facts.update_service.update.file}"
+    accept: ["${facts.update_service.update.file}", "${facts.update_service.update.path}"]
+    type: text
+    points: 10
+    hint: The content comes over the same HTTP port from /Content/, fetched by BITS (User-Agent Microsoft BITS).
+    check:
+      filter: 'http.request.method == "GET" && http.request.uri contains "${facts.update_service.update.sha1}"'
+      expect: {min: 1}
+    hunt:
+      dataset: http
+      spl: "index=* sourcetype=pcapforge:http method=GET | stats count BY src, uri, user_agent"
+      kql: "method : \"GET\""
+      zeek: {log: http, where: {method: GET}, show: [ts, id.orig_h, uri, user_agent, response_body_len]}
+      look_for: A HEAD for the size, then a GET of /Content/<last two hex digits>/<SHA-1>.exe by BITS.
+  - id: update_kb
+    when: vars.wsus_update
+    text: Which Knowledge Base article (KB number) is that update?
+    answer: "KB${facts.update_service.update.kb}"
+    accept: ["KB${facts.update_service.update.kb}", "${facts.update_service.update.kb}"]
+    type: text
+    points: 5
+    hint: GetExtendedUpdateInfo returns the update's properties (KBArticleID) and title.
+    check:
+      filter: 'http.file_data contains "KBArticleID&gt;${facts.update_service.update.kb}"'
+      expect: {min: 1}
 
 translations:
   pl:
@@ -256,12 +432,15 @@ translations:
       Dołączasz do SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu SPAN
       przełącznika dostępowego sieci biurowej ({sensor_subnet}) z początku dnia pracy. Sensor
       zachowuje tylko ruch wewnętrzny; sesje do Internetu loguje firewall.
-      Udokumentuj, jak hosty dostają adresy w tej sieci: który serwer je dzierżawi, z jakimi
-      ustawieniami i które hosty pojawiły się w sieci podczas nagrania.
+      Udokumentuj, jak wygląda normalny ruch w tej sieci: jak hosty dostają adresy, które hosty
+      pojawiły się w sieci podczas nagrania, z jakich stron wewnętrznych korzystają i skąd biorą aktualizacje.
     questions:
       dhcp_server:
         text: Który host dzierżawi adresy IP w tej sieci (serwer DHCP)? Podaj jego adres IP.
-        hint: Serwery DHCP odpowiadają z portu UDP 67 komunikatami Offer i ACK (dhcp.option.dhcp in {2, 5}).
+        hint: Odpowiedzi w tej sieci nie przychodzą od samego serwera. Wskazuje go opcja DHCP Server Identifier (54) w Offer albo ACK.
+      relay_agent:
+        text: Serwer DHCP jest w innej podsieci. Z jakiego adresu jego odpowiedzi trafiają do tej sieci (adres agenta przekazującego w komunikatach)?
+        hint: Agent przekazujący (relay) wpisuje swój adres w podsieci klientów w pole giaddr (dhcp.ip.relay) i z niego wysyła odpowiedzi.
       lease_time:
         text: Na jak długo ten serwer wydaje dzierżawy? Podaj czas dzierżawy w sekundach.
         hint: Opcja IP Address Lease Time (51) w Offer albo w ACK dzierżawy.
@@ -281,18 +460,45 @@ translations:
       logon_user:
         text: Pracownik zalogował się do domeny na jednym z uruchamianych komputerów. Którego konta domenowego użył?
         hint: Logowanie zaczyna się od wymiany Kerberos AS (kerberos.msg_type == 10). Konta komputerów kończą się znakiem „$”, konta osób nie.
+      web_sites:
+        text: Jakie nazwy stron intranetowych otwierają stacje robocze po HTTPS? (nazwy, o które proszą serwer)
+        hint: ClientHello TLS podaje nazwę strony w rozszerzeniu Server Name Indication (tls.handshake.extensions_server_name).
+      web_ca:
+        text: Który urząd certyfikacji wystawił certyfikat intranetowego serwera WWW? Podaj jego nazwę (CN).
+        hint: TLS 1.2 przesyła łańcuch certyfikatów jawnie (tls.handshake.type == 11); odczytaj wystawcę certyfikatu serwera.
+      tls_cipher:
+        text: Który zestaw szyfrów TLS wybiera intranetowy serwer WWW?
+        hint: ServerHello (tls.handshake.type == 2) niesie zestaw szyfrów, który serwer wybrał z listy klienta.
+      wsus_server:
+        text: Którego serwera stacje robocze pytają o aktualizacje Windows? Podaj jego adres IP.
+        hint: Windows Update Agent rozmawia ze swoim serwerem WSUS przez SOAP po zwykłym HTTP (User-Agent Windows-Update-Agent).
+      wsus_port:
+        text: Na którym porcie TCP nasłuchuje ten serwer aktualizacji?
+      wsus_calls:
+        text: Jakie metody SOAP wywołuje stacja robocza na serwerze aktualizacji podczas skanowania? (ostatnia część nagłówka SOAPAction)
+        hint: Każdy POST ma nagłówek SOAPAction, np. "http://www.microsoft.com/SoftwareDistribution/Server/ClientWebService/GetCookie".
+      update_file:
+        text: Z serwera aktualizacji pobrano zatwierdzoną aktualizację. Jaki plik pobrały stacje robocze? (nazwa pliku)
+        hint: Zawartość przychodzi tym samym portem HTTP z /Content/, pobiera ją BITS (User-Agent Microsoft BITS).
+      update_kb:
+        text: Którego artykułu bazy wiedzy (numer KB) dotyczy ta aktualizacja?
+        hint: GetExtendedUpdateInfo zwraca właściwości aktualizacji (KBArticleID) i jej tytuł.
   de:
     title: Baseline eines Büronetzes zu Beginn des Arbeitstages (kein Vorfall)
     briefing: |
       Sie verstärken das SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom
       SPAN-Port des Access-Switches im Büronetz ({sensor_subnet}) zu Beginn des Arbeitstages. Der
       Sensor behält nur internen Verkehr; Sitzungen ins Internet protokolliert die Firewall.
-      Dokumentieren Sie, wie Hosts in diesem Netz ihre Adressen erhalten: welcher Server sie
-      vergibt, mit welchen Einstellungen und welche Hosts während des Mitschnitts online kamen.
+      Dokumentieren Sie, wie der Normalbetrieb in diesem Netz aussieht: wie Hosts ihre Adressen erhalten,
+      welche Hosts während des Mitschnitts online kamen, welche internen Webseiten sie nutzen und woher
+      sie ihre Updates beziehen.
     questions:
       dhcp_server:
         text: Welcher Host vergibt in diesem Netz IP-Adressen (der DHCP-Server)? Geben Sie seine IP-Adresse an.
-        hint: DHCP-Server antworten von UDP-Port 67 mit Offer- und ACK-Nachrichten (dhcp.option.dhcp in {2, 5}).
+        hint: Die Antworten in diesem Netz kommen nicht vom Server selbst. Die Option DHCP Server Identifier (54) eines Offer oder ACK nennt ihn.
+      relay_agent:
+        text: Der DHCP-Server steht in einem anderen Subnetz. Von welcher Adresse kommen seine Antworten in dieses Netz (die Relay-Agent-Adresse in den Nachrichten)?
+        hint: Ein Relay-Agent trägt seine Adresse im Subnetz der Clients in das Feld giaddr (dhcp.ip.relay) ein und sendet die Antworten von ihr.
       lease_time:
         text: Wie lange gelten die Leases, die dieser Server vergibt? Geben Sie die Lease-Dauer in Sekunden an.
         hint: Die Option IP Address Lease Time (51) eines Offer oder eines Lease-ACK.
@@ -312,3 +518,26 @@ translations:
       logon_user:
         text: Ein Mitarbeiter hat sich an einem der gestarteten PCs an der Domäne angemeldet. Welches Domänenkonto hat er verwendet?
         hint: Anmeldungen beginnen mit einem Kerberos-AS-Austausch (kerberos.msg_type == 10). Computerkonten enden mit „$“, Personenkonten nicht.
+      web_sites:
+        text: Welche Intranet-Seitennamen öffnen die Arbeitsplätze per HTTPS? (die Namen, die sie beim Server anfragen)
+        hint: Ein TLS-ClientHello nennt die Seite in der Erweiterung Server Name Indication (tls.handshake.extensions_server_name).
+      web_ca:
+        text: Welche Zertifizierungsstelle hat das Zertifikat des Intranet-Webservers ausgestellt? Geben Sie ihren Namen (CN) an.
+        hint: TLS 1.2 überträgt die Zertifikatskette im Klartext (tls.handshake.type == 11); lesen Sie den Aussteller des Serverzertifikats.
+      tls_cipher:
+        text: Welche TLS-Cipher-Suite wählt der Intranet-Webserver?
+        hint: Das ServerHello (tls.handshake.type == 2) enthält die Cipher-Suite, die der Server aus der Liste des Clients gewählt hat.
+      wsus_server:
+        text: Welchen Server fragen die Arbeitsplätze nach Windows-Updates? Geben Sie seine IP-Adresse an.
+        hint: Der Windows Update Agent spricht SOAP über einfaches HTTP mit seinem WSUS-Server (User-Agent Windows-Update-Agent).
+      wsus_port:
+        text: Auf welchem TCP-Port lauscht dieser Update-Server?
+      wsus_calls:
+        text: Welche SOAP-Methoden ruft ein Arbeitsplatz bei einer Suche nach Updates auf dem Update-Server auf? (der letzte Teil des SOAPAction-Headers)
+        hint: Jeder POST trägt einen SOAPAction-Header wie "http://www.microsoft.com/SoftwareDistribution/Server/ClientWebService/GetCookie".
+      update_file:
+        text: Ein freigegebenes Update wurde vom Update-Server heruntergeladen. Welche Datei haben die Arbeitsplätze abgerufen? (Dateiname)
+        hint: Der Inhalt kommt über denselben HTTP-Port aus /Content/, abgerufen von BITS (User-Agent Microsoft BITS).
+      update_kb:
+        text: Zu welchem Knowledge-Base-Artikel (KB-Nummer) gehört dieses Update?
+        hint: GetExtendedUpdateInfo liefert die Eigenschaften des Updates (KBArticleID) und seinen Titel.

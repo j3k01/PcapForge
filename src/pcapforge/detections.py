@@ -33,7 +33,7 @@ MODBUS_PORT = 502
 WRITER_TYPES = ("modbus.operator",)
 CLIENT_TYPES = ("modbus.poller", "modbus.operator")
 DATASETS = ("flows", "modbus", "dns", "ntp", "name_resolution", "arp", "dhcp", "iec104", "dnp3", "bacnet", "enip",
-            "kerberos", "smb")
+            "kerberos", "smb", "tls", "http")
 
 IEC104_PORT, DNP3_PORT, BACNET_PORT, ENIP_PORT = 2404, 20000, 47808, 44818
 IEC104_MASTER_TYPES, IEC104_SERVER_TYPES = ("iec104.client",), ("iec104.server",)
