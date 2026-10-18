@@ -36,7 +36,9 @@ jobs:
         run: |
           sudo DEBIAN_FRONTEND=noninteractive sh -c "$(python -c 'from pcapforge.zeek import ANALYZERS_INSTALL; print(ANALYZERS_INSTALL)')"
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y jq
-          /opt/zeek/bin/zkg list installed
+          # As root, like the install: zkg runs on the system python3 that has GitPython (apt python3-git);
+          # the setup-python interpreter first on PATH does not.
+          sudo /opt/zeek/bin/zkg list installed
           /opt/zeek/bin/zeek -NN | grep ANALYZER_PCAPFORGEIEC104
       - run: pcapforge validate
       - run: pytest -q --ignore=tests/test_siem_queries.py  # runs in the siem-queries job
