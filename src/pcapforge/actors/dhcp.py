@@ -21,6 +21,22 @@ Client message formats follow the OS DHCP client (``style``):
   identifier 01+MAC, rapid commit (80, the server ignores it), maximum message size (57),
   vendor class ``dhcpcd-<version>:<kernel>:<machine>:<hardware>`` (60), host name (12).
 
+A host that joins without an address asks for a new lease (DISCOVER / OFFER / REQUEST / ACK);
+one that held a lease before (``reboot``, e.g. an office PC booting in the morning) confirms it
+in the INIT-REBOOT state (RFC 2131 4.3.2): a broadcast REQUEST carrying the address as requested
+address (50) and no server identifier, answered with an ACK.
+
+Server reply formats (``dhcp.server`` ``style``):
+
+* ``fortigate`` (the firewall's DHCP service, ISC dhcpd style): message type, server identifier,
+  lease / T1 / T2, subnet mask, then the options the client asked for, in the client's order;
+* ``windows`` (Windows Server DHCP Server service), the order of Microsoft's own trace in
+  "DHCP (Dynamic Host Configuration Protocol) Basics": OFFER message type, subnet mask, T1, T2,
+  lease, server identifier; ACK message type, T1, T2, lease, server identifier, subnet mask; then
+  the requested options in ascending code order. An ACK answers a client FQDN (81) with the name
+  the client sent, flags 0 (the client updates its A record, the server the PTR record, the
+  default "only if requested by the DHCP client") and both RCODEs 255 (RFC 4702 section 4).
+
 The same transaction ID spans DISCOVER / OFFER / REQUEST / ACK; renewals, informs and
 releases start new transactions. Messages are padded to the 300-byte BOOTP minimum.
 """
@@ -87,7 +103,10 @@ STYLES = {
                     max_size=1472, rapid_commit=True),
 }
 DEFAULT_STYLE = {"windows": "windows", "linux": "dhcpcd"}
-JOIN_OP = "dhcp.discover"   # a host that sends a DISCOVER joins the network during the capture
+DISCOVER_OP, REBOOT_OP = "dhcp.discover", "dhcp.reboot"
+JOIN_OPS = frozenset({DISCOVER_OP, REBOOT_OP})  # the first message of a host that joins during the capture
+SERVER_STYLES = ("fortigate", "windows")
+DEFAULT_LEASE = {"fortigate": "8h", "windows": "8d"}  # windows: the Windows Server scope default (8 days)
 
 
 # -- wire format -------------------------------------------------------------------------
@@ -201,27 +220,39 @@ class _DhcpServerProtocol(asyncio.DatagramProtocol):
 
     def _options(self, reply_type: int, request: Message, lease: bool) -> list[tuple[int, bytes]]:
         actor = self.actor
-        options = [(MESSAGE_TYPE, bytes((reply_type,))), (SERVER_ID, self.server_id)]
-        if lease:
-            options += [(LEASE_TIME, _u32(actor.lease_s)), (RENEWAL_TIME, _u32(int(actor.lease_s * T1))),
-                        (REBINDING_TIME, _u32(int(actor.lease_s * T2)))]
-        options.append((SUBNET_MASK, actor.mask))
         configured = actor.configured()
-        for code in request.options.get(PARAMETERS, b""):  # in the client's order, like ISC dhcpd
-            if code in configured and code != SUBNET_MASK:
-                options.append((code, configured[code]))
-        return options
+        requested = [code for code in request.options.get(PARAMETERS, b"") if code in configured and code != SUBNET_MASK]
+        message_type, server_id = (MESSAGE_TYPE, bytes((reply_type,))), (SERVER_ID, self.server_id)
+        mask = (SUBNET_MASK, actor.mask)
+        times = [(RENEWAL_TIME, _u32(int(actor.lease_s * T1))), (REBINDING_TIME, _u32(int(actor.lease_s * T2))),
+                 (LEASE_TIME, _u32(actor.lease_s))] if lease else []
+        if actor.style == "windows":
+            if reply_type == OFFER:
+                options = [message_type, mask, *times, server_id]
+            else:
+                options = [message_type, *times, server_id, mask]
+            fqdn = request.options.get(CLIENT_FQDN)
+            if reply_type == ACK and lease and fqdn is not None:
+                options.append((CLIENT_FQDN, b"\x00\xff\xff" + fqdn[3:]))
+            return options + [(code, configured[code]) for code in sorted(set(requested))]
+        # ISC dhcpd style: lease, T1, T2, the mask, then the requested options in the client's order.
+        options = [message_type, server_id]
+        if lease:
+            options += [times[2], times[0], times[1]]
+        return options + [mask] + [(code, configured[code]) for code in requested]
 
 
 @register
 class DhcpServer(Actor):
-    """Site DHCP server, e.g. the firewall's DHCP service on one of its interfaces.
+    """Site DHCP server: the firewall's DHCP service on one of its interfaces, or the Windows Server
+    DHCP role on a domain controller.
 
     Params: ``subnet`` (served subnet id, default the host's first), ``pool`` ([first, last]
     host offsets the leases come from, default [100, 199]; static hosts stay out of it),
-    ``lease`` (default 8h; T1/T2 = 50/87.5 %), ``dns`` and ``ntp`` (host references handed out
-    as options 6 and 42; ``dns`` also hands out the site domain, option 15). The router option
-    (3) is the server host when it routes for the subnet.
+    ``style`` (reply format: ``fortigate``, default, or ``windows``), ``lease`` (default 8h, 8d for
+    ``windows``; T1/T2 = 50/87.5 %), ``dns`` and ``ntp`` (host references handed out as options 6
+    and 42; ``dns`` also hands out the site domain, option 15). The router option (3) is the
+    subnet's router: the server host itself when it routes for the subnet.
     """
 
     type = "dhcp.server"
@@ -232,6 +263,9 @@ class DhcpServer(Actor):
         if len(self.hosts) != 1:
             raise ScenarioError(f"{self.type} '{self.id}' runs on exactly one host")
         host = self.hosts[0]
+        self.style = self.param("style", "fortigate")
+        if self.style not in SERVER_STYLES:
+            raise ScenarioError(f"{self.type} '{self.id}': unknown style '{self.style}' ({', '.join(SERVER_STYLES)})")
         self.subnet = self.param("subnet", host.subnets[0])
         if self.subnet not in host.subnets:
             raise ScenarioError(f"{self.type} '{self.id}': '{host.id}' has no interface on '{self.subnet}'")
@@ -244,13 +278,15 @@ class DhcpServer(Actor):
         if self.subnet in topology.pools:
             raise ScenarioError(f"{self.type} '{self.id}': '{self.subnet}' already has a DHCP server")
         topology.pools[self.subnet] = (first, last)
-        self.lease_s = int(parse_duration(self.param("lease", "8h")))
+        self.lease_s = int(parse_duration(self.param("lease", DEFAULT_LEASE[self.style])))
         self.dns = topology.select(self.param("dns"))[0] if self.param("dns") else None
         self.ntp = topology.select(self.param("ntp"))[0] if self.param("ntp") else None
-        self.router = host if host.router else None
+        self.router = host if host.router else next(
+            (h for h in topology.hosts if h.router and self.subnet in h.subnets), None)
         self.plan_.facts[self.id] = {
             "hosts": [host_ref(host.id)],
             "subnet": self.subnet,
+            "style": self.style,
             "lease_s": self.lease_s,
             "renewal_s": int(self.lease_s * T1),
             "rebinding_s": int(self.lease_s * T2),
@@ -287,11 +323,12 @@ class DhcpClient(Actor):
     """Hosts that lease their address from the site DHCP server.
 
     Params: ``server`` (host running the ``dhcp.server``), ``join`` ([lo, hi] fraction of the
-    capture at which the host connects: full DORA, address conflict detection and, Windows,
-    a DHCPINFORM; omitted: the host holds a lease from before the capture), ``leave`` ([lo, hi]
-    fraction at which it disconnects), ``release`` (send DHCPRELEASE when leaving), ``style``
-    (``windows`` / ``dhcpcd``; default from the host's OS stack). Leases are renewed with a
-    unicast REQUEST at T1 while the host is connected.
+    capture at which the host connects: a new lease (DORA) or, with ``reboot``, the INIT-REBOOT
+    confirmation of the lease it held, then address conflict detection and, Windows, a
+    DHCPINFORM; omitted: the host holds a lease from before the capture), ``reboot`` (the joining
+    host held a lease before), ``leave`` ([lo, hi] fraction at which it disconnects), ``release``
+    (send DHCPRELEASE when leaving), ``style`` (``windows`` / ``dhcpcd``; default from the host's
+    OS stack). Leases are renewed with a unicast REQUEST at T1 while the host is connected.
     """
 
     type = "dhcp.client"
@@ -324,6 +361,9 @@ class DhcpClient(Actor):
             raise ScenarioError(f"{self.type} '{self.id}': '{server_host.id}' runs no dhcp.server")
         join, leave = self.param("join"), self.param("leave")
         release = bool(self.param("release", False))
+        reboot = bool(self.param("reboot", False))
+        if reboot and join is None:
+            raise ScenarioError(f"{self.type} '{self.id}': reboot needs join (when the host comes back)")
         renewal = server.lease_s * T1
         facts = []
         for host in self.hosts:
@@ -344,10 +384,15 @@ class DhcpClient(Actor):
                 raise ScenarioError(f"{self.type} '{self.id}': '{host.id}' leaves before it joins")
             if joined_at is not None:
                 xid = rng.getrandbits(32)
-                joined = plan.add(joined_at, self.id, host.id, JOIN_OP, xid=xid, **common)
-                bound = joined_at + rng.uniform(*DORA_GAP)
-                # The REQUEST answers the OFFER on the same socket: one exchange with the DISCOVER.
-                plan.add(bound, self.id, host.id, "dhcp.request", xid=xid, state="selecting", resend=True, **common)
+                if reboot:
+                    joined = plan.add(joined_at, self.id, host.id, REBOOT_OP, xid=xid, **common)
+                    bound = joined_at
+                else:
+                    joined = plan.add(joined_at, self.id, host.id, DISCOVER_OP, xid=xid, **common)
+                    bound = joined_at + rng.uniform(*DORA_GAP)
+                    # The REQUEST answers the OFFER on the same socket: one exchange with the DISCOVER.
+                    plan.add(bound, self.id, host.id, "dhcp.request", xid=xid, state="selecting", resend=True,
+                             **common)
                 informed = bound + WINDOWS_DAD_S + rng.uniform(*INFORM_DELAY)
                 if STYLES[style].inform is not None and informed < gone:
                     inform = plan.add(informed, self.id, host.id, "dhcp.inform", xid=rng.getrandbits(32), **common)
@@ -362,7 +407,8 @@ class DhcpClient(Actor):
             if leave is not None and release:
                 released = plan.add(gone, self.id, host.id, "dhcp.release", xid=rng.getrandbits(32), **common)
             if joined is not None:
-                plan.event(joined, self.id, f"{host.name} joins the {server.subnet} network (DHCP)", [],
+                how = "confirms the DHCP lease it held" if reboot else "leases an address over DHCP"
+                plan.event(joined, self.id, f"{host.name} joins the {server.subnet} network and {how}", [],
                            host=host_ref(host.id), style=style)
             if released is not None:
                 plan.event(released, self.id, f"{host.name} releases its DHCP lease and leaves", [],
@@ -371,6 +417,7 @@ class DhcpClient(Actor):
                 "host": host_ref(host.id),
                 "style": style,
                 "joined": action_ref(joined) if joined else None,
+                "reboot": reboot and joined is not None,
                 "inform": action_ref(inform) if inform else None,
                 "renewals": [action_ref(a) for a in renewals],
                 "released": action_ref(released) if released else None,
@@ -388,12 +435,16 @@ class DhcpClient(Actor):
         # What the host has: the lease it got when joining, else the address it already holds.
         address, server_id = self._leases.get(action.host, (socket.inet_aton(loopback), socket.inet_aton(server)))
         flags, ciaddr = 0, address
-        if action.op == JOIN_OP:
+        if action.op == DISCOVER_OP:
             kind, ciaddr = DISCOVER, bytes(4)
             options = [(MESSAGE_TYPE, bytes((DISCOVER,))), (CLIENT_ID, client_id)]
             if style.rapid_commit:
                 options.append((RAPID_COMMIT, b""))
             options += self._identity(style, a, fqdn=False)
+        elif action.op == REBOOT_OP:  # INIT-REBOOT: the address it held, no server identifier
+            kind, ciaddr = REQUEST, bytes(4)
+            options = [(MESSAGE_TYPE, bytes((REQUEST,))), (CLIENT_ID, client_id), (REQUESTED_IP, address)]
+            options += self._identity(style, a, fqdn=style.fqdn)
         elif action.op == "dhcp.request" and a["state"] == "selecting":
             kind, ciaddr = REQUEST, bytes(4)
             offered, offered_by = self._offers.pop(action.host)

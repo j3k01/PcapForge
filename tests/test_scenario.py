@@ -6,7 +6,7 @@ import pytest
 from pcapforge.i18n import LANGS
 from pcapforge.process import ProcessProfile
 from pcapforge.plan import build_plan
-from pcapforge.scenario import ScenarioError, evaluate_when, find, parse_duration, resolve, validate
+from pcapforge.scenario import ScenarioError, discover, evaluate_when, find, parse_duration, resolve, validate
 
 SCENARIO = "ot-modbus-write-manipulation"
 
@@ -106,9 +106,7 @@ def test_threshold_direction_matches_the_alarm_it_defeats(scenario):
 
 
 @pytest.mark.parametrize("lang", [lang for lang in LANGS if lang != "en"])
-@pytest.mark.parametrize("scenario_id", [
-    "ot-baseline-operations", "ot-modbus-alarm-masking", "ot-modbus-coil-manipulation",
-    "ot-modbus-command-replay", "ot-modbus-discovery", "ot-modbus-write-manipulation"])
+@pytest.mark.parametrize("scenario_id", sorted(discover()))
 def test_translation_covers_every_question_and_keeps_answers(scenario_id, lang):
     from pcapforge.grade import submission_template
     from pcapforge.i18n import UI, localize_answers

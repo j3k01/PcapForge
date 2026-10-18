@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     from pcapforge.topology import Host
 
 
+JOIN_SETTLE = 6.0  # joined -> address configured (DHCP, ARP conflict detection, INFORM) (s)
+
+
 def optional_import(actor_type: str, module: str, distribution: str, extra: str) -> ModuleType:
     """Import an optional dependency or name the pcapforge extra that installs it."""
     try:
@@ -83,3 +86,9 @@ class Actor:
         if isinstance(value, (list, tuple)):
             return float(value[0]), float(value[1])
         return float(value), float(value)
+
+    def connected(self, host: Host) -> tuple[float, float]:
+        """(begin, end) of the time ``host`` talks in the capture: all of it, or, for a host that joins,
+        from when the address it got is configured until it leaves."""
+        start, end = host.present or (0.0, self.plan_.duration)
+        return (start + JOIN_SETTLE if host.present is not None and host.arrives else start), end

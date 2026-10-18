@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from pcapforge import ports
-from pcapforge.actors.dhcp import JOIN_OP
+from pcapforge.actors.dhcp import JOIN_OPS
 
 if TYPE_CHECKING:
     from pcapforge.plan import Plan
@@ -48,7 +48,7 @@ def hosts(plan: Plan) -> frozenset[str]:
     """Ids of the hosts with global IPv6 addresses from before the capture (empty unless dual)."""
     if not enabled(plan):
         return frozenset()
-    joining = {a.host for a in plan.actions if a.op == JOIN_OP}
+    joining = {a.host for a in plan.actions if a.op in JOIN_OPS}
     return frozenset(
         h.id for h in plan.topology.hosts
         if h.device.ipv6 is not None and h.device.browser is not None and not h.router

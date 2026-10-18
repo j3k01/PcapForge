@@ -257,8 +257,8 @@ def write_handout(plan: Plan, answers: dict, out_dir: Path) -> Path:
     lines += [f"## {t['asset_inventory']}", ""]
     rows = []
     for host in topo.hosts:
-        if host.id in used or host.router:
-            rows.append([host.name, host.group, ", ".join(i.ip for i in host.interfaces), host.device.vendor])
+        if host.listed and (host.id in used or host.router):
+            rows.append([host.name, host.role, ", ".join(i.ip for i in host.interfaces), host.device.vendor])
     lines += _table(t["inventory_cols"], rows) + [""]
 
     lines += [f"## {t['network']}", ""]

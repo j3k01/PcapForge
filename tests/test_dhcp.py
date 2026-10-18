@@ -113,13 +113,13 @@ def test_only_the_ack_of_a_new_lease_triggers_address_conflict_detection():
 
 
 def test_a_windows_host_that_joins_and_leaves_chatters_only_while_connected():
-    from pcapforge.actors.dhcp import JOIN_OP
+    from pcapforge.actors.dhcp import DISCOVER_OP
     from pcapforge.plan import build_plan
     from pcapforge.scenario import find
 
     plan = build_plan(find("ot-modbus-write-manipulation"), "medium", "joiner")
     laptop = next(h for h in plan.topology.hosts if h.group == "svc_laptop")
-    joined = next(a.t for a in plan.actions if a.op == JOIN_OP and a.host == laptop.id)
+    joined = next(a.t for a in plan.actions if a.op == DISCOVER_OP and a.host == laptop.id)
     left = next(a.t for a in plan.actions if a.op == "dhcp.release" and a.host == laptop.id)
     assert laptop.arrives and laptop.present == pytest.approx((joined, left), abs=1e-6)
     chatter = [a for a in plan.actions if a.actor == "laptop_chatter"]
@@ -135,3 +135,50 @@ def test_a_windows_host_that_joins_and_leaves_chatters_only_while_connected():
     assert [a.args["period_ms"] for a in announced[:3]] == [60000, 120000, 180000]
     assert all(p.args["period_ms"] / 1000 <= b.t - p.t <= p.args["period_ms"] / 1000 + 2.5
                for p, b in zip(announced, announced[1:]))
+
+
+def it_plan(level="medium", seed="dhcp"):
+    from pcapforge.plan import build_plan
+    from pcapforge.scenario import find
+
+    return build_plan(find("it-baseline-operations"), level, seed)
+
+
+def test_a_windows_server_orders_its_options_like_windows_and_answers_the_client_fqdn():
+    from pcapforge.actors.dhcp import CLIENT_FQDN, PARAMETERS, REQUESTED_IP, STYLES, _DhcpServerProtocol
+
+    plan = it_plan()
+    server = next(a for a in plan.actors if a.id == "dhcp_service")
+    pc = plan.topology.by_id["pc1"]
+    sent = []
+    protocol = _DhcpServerProtocol(server, server.hosts[0].loopback)
+    protocol.transport = SimpleNamespace(sendto=lambda data, addr: sent.append(parse(data)))
+    chaddr = placeholder_mac(pc.loopback)
+    asked = (PARAMETERS, bytes(STYLES["windows"].parameters))
+    fqdn = b"\x00\x00\x00" + f"{pc.name}.{plan.topology.domain}".encode()
+    protocol.datagram_received(encode(BOOTREQUEST, 1, chaddr, [(MESSAGE_TYPE, bytes((DISCOVER,))), asked]), None)
+    protocol.datagram_received(encode(BOOTREQUEST, 2, chaddr, [(MESSAGE_TYPE, bytes((REQUEST,))),
+                                                              (REQUESTED_IP, ip(pc.loopback)), (CLIENT_FQDN, fqdn),
+                                                              asked]), None)
+    offer, ack = sent
+    assert list(offer.options) == [53, 1, 58, 59, 51, 54, 3, 6, 15]
+    assert list(ack.options) == [53, 58, 59, 51, 54, 1, 81, 3, 6, 15]
+    assert ack.options[CLIENT_FQDN] == b"\x00\xff\xff" + fqdn[3:]
+    assert int.from_bytes(ack.options[51], "big") == 8 * 86400  # the Windows Server scope default
+    # The DC does not route: the gateway it hands out is the subnet's router.
+    assert ack.options[ROUTER] == ip(plan.topology.by_id["firewall"].loopback)
+
+
+def test_a_host_that_held_a_lease_confirms_it_and_talks_only_once_its_address_is_configured():
+    from pcapforge.actors.base import JOIN_SETTLE
+    from pcapforge.actors.dhcp import REBOOT_OP
+
+    plan = it_plan()
+    for pc in plan.topology.groups["pc"]:
+        own = sorted((a for a in plan.actions if a.host == pc.id), key=lambda a: a.t)
+        joined = own[0]
+        assert joined.op == REBOOT_OP and pc.arrives and pc.present[0] == pytest.approx(joined.t, abs=1e-6)
+        assert not any(a.op in ("dhcp.discover", "dhcp.request") for a in own)  # INIT-REBOOT, no DORA
+        talk = [a for a in own if a.actor in ("name_lookups", "time_sync", "windows_chatter")
+                and a.op != "dhcpv6.solicit"]
+        assert talk and min(a.t for a in talk) >= joined.t + JOIN_SETTLE

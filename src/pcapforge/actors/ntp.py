@@ -89,8 +89,11 @@ class NtpClient(Actor):
             rng = self.rng.child(host.id)
             version, poll, precision, interval = CLIENT_STYLE[host.device.stack.name]
             offset = rng.uniform(-0.08, 0.08)  # host clock error in seconds
-            t = rng.uniform(0, min(interval, plan.duration))
-            while t < plan.duration:
+            begin, end = self.connected(host)
+            # w32time / ntpd sync soon after a joining host's address is configured, else anywhere in the poll interval.
+            joined = host.present is not None and host.arrives
+            t = begin + (rng.uniform(1.0, 30.0) if joined else rng.uniform(0, min(interval, plan.duration)))
+            while t < end:
                 plan.add(t, self.id, host.id, "ntp.query", server=server.id, version=version, poll=poll,
                          precision=precision, clock_offset=round(offset, 6),
                          fixed_port=host.device.stack.name == "windows")

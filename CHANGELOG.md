@@ -1,6 +1,24 @@
 # Changelog
 
 ## Unreleased
+### Scenarios
+- `it-baseline-operations`, the first IT-line scenario: an office LAN as the working day starts, captured on
+  the office switch. The domain controller is the DHCP server, office PCs boot and confirm their leases,
+  a new PC leases its first address; NTP and DNS at the DC and (medium/hard) Windows chatter, IPv6 and the
+  Active Directory domain with an employee's logon. Questions on the DHCP server, lease time, gateway,
+  domain, the rebooted hosts, the new host, the DHCPINFORM option and the logon account.
+
+### Traffic realism
+- `dhcp.server` `style: windows`: the Windows Server DHCP role (Windows option order, 8-day default lease,
+  the client FQDN answered in the ACK). The router option is the subnet's router when the server does not
+  route itself.
+- `dhcp.client` `reboot`: a joining host that held a lease confirms it (INIT-REBOOT: broadcast Request with
+  the requested address, no server identifier, no Discover).
+- `dns.client` and `ntp.client` of a host that joins over DHCP start once its address is configured and
+  stop when it leaves; they talked from the capture start before.
+- The ARP exchange a unicast reply needs no longer lands before the broadcast it answers (a DHCPINFORM's
+  ACK); captures with a DHCP joiner can change.
+
 ### Training workflow
 - `pcapforge export-ctfd` is checked against a live CTFd 3.8.8 (ctfcli 0.1.8). Timestamp flags now accept
   every second within the question's `tolerance_s`, as `pcapforge grade` does; they accepted only the

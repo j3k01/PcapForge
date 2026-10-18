@@ -101,10 +101,12 @@ Done and committed (verify with `git log --oneline`):
 - `plan.py` — `build_plan(scenario, difficulty, seed, base_seed, duration_override)`,
   `start_epoch` (behaviour level: NTP payloads carry it), `digest()` = recording cache key
 - `actors/` — `modbus.server|poller|operator|writer`, `dns.server|client`, `ntp.server|client`,
-  `dhcp.server|client` (DHCPv4 over real UDP sockets between the loopback addresses; the composer
-  rewrites addresses and chaddr / client id, delivers DORA as 0.0.0.0 → 255.255.255.255 broadcasts or
-  unicast to yiaddr by the broadcast flag, and adds RFC 5227 ARP probes / announcements after the ACK
-  of a new lease, see `compose/dhcp.py`),
+  `dhcp.server|client` (DHCPv4 over real UDP sockets between the loopback addresses; reply formats of
+  the FortiGate DHCP service and the Windows Server DHCP role; joins as a new lease (DORA) or as the
+  INIT-REBOOT confirmation of a held lease; the composer rewrites addresses and chaddr / client id,
+  delivers 0.0.0.0 → 255.255.255.255 broadcasts or unicast to yiaddr by the broadcast flag, adds RFC 5227
+  ARP probes / announcements after the ACK of a new lease, see `compose/dhcp.py`, and keeps the ARP a
+  unicast reply needs after the broadcast it answers, see `compose/link.py`),
   `windows.chatter` (LLMNR, NBNS, mDNS, SSDP M-SEARCH, browser host announcements; timing,
   ports and payloads checked against a Windows 10 capture). Lookups only use names the site
   DNS zone does not resolve; hosts with a `dns.client` first query the site server for
@@ -313,7 +315,7 @@ subscription (`vars.opcua`), see below.
   `ui/roster.py`: `<out>/roster.json` {login: name, salted PBKDF2-HMAC-SHA256 code hash}; sessions are
   `login|expiry|HMAC(secret, login|expiry|salt)` cookies (secret `<out>/.ui-secret`), so a code reset ends
   the student's sessions; the student identity of every request comes from the verified cookie.
-Next: IT-line scenarios (ROADMAP.md).
+Next: IT-line background (HTTPS, software updates) and IT scenarios (ROADMAP.md).
 
 ### Composer spec
 Input: recording pcap, plan, presentation rng (`Rng("pcapforge", scenario, difficulty, seed).child("present")`).

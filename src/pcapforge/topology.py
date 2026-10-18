@@ -92,6 +92,8 @@ class Host:
     # (from, until) in seconds into the capture while the host is connected (a DHCP client that joins
     # and / or leaves); None: the whole capture.
     present: tuple[float, float] | None = None
+    role: str = ""          # role in the students' asset inventory (default: the group id)
+    listed: bool = True     # in the students' asset inventory (False: a host the site does not know yet)
 
     @property
     def ip(self) -> str:
@@ -146,6 +148,8 @@ class Topology:
                     loopback=f"{LOOPBACK_NET}.{loop_index // 250}.{loop_index % 250 + 2}",
                     router=spec.get("router", False),
                     arrives=bool(spec.get("arrives", False)),
+                    role=spec.get("role", spec["id"]),
+                    listed=bool(spec.get("inventory", True)),
                     name_template=spec.get("name", f"{spec['id']}-{{index:02d}}"),
                     subnets=list(spec.get("subnets", [spec.get("subnet")])),
                 )

@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from pcapforge import ports
-from pcapforge.actors.dhcp import ACK, BROADCAST_FLAG, CLIENT_ID, INFORM, JOIN_OP, option_spans, parse
+from pcapforge.actors.dhcp import ACK, BROADCAST_FLAG, CLIENT_ID, INFORM, JOIN_OPS, option_spans, parse
 from pcapforge.compose.link import arp_request, mac_bytes
 from pcapforge.compose.packets import UDP
 from pcapforge.topology import LIMITED_BROADCAST, UNSPECIFIED, Sink
@@ -122,7 +122,7 @@ class Dhcp:
     def __init__(self, plan: Plan, rng: Rng) -> None:
         self.topology = plan.topology
         self.rng = rng
-        self.joining = frozenset(a.host for a in plan.actions if a.op == JOIN_OP)
+        self.joining = frozenset(a.host for a in plan.actions if a.op in JOIN_OPS)
         self.bound: dict[str, float] = {}  # host -> when its new address is configured (first announcement)
 
     def after(self, p: Packet) -> list[tuple[float, bytes]]:

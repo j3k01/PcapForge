@@ -50,7 +50,6 @@ LLMNR_RESEND = (0.41, 0.44)   # delay of the single LLMNR retransmission (s)
 FALLBACK = (0.005, 0.030)     # NXDOMAIN from the DNS server -> link-local lookups (s)
 ANNOUNCE_PERIOD = 720.0       # browser announcement interval of a host that has been up a while
 STARTUP_PERIOD = 60.0         # first announcement interval after joining, then a minute longer each time
-JOIN_SETTLE = 6.0             # joined -> address configured (DHCP, ARP conflict detection, INFORM) (s)
 NB_WORKSTATION, NB_SERVER, NB_MASTER_BROWSER = 0x00, 0x20, 0x1D
 
 # Default printer names: Brother "BRN" + MAC, HP JetDirect "NPI" + last three MAC bytes.
@@ -94,9 +93,9 @@ class WindowsChatter(Actor):
                                     f"{host.device.stack.name}")
             rng = self.rng.child(host.id)
             # A host that joins chatters once its address is configured, and stops when it leaves.
-            start, end = host.present or (0.0, self.plan_.duration)
+            start = (host.present or (0.0,))[0]
+            begin, end = self.connected(host)
             joined = host.present is not None and host.arrives
-            begin = start + JOIN_SETTLE if joined else start
             self._plan_lookups(host, rng.child("lookups"), rng.uniform(*lookups) * rate / 3600.0, names,
                                self._dns_server(host), begin, end)
             self._plan_searches(host, rng.child("ssdp"), rng.uniform(*searches) * rate / 3600.0, begin, end)

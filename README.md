@@ -116,6 +116,7 @@ And the matching entry in `answers.json`:
 | `ot-dnp3-control-injection` | T0855, T0831 | An unapproved host latches actuators off on a water/wastewater outstation with DNP3 control-relay commands. |
 | `ot-enip-drive-manipulation` | T0855, T0831 | An unapproved host opens an EtherNet/IP I/O connection to a PowerFlex drive and forces its speed reference. |
 | `ot-baseline-operations` | none | Normal operations only, for baselining and false-positive tuning. |
+| `it-baseline-operations` | none | An office LAN as the working day starts: Windows Server DHCP on the domain controller, PCs that boot and confirm their leases, a new PC's first lease. |
 
 Every scenario has easy, medium and hard. In `ot-modbus-write-manipulation`, easy is 15 minutes with two
 PLCs and a rogue Raspberry Pi; hard is 2 hours with 3 to 5 Modbus PLCs, an S7-1500, OPC UA, a telecontrol

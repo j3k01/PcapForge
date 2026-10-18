@@ -51,6 +51,9 @@ class Link:
         # ARP cache lifetime of each host (Windows / Linux reachable-time style aging).
         self.cache_s = {h.id: rng.uniform(30.0, 120.0) for h in topology.hosts}
         self.last_contact: dict[tuple[str, str], float] = {}
+        # Last broadcast heard from each host (a DHCPINFORM): a peer that answers it by unicast
+        # resolves the sender only after it arrived.
+        self.heard: dict[str, float] = {}
         self._views: dict[tuple[str, str], tuple[bytes, int] | None] = {}
 
     def view(self, src: Host, dst: Host | Sink) -> tuple[bytes, int] | None:
@@ -87,6 +90,11 @@ class Link:
         s_ip, t_ip = socket.inet_aton(s_if.ip), socket.inet_aton(t_if.ip)
         reply_t = t - rng.uniform(20e-6, 80e-6)
         request_t = reply_t - self.network.round_trip(target, rng) - rng.uniform(40e-6, 250e-6)
+        heard = self.heard.get(target.id)
+        if heard is not None and request_t <= heard < t:
+            # The frame answers a broadcast of the target: the exchange fits between the two.
+            request_t = heard + (t - heard) * rng.uniform(0.15, 0.35)
+            reply_t = heard + (t - heard) * rng.uniform(0.55, 0.8)
         request = arp_request(s_mac, s_ip, t_ip)
         reply = s_mac + t_mac + ETHERTYPE_ARP + _ARP.pack(
             1, 0x0800, 6, 4, 2, t_mac, t_ip, s_mac, s_ip)

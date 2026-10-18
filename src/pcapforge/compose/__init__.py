@@ -213,6 +213,7 @@ def compose(plan: Plan, recording: Path, out: Path, seed: str, fmt: str = "pcap"
                         synthesized(t, arp)
                 elif delivery.broadcast:
                     eth = BROADCAST + eth[6:]
+                    link.heard[p.src.id] = p.time
                 sorter.packet(p.time, pad(eth + headers.build(p, hops, delivery)), _info(p))
                 for t, arp in leases.after(p):
                     synthesized(t, arp)

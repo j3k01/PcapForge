@@ -1,0 +1,314 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-baseline-operations
+title: Baseline of an office LAN at the start of the working day (no incident)
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [baseline, it, dhcp, dns, ntp, windows, active-directory, kerberos, ldap, smb]
+summary: >
+  An office LAN in the morning: the domain controller serves DHCP (Windows Server), DNS and time;
+  office PCs boot and confirm the leases they held, a newly delivered PC leases its first address,
+  and (medium/hard) the Windows hosts resolve names, chatter on the link and work as members of an
+  Active Directory domain, with an employee's logon. There is no incident. Use it to learn how a
+  Windows office network comes up and to baseline DHCP before hunting for rogue devices.
+
+briefing: |
+  You are joining the SOC of {site_name} ({domain}). The attached capture comes from the SPAN
+  port of the office access switch ({sensor_subnet}) as the working day starts. The sensor keeps
+  internal traffic only; Internet-bound sessions are logged by the firewall instead.
+  Document how hosts get their addresses on this LAN: which server leases them, with which
+  settings, and which hosts came online during the capture.
+
+mitre: []
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [office], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: office, name: "DC-{CODE}-01"}
+    # Office PCs that boot during the capture, and the ones that were already running.
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    # A PC delivered for a new employee: on this LAN for the first time, not in the asset inventory yet.
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+
+actors:
+  # Windows Server DHCP role on the domain controller: scope options router (the firewall),
+  # DNS server and domain name; the Windows Server default lease of 8 days.
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: ws
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, newpc]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, newpc]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, newpc]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # Active Directory: Group Policy refreshes of the members and an employee's logon at a PC that booted.
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, newpc]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: false
+      ipv6: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 30, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 130, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+
+questions:
+  - id: dhcp_server
+    text: Which host leases IP addresses on this LAN (the DHCP server)? Give its IP address.
+    answer: "${facts.dhcp_service.hosts[0].ip}"
+    type: ip
+    points: 10
+    hint: DHCP servers answer from UDP port 67 with Offer and ACK messages (dhcp.option.dhcp in {2, 5}).
+    check:
+      filter: "dhcp.option.dhcp == 5 && ip.src == ${facts.dhcp_service.hosts[0].ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message IN (offer, ack) | stats count BY src, server_id"
+      kql: "message : (\"offer\" or \"ack\")"
+      zeek: {log: dhcp, count_by: [server_addr]}
+      look_for: The source of every Offer and ACK; the server identifier option (54) names the same address.
+  - id: lease_time
+    text: How long are the leases this server grants? Give the lease time in seconds.
+    answer: "${facts.dhcp_service.lease_s}"
+    type: number
+    points: 10
+    hint: The IP Address Lease Time option (51) of an Offer or a lease ACK.
+    check:
+      filter: "dhcp.option.ip_address_lease_time == ${facts.dhcp_service.lease_s}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message=ack lease_time_s=* | stats count BY src, lease_time_s"
+      kql: "message : \"ack\" and lease_time_s : *"
+      zeek: {log: dhcp, count_by: [server_addr, lease_time]}
+      look_for: 691200 s is 8 days, the default lease of a Windows Server DHCP scope; T1 and T2 (options 58, 59) are 50 % and 87.5 % of it.
+  - id: gateway
+    text: Which default gateway does the DHCP server hand out? Give its IP address.
+    answer: "${facts.dhcp_service.router.ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "dhcp.option.router == ${facts.dhcp_service.router.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message=ack | stats count BY src, router"
+      kql: "message : \"ack\" and router : *"
+      look_for: The Router option (3) of the server's replies.
+  - id: domain_name
+    text: Which DNS domain name does the DHCP server hand out?
+    answer: "${facts.dhcp_service.domain}"
+    accept: ["${facts.dhcp_service.domain}"]
+    type: text
+    points: 10
+    check:
+      filter: 'dhcp.option.domain_name == "${facts.dhcp_service.domain}"'
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message=ack | stats count BY src, domain"
+      kql: "message : \"ack\" and domain : *"
+      zeek: {log: dhcp, count_by: [server_addr, domain]}
+      look_for: The Domain Name option (15) of the server's replies.
+  - id: rebooted_hosts
+    text: >-
+      Office PCs booted during the capture. How many hosts confirmed an address they already held,
+      without asking for a new one?
+    answer: "${vars.pc_count}"
+    type: number
+    points: 15
+    hint: >-
+      A host that held a lease sends a broadcast DHCP Request with the address as Requested IP Address
+      (option 50), no Server Identifier (option 54) and no Discover before it (RFC 2131 INIT-REBOOT).
+    check:
+      filter: "dhcp.option.dhcp == 3 && ip.src == 0.0.0.0 && dhcp.option.requested_ip_address && !dhcp.option.dhcp_server_id"
+      expect: {min: "${vars.pc_count}"}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message=request NOT server_id=* | stats count BY client_mac, host_name, requested_addr"
+      kql: "message : \"request\" and not server_id : *"
+      zeek: {log: dhcp, show: [ts, mac, host_name, requested_addr, assigned_addr, msg_types]}
+      look_for: >-
+        Requests without a server identifier and without a Discover in the same transaction (Zeek msg_types
+        REQUEST, ACK); count the distinct client MACs.
+  - id: new_host
+    text: One host leased an address on this LAN for the first time (a full Discover / Offer / Request / ACK exchange). Which host name did it announce?
+    answer: "${facts.new_pc.clients[0].host.name}"
+    accept: ["${facts.new_pc.clients[0].host.name}", "${facts.new_pc.clients[0].host.ip}"]
+    type: text
+    points: 15
+    hint: Filter on DHCP Discover messages (dhcp.option.dhcp == 1) and read the Host Name option (12).
+    check:
+      filter: 'dhcp.option.dhcp == 1 && dhcp.option.hostname == "${facts.new_pc.clients[0].host.name}"'
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message=discover | table ts client_mac host_name vendor_class"
+      kql: "message : \"discover\""
+      zeek: {log: dhcp, where: {mac: "${facts.new_pc.clients[0].host.mac}"}, show: [ts, mac, host_name, assigned_addr, msg_types]}
+      look_for: The only Discover in the capture; its Offer and ACK carry the address the host got.
+  - id: inform_option
+    text: >-
+      Right after they come online, the Windows hosts send a DHCP Inform asking for one option that
+      the server does not hand out (web proxy auto-discovery). Which option code is it?
+    answer: 252
+    type: number
+    points: 10
+    hint: Compare the Parameter Request List (option 55) of an Inform with the options in the server's ACK.
+    check:
+      filter: "dhcp.option.dhcp == 8 && dhcp.option.request_list_item == 252"
+      expect: {min: 1}
+  - id: logon_user
+    when: vars.domain
+    text: An employee logged on to the domain at one of the PCs that booted. Which domain account did they use?
+    answer: "${facts.domain_members.logons[0].user}"
+    accept: ["${facts.domain_members.logons[0].user}"]
+    type: text
+    points: 10
+    hint: >-
+      Logons start with a Kerberos AS exchange (kerberos.msg_type == 10). Computer accounts end with
+      "$"; a person's account does not.
+    check:
+      filter: 'kerberos.msg_type == 10 && kerberos.CNameString == "${facts.domain_members.logons[0].user}"'
+      expect: {min: 3}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=AS result=success | eval account_type=if(like(client, \"%$\"), \"computer\", \"person\") | stats count, min(ts) AS first BY client, account_type, src"
+      kql: "request_type : \"AS\" and result : \"success\""
+      zeek: {log: kerberos, where: {request_type: AS, success: true}, count_by: [client, id.orig_h]}
+      look_for: >-
+        Successful AS exchanges (a new TGT). Computer accounts end with `$`; the account without `$` is
+        the person who logged on at that host.
+
+translations:
+  pl:
+    title: Baseline sieci biurowej na początku dnia pracy (bez incydentu)
+    briefing: |
+      Dołączasz do SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu SPAN
+      przełącznika dostępowego sieci biurowej ({sensor_subnet}) z początku dnia pracy. Sensor
+      zachowuje tylko ruch wewnętrzny; sesje do Internetu loguje firewall.
+      Udokumentuj, jak hosty dostają adresy w tej sieci: który serwer je dzierżawi, z jakimi
+      ustawieniami i które hosty pojawiły się w sieci podczas nagrania.
+    questions:
+      dhcp_server:
+        text: Który host dzierżawi adresy IP w tej sieci (serwer DHCP)? Podaj jego adres IP.
+        hint: Serwery DHCP odpowiadają z portu UDP 67 komunikatami Offer i ACK (dhcp.option.dhcp in {2, 5}).
+      lease_time:
+        text: Na jak długo ten serwer wydaje dzierżawy? Podaj czas dzierżawy w sekundach.
+        hint: Opcja IP Address Lease Time (51) w Offer albo w ACK dzierżawy.
+      gateway:
+        text: Jaką bramę domyślną przekazuje serwer DHCP? Podaj jej adres IP.
+      domain_name:
+        text: Jaką nazwę domeny DNS przekazuje serwer DHCP?
+      rebooted_hosts:
+        text: Podczas nagrania uruchamiały się komputery biurowe. Ile hostów potwierdziło adres, który już miały, bez proszenia o nowy?
+        hint: Host, który miał dzierżawę, wysyła rozgłoszeniowy DHCP Request z adresem w opcji Requested IP Address (50), bez Server Identifier (opcja 54) i bez wcześniejszego Discover (stan INIT-REBOOT z RFC 2131).
+      new_host:
+        text: Jeden host po raz pierwszy wydzierżawił adres w tej sieci (pełna wymiana Discover / Offer / Request / ACK). Jaką nazwę hosta podał?
+        hint: Przefiltruj komunikaty DHCP Discover (dhcp.option.dhcp == 1) i odczytaj opcję Host Name (12).
+      inform_option:
+        text: Zaraz po pojawieniu się w sieci hosty Windows wysyłają DHCP Inform z prośbą o jedną opcję, której serwer nie przekazuje (automatyczne wykrywanie proxy WWW). Jaki to kod opcji?
+        hint: Porównaj listę Parameter Request List (opcja 55) w Inform z opcjami w ACK serwera.
+      logon_user:
+        text: Pracownik zalogował się do domeny na jednym z uruchamianych komputerów. Którego konta domenowego użył?
+        hint: Logowanie zaczyna się od wymiany Kerberos AS (kerberos.msg_type == 10). Konta komputerów kończą się znakiem „$”, konta osób nie.
+  de:
+    title: Baseline eines Büronetzes zu Beginn des Arbeitstages (kein Vorfall)
+    briefing: |
+      Sie verstärken das SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom
+      SPAN-Port des Access-Switches im Büronetz ({sensor_subnet}) zu Beginn des Arbeitstages. Der
+      Sensor behält nur internen Verkehr; Sitzungen ins Internet protokolliert die Firewall.
+      Dokumentieren Sie, wie Hosts in diesem Netz ihre Adressen erhalten: welcher Server sie
+      vergibt, mit welchen Einstellungen und welche Hosts während des Mitschnitts online kamen.
+    questions:
+      dhcp_server:
+        text: Welcher Host vergibt in diesem Netz IP-Adressen (der DHCP-Server)? Geben Sie seine IP-Adresse an.
+        hint: DHCP-Server antworten von UDP-Port 67 mit Offer- und ACK-Nachrichten (dhcp.option.dhcp in {2, 5}).
+      lease_time:
+        text: Wie lange gelten die Leases, die dieser Server vergibt? Geben Sie die Lease-Dauer in Sekunden an.
+        hint: Die Option IP Address Lease Time (51) eines Offer oder eines Lease-ACK.
+      gateway:
+        text: Welches Standard-Gateway gibt der DHCP-Server aus? Geben Sie seine IP-Adresse an.
+      domain_name:
+        text: Welchen DNS-Domänennamen gibt der DHCP-Server aus?
+      rebooted_hosts:
+        text: Während des Mitschnitts wurden Büro-PCs gestartet. Wie viele Hosts haben eine Adresse bestätigt, die sie bereits hatten, ohne eine neue anzufordern?
+        hint: Ein Host mit einer Lease sendet einen Broadcast-DHCP-Request mit der Adresse als Requested IP Address (Option 50), ohne Server Identifier (Option 54) und ohne vorheriges Discover (Zustand INIT-REBOOT nach RFC 2131).
+      new_host:
+        text: Ein Host hat in diesem Netz zum ersten Mal eine Adresse geleast (vollständiger Austausch Discover / Offer / Request / ACK). Welchen Hostnamen hat er angegeben?
+        hint: Filtern Sie auf DHCP-Discover-Nachrichten (dhcp.option.dhcp == 1) und lesen Sie die Option Host Name (12).
+      inform_option:
+        text: Direkt nachdem sie online gekommen sind, senden die Windows-Hosts ein DHCP Inform und fragen nach einer Option, die der Server nicht ausgibt (automatische Erkennung des Web-Proxys). Welcher Optionscode ist es?
+        hint: Vergleichen Sie die Parameter Request List (Option 55) eines Inform mit den Optionen im ACK des Servers.
+      logon_user:
+        text: Ein Mitarbeiter hat sich an einem der gestarteten PCs an der Domäne angemeldet. Welches Domänenkonto hat er verwendet?
+        hint: Anmeldungen beginnen mit einem Kerberos-AS-Austausch (kerberos.msg_type == 10). Computerkonten enden mit „$“, Personenkonten nicht.

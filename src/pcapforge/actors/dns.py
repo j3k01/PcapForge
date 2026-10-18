@@ -121,8 +121,9 @@ class DnsClient(Actor):
             names = [(n, "A") for n in internal if not n.startswith(host.name.lower() + ".")]
             names += [(f"_ldap._tcp.dc._msdcs.{topo.domain}", "SRV"), (f"wpad.{topo.domain}", "A")]
             names += [(n, "A") for n in EXTERNAL_NAMES]
-            t = rng.expovariate(rate)
-            while t < plan.duration:
+            begin, end = self.connected(host)
+            t = begin + rng.expovariate(rate)
+            while t < end:
                 name, qtype = rng.choice(names)
                 plan.add(t, self.id, host.id, "dns.query", server=server.id, name=name, qtype=qtype,
                          txid=rng.randrange(1, 65536))
