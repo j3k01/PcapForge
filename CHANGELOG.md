@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-22
+
+Seeds are not stable across versions: the plans of the existing scenarios (actions, timing, answers) are
+unchanged from 0.3.0, but captures with a DHCP joiner can differ (see Traffic realism).
+
 ### Scenarios
 - `it-baseline-operations`, the first IT-line scenario: an office LAN as the working day starts, captured on
   the office switch. The domain controller on the server subnet is the DHCP server behind the firewall's
@@ -100,6 +104,7 @@
 - SIEM export: `siem/tls.jsonl` (one record per TLS handshake: SNI, JA4, version, cipher, ALPN, certificate
   subject / issuer / SAN) and `siem/http.jsonl` (one per HTTP/1.1 request and response: method, URI, host,
   user agent, SOAPAction, range, status, content type and encoding, sizes); `dhcp.jsonl` has `relay_addr`.
+- Zeek hunts (`hunt.zeek`) take `endswith` (field -> suffix), e.g. every query under one DNS parent domain.
 
 ### Training workflow
 - `pcapforge export-ctfd` is checked against a live CTFd 3.8.8 (ctfcli 0.1.8). Timestamp flags now accept
