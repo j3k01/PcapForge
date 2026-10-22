@@ -15,6 +15,16 @@ def derive_seed(*parts: object) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
+def label_bytes(label: str, size: int) -> bytes:
+    """``size`` deterministic pseudo-random bytes named by ``label`` (opaque ciphertext, nonces, IDs)."""
+    out = bytearray()
+    counter = 0
+    while len(out) < size:
+        out += hashlib.sha256(f"{label}\x1f{counter}".encode()).digest()
+        counter += 1
+    return bytes(out[:size])
+
+
 class Rng(random.Random):
     def __init__(self, *parts: object) -> None:
         self.key = "/".join(str(p) for p in parts)

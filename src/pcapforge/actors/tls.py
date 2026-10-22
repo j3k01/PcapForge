@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import struct
 
-from pcapforge.actors.kerberos import stream
+from pcapforge.rng import label_bytes
 
 HANDSHAKE, CHANGE_CIPHER_SPEC, ALERT, APPLICATION_DATA = 22, 20, 21, 23
 TLS10, TLS12, TLS13 = 0x0301, 0x0303, 0x0304
@@ -83,21 +83,21 @@ def _extension(kind: int, body: bytes = b"") -> bytes:
 def client_hello(server_name: str, label: str, order, session: bytes | None = None) -> bytes:
     """Chromium's ClientHello record for ``server_name``; ``order(n)`` permutes the n inner extensions,
     ``session`` is the TLS 1.2 session ID to resume (else a random 32-byte legacy session ID)."""
-    rnd = stream(f"tls-client\x1f{label}", 64)
+    rnd = label_bytes(f"tls-client\x1f{label}", 64)
     if session is not None:
         rnd = rnd[:32] + session
     # Independent GREASE values (RFC 8701) for the cipher, the group, the version and the two extensions.
-    grease = [GREASE[b % 16] for b in stream(f"tls-grease\x1f{label}", 5)]
+    grease = [GREASE[b % 16] for b in label_bytes(f"tls-grease\x1f{label}", 5)]
     if grease[4] == grease[3]:  # BoringSSL: the two GREASE extensions differ
         grease[4] ^= 0x1010
     name = server_name.encode()
     groups = (grease[1], X25519MLKEM768, X25519, SECP256R1, SECP384R1)
     shares = (_u16(grease[1]) + _vec16(b"\x00")
-              + _u16(X25519MLKEM768) + _vec16(stream(f"tls-mlkem\x1f{label}", 1216))
-              + _u16(X25519) + _vec16(stream(f"tls-x25519\x1f{label}", 32)))
-    ech_size = ECH_PAYLOADS[stream(f"tls-ech-size\x1f{label}", 1)[0] % len(ECH_PAYLOADS)]
-    ech = (b"\x00" + _u16(0x0001) + _u16(0x0001) + stream(f"tls-ech-id\x1f{label}", 1)
-           + _vec16(stream(f"tls-ech-enc\x1f{label}", 32)) + _vec16(stream(f"tls-ech\x1f{label}", ech_size)))
+              + _u16(X25519MLKEM768) + _vec16(label_bytes(f"tls-mlkem\x1f{label}", 1216))
+              + _u16(X25519) + _vec16(label_bytes(f"tls-x25519\x1f{label}", 32)))
+    ech_size = ECH_PAYLOADS[label_bytes(f"tls-ech-size\x1f{label}", 1)[0] % len(ECH_PAYLOADS)]
+    ech = (b"\x00" + _u16(0x0001) + _u16(0x0001) + label_bytes(f"tls-ech-id\x1f{label}", 1)
+           + _vec16(label_bytes(f"tls-ech-enc\x1f{label}", 32)) + _vec16(label_bytes(f"tls-ech\x1f{label}", ech_size)))
     inner = [
         _extension(0, _vec16(b"\x00" + _vec16(name))),                          # server_name
         _extension(23),                                                          # extended_master_secret
@@ -125,7 +125,7 @@ def client_hello(server_name: str, label: str, order, session: bytes | None = No
 
 
 def _server_hello(label: str, session: bytes, alpn: bytes) -> bytes:
-    rnd = stream(f"tls-server\x1f{label}", 32)
+    rnd = label_bytes(f"tls-server\x1f{label}", 32)
     extensions = _extension(0xFF01, b"\x00") + _extension(23) + _extension(16, _vec16(_vec8(alpn)))
     return handshake(SERVER_HELLO, _u16(TLS12) + rnd + _vec8(session) + _u16(SCHANNEL_SUITE) + b"\x00"
                      + _vec16(extensions))
@@ -133,15 +133,15 @@ def _server_hello(label: str, session: bytes, alpn: bytes) -> bytes:
 
 def session_id(label: str) -> bytes:
     """The session ID Schannel gives the full handshake of the connection ``label``."""
-    return stream(f"tls-session\x1f{label}", 32)
+    return label_bytes(f"tls-session\x1f{label}", 32)
 
 
 def server_flight(label: str, chain: list[bytes], alpn: bytes = b"h2") -> bytes:
     """Schannel's ServerHello ... ServerHelloDone of a full handshake."""
     hello = _server_hello(label, session_id(label), alpn)
     certificate = handshake(CERTIFICATE, _vec24(b"".join(_vec24(c) for c in chain)))
-    params = b"\x03" + _u16(X25519) + _vec8(stream(f"tls-ske\x1f{label}", 32))
-    signature = _u16(RSA_PSS_RSAE_SHA256) + _vec16(stream(f"tls-ske-signature\x1f{label}", 256))
+    params = b"\x03" + _u16(X25519) + _vec8(label_bytes(f"tls-ske\x1f{label}", 32))
+    signature = _u16(RSA_PSS_RSAE_SHA256) + _vec16(label_bytes(f"tls-ske-signature\x1f{label}", 256))
     key_exchange = handshake(SERVER_KEY_EXCHANGE, params + signature)
     messages = hello + certificate + key_exchange + handshake(SERVER_HELLO_DONE, b"")
     return b"".join(record(HANDSHAKE, messages[i:i + MAX_PLAINTEXT])
@@ -155,20 +155,20 @@ def server_resume(label: str, session: bytes, alpn: bytes = b"h2") -> bytes:
 
 def client_resume_finish(label: str) -> bytes:
     """The client's ChangeCipherSpec and Finished closing an abbreviated handshake."""
-    return record(CHANGE_CIPHER_SPEC, b"\x01") + record(HANDSHAKE, stream(f"tls-client-finished\x1f{label}",
-                                                                           16 + GCM_OVERHEAD))
+    return record(CHANGE_CIPHER_SPEC, b"\x01") + record(
+        HANDSHAKE, label_bytes(f"tls-client-finished\x1f{label}", 16 + GCM_OVERHEAD))
 
 
 def client_finish(label: str) -> bytes:
     """ClientKeyExchange (x25519), ChangeCipherSpec and the encrypted Finished."""
-    key = handshake(CLIENT_KEY_EXCHANGE, _vec8(stream(f"tls-cke\x1f{label}", 32)))
+    key = handshake(CLIENT_KEY_EXCHANGE, _vec8(label_bytes(f"tls-cke\x1f{label}", 32)))
     return (record(HANDSHAKE, key) + record(CHANGE_CIPHER_SPEC, b"\x01")
-            + record(HANDSHAKE, stream(f"tls-client-finished\x1f{label}", 16 + GCM_OVERHEAD)))
+            + record(HANDSHAKE, label_bytes(f"tls-client-finished\x1f{label}", 16 + GCM_OVERHEAD)))
 
 
 def server_finish(label: str) -> bytes:
-    return record(CHANGE_CIPHER_SPEC, b"\x01") + record(HANDSHAKE, stream(f"tls-server-finished\x1f{label}",
-                                                                          16 + GCM_OVERHEAD))
+    return record(CHANGE_CIPHER_SPEC, b"\x01") + record(
+        HANDSHAKE, label_bytes(f"tls-server-finished\x1f{label}", 16 + GCM_OVERHEAD))
 
 
 def application_data(label: str, size: int) -> bytes:
@@ -176,5 +176,5 @@ def application_data(label: str, size: int) -> bytes:
     out = []
     for index, start in enumerate(range(0, max(size, 1), MAX_PLAINTEXT)):
         chunk = min(MAX_PLAINTEXT, size - start)
-        out.append(record(APPLICATION_DATA, stream(f"tls-data\x1f{label}\x1f{index}", chunk + GCM_OVERHEAD)))
+        out.append(record(APPLICATION_DATA, label_bytes(f"tls-data\x1f{label}\x1f{index}", chunk + GCM_OVERHEAD)))
     return b"".join(out)

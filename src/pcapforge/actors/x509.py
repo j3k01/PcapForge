@@ -12,7 +12,7 @@ import datetime as dt
 from dataclasses import dataclass
 
 from pcapforge.actors import der
-from pcapforge.actors.kerberos import stream
+from pcapforge.rng import label_bytes
 
 SHA256_RSA, RSA = "1.2.840.113549.1.1.11", "1.2.840.113549.1.1.1"
 CN, DC = "2.5.4.3", "0.9.2342.19200300.100.1.25"
@@ -63,21 +63,21 @@ class Certificate:
 
 def _key(label: str) -> tuple[bytes, bytes]:
     """(SubjectPublicKeyInfo, key identifier) of a seed-derived 2048-bit RSA public key."""
-    modulus = bytearray(stream(f"rsa-modulus\x1f{label}", KEY_BITS // 8))
+    modulus = bytearray(label_bytes(f"rsa-modulus\x1f{label}", KEY_BITS // 8))
     modulus[0] |= 0xC0
     modulus[-1] |= 0x01
     public = der.seq(der.integer(int.from_bytes(modulus, "big")), der.integer(65537))
-    return der.seq(_alg(RSA), _bits(public)), stream(f"rsa-key-id\x1f{label}", 20)
+    return der.seq(_alg(RSA), _bits(public)), label_bytes(f"rsa-key-id\x1f{label}", 20)
 
 
 def _certificate(label: str, issuer: bytes, subject: bytes, not_before: float, not_after: float,
                  extensions: list[bytes], spki: bytes) -> tuple[bytes, str]:
-    serial = bytearray(stream(f"x509-serial\x1f{label}", 16))
+    serial = bytearray(label_bytes(f"x509-serial\x1f{label}", 16))
     serial[0] &= 0x7F
     serial[0] |= 0x10
     tbs = der.seq(der.ctx(0, der.integer(2)), der.tlv(der.INTEGER, bytes(serial)), _alg(SHA256_RSA), issuer,
                   der.seq(_time(not_before), _time(not_after)), subject, spki, der.ctx(3, der.seq(*extensions)))
-    return der.seq(tbs, _alg(SHA256_RSA), _bits(stream(f"x509-signature\x1f{label}", KEY_BITS // 8))), serial.hex()
+    return der.seq(tbs, _alg(SHA256_RSA), _bits(label_bytes(f"x509-signature\x1f{label}", KEY_BITS // 8))), serial.hex()
 
 
 def ca_name(netbios: str, host_name: str) -> str:

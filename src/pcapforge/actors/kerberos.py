@@ -15,6 +15,7 @@ import hmac
 import struct
 
 from pcapforge.actors import der
+from pcapforge.rng import label_bytes
 
 PVNO = 5
 AS_REQ, AS_REP, TGS_REQ, TGS_REP, AP_REQ, AP_REP, KRB_ERROR = 10, 11, 12, 13, 14, 15, 30
@@ -50,20 +51,10 @@ TOK_AP_REQ, TOK_AP_REP = b"\x01\x00", b"\x02\x00"
 
 # --- opaque ciphertext ----------------------------------------------------------------
 
-def stream(label: str, size: int) -> bytes:
-    """``size`` deterministic pseudo-random bytes named by ``label``."""
-    out = bytearray()
-    counter = 0
-    while len(out) < size:
-        out += hashlib.sha256(f"{label}\x1f{counter}".encode()).digest()
-        counter += 1
-    return bytes(out[:size])
-
-
 def seal(label: str, plaintext_size: int, key: bytes) -> bytes:
     """Ciphertext of an AES-CTS-HMAC-SHA1-96 encryption of ``plaintext_size`` bytes: opaque body,
     the trailing 12 bytes an HMAC over it keyed by ``key`` (see ``sealed_by``)."""
-    body = stream(label, CONFOUNDER + plaintext_size)
+    body = label_bytes(label, CONFOUNDER + plaintext_size)
     return body + hmac.new(key, body, hashlib.sha1).digest()[:MAC]
 
 
@@ -91,7 +82,7 @@ def padata(pa_type: int, value: bytes) -> bytes:
 
 
 def encryption_key(rng_label: str, etype: int = AES256) -> bytes:
-    return der.seq(der.ctx(0, der.integer(etype)), der.ctx(1, der.octets(stream(rng_label, 32))))
+    return der.seq(der.ctx(0, der.integer(etype)), der.ctx(1, der.octets(label_bytes(rng_label, 32))))
 
 
 def etype_info2(entries: list[tuple[int, str | None]]) -> bytes:
@@ -307,4 +298,4 @@ def wrap_token(label: str, plaintext_size: int, acceptor: bool, seq_number: int,
     header) | HMAC rotated right by RRC; the rotated cipher is opaque."""
     flags = 0x02 | 0x04 | (0x01 if acceptor else 0)
     header = struct.pack("!2sBBHHQ", b"\x05\x04", flags, 0xFF, ec, rrc, seq_number)
-    return header + stream(label, CONFOUNDER + plaintext_size + ec + WRAP_HEADER + MAC)
+    return header + label_bytes(label, CONFOUNDER + plaintext_size + ec + WRAP_HEADER + MAC)

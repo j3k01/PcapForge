@@ -20,6 +20,7 @@ from pcapforge import ports
 from pcapforge.actors import der, kerberos as krb, ldap, register, smb2
 from pcapforge.actors.base import Actor
 from pcapforge.plan import action_ref, host_ref
+from pcapforge.rng import label_bytes
 from pcapforge.scenario import ScenarioError
 
 DDP_GUID = "{31B2F340-016D-11D2-945F-00C04FB984F9}"   # Default Domain Policy (fixed in every domain)
@@ -228,7 +229,7 @@ class Directory:
 
 
 def _int31(*parts: object) -> int:
-    return int.from_bytes(krb.stream("\x1f".join(str(p) for p in parts), 4), "big") & 0x7FFFFFFF
+    return int.from_bytes(label_bytes("\x1f".join(str(p) for p in parts), 4), "big") & 0x7FFFFFFF
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -446,11 +447,11 @@ class DomainController(Actor):
                 command, mid, session_id, tree_id = h["command"], h["message_id"], h["session_id"], h["tree_id"]
                 label = sessions.get(session_id)
                 if command == smb2.NEGOTIATE:
-                    salt = krb.stream(f"smb-salt\x1f{self.rt.clock.t}\x1f{mid}", 32)
+                    salt = label_bytes(f"smb-salt\x1f{self.rt.clock.t}\x1f{mid}", 32)
                     reply = smb2.negotiate_response(d.server_guid.bytes_le, self._now(), krb.neg_token_init2(), salt)
                 elif command == smb2.SESSION_SETUP:
                     holder, token = self.accept(smb2.security_buffer(body), "cifs")
-                    session_id = int.from_bytes(krb.stream(f"smb-session\x1f{holder.label}", 8), "little") | 1
+                    session_id = int.from_bytes(label_bytes(f"smb-session\x1f{holder.label}", 8), "little") | 1
                     sessions[session_id] = label = holder.label
                     reply = smb2.session_setup_response(token)
                 elif command == smb2.TREE_CONNECT:
@@ -470,9 +471,9 @@ class DomainController(Actor):
                     if found is None:
                         raise RuntimeError(f"SMB CREATE of an unknown file {smb2.create_name(body)!r}")
                     gpo, data = found
-                    file_id = krb.stream(f"smb-file\x1f{label}\x1f{mid}", 16)
+                    file_id = label_bytes(f"smb-file\x1f{label}\x1f{mid}", 16)
                     files[file_id] = data
-                    disk_id = krb.stream(f"smb-disk\x1f{gpo.guid}", 8) + d.server_guid.bytes_le[:8]
+                    disk_id = label_bytes(f"smb-disk\x1f{gpo.guid}", 8) + d.server_guid.bytes_le[:8]
                     reply = smb2.create_response(file_id, (gpo.created, gpo.changed, gpo.changed, gpo.changed),
                                                  len(data), 0x001200A9, disk_id)
                 elif command == smb2.READ:
@@ -488,7 +489,7 @@ class DomainController(Actor):
                     reply = smb2.empty()
                 else:
                     raise RuntimeError(f"unexpected SMB2 command {command}")
-                signature = (krb.stream(f"smb-sig\x1f{label}\x1f{mid}\x1fs", 16)
+                signature = (label_bytes(f"smb-sig\x1f{label}\x1f{mid}\x1fs", 16)
                              if label is not None and command != smb2.NEGOTIATE else None)
                 header = smb2.header(command, mid, response=True, credits=max(1, h["credits"]), tree_id=tree_id,
                                      session_id=session_id, signature=signature,
@@ -514,7 +515,7 @@ class _SmbConnection:
              credits: int = 1) -> tuple[dict, bytes]:
         signature = None
         if session is not None and command != smb2.SESSION_SETUP:
-            signature = krb.stream(f"smb-sig\x1f{session['label']}\x1f{self.message_id}\x1fc", 16)
+            signature = label_bytes(f"smb-sig\x1f{session['label']}\x1f{self.message_id}\x1fc", 16)
         header = smb2.header(command, self.message_id, credits=credits, tree_id=tree_id,
                              session_id=session["id"] if session else 0, signature=signature,
                              credit_charge=0 if command == smb2.NEGOTIATE else 1)
@@ -841,8 +842,8 @@ class DomainMember(Actor):
         elif op == "ad.smb":
             if a["connect"]:
                 conn = rt.clients[key] = _SmbConnection(host.loopback, d.dc.loopback, f"{host.id}\x1f{action.t}")
-                client_guid = krb.stream(f"smb-client-guid\x1f{host.id}", 16)
-                salt = krb.stream(f"smb-salt\x1f{host.id}\x1f{action.t}", 32)
+                client_guid = label_bytes(f"smb-client-guid\x1f{host.id}", 16)
+                salt = label_bytes(f"smb-salt\x1f{host.id}\x1f{action.t}", 32)
                 conn.call(smb2.NEGOTIATE, smb2.negotiate_request(client_guid, salt, d.dc_fqdn))
             conn = rt.clients[key]
             if a["session"]:

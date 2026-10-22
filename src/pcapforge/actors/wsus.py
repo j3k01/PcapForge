@@ -33,9 +33,9 @@ from pcapforge import ports, xpress
 from pcapforge.actors import register
 from pcapforge.actors.base import Actor
 from pcapforge.actors.dns import query_server
-from pcapforge.actors.kerberos import stream
 from pcapforge.actors.scripted import ScriptedConnection, ScriptedServer
 from pcapforge.plan import action_ref, host_ref
+from pcapforge.rng import label_bytes
 from pcapforge.scenario import ScenarioError
 
 PORT = ports.WELL_KNOWN[ports.WSUS]
@@ -69,7 +69,7 @@ def _http_date(epoch: float) -> str:
 
 
 def _b64(label: str, size: int) -> str:
-    return base64.b64encode(stream(label, size)).decode()
+    return base64.b64encode(label_bytes(label, size)).decode()
 
 
 def request(path: str, host: str, action: str, body: str, compressed: bool = True) -> bytes:
@@ -109,7 +109,7 @@ class WsusServer(Actor):
         self.update = None
         if self.param("update", False):
             size = rng.randint(*(int(v) for v in self.span(self.param("update_size", [600_000, 2_400_000]))))
-            digest = hashlib.sha1(stream(f"wsus-file\x1f{rng.key}", 64)).hexdigest()
+            digest = hashlib.sha1(label_bytes(f"wsus-file\x1f{rng.key}", 64)).hexdigest()
             version = f"1.{rng.randint(441, 449)}.{rng.randint(100, 999)}.0"
             self.update = {
                 "kb": DEFENDER_KB,
@@ -121,7 +121,7 @@ class WsusServer(Actor):
                 "size": size,
                 "revision": rng.randint(200_000_000, 299_999_999),
                 "deployment": rng.randint(300_000, 999_999),
-                "update_id": str(uuid.UUID(bytes=stream(f"wsus-update\x1f{rng.key}", 16), version=4)),
+                "update_id": str(uuid.UUID(bytes=label_bytes(f"wsus-update\x1f{rng.key}", 16), version=4)),
                 "modified": plan.start_epoch - rng.uniform(3600.0, 20 * 3600.0),
             }
         plan.facts[self.id] = {"hosts": [host_ref(host.id)], "fqdn": self.fqdn, "port": PORT,
@@ -159,7 +159,7 @@ class WsusClient(Actor):
                 at = begin + rng.uniform(0.0, end - begin) if rng.random() < chance else None
             if at is None or at >= end:
                 continue
-            client_id = str(uuid.UUID(bytes=stream(f"wsus-client\x1f{self.rng.key}\x1f{host.id}", 16), version=4))
+            client_id = str(uuid.UUID(bytes=label_bytes(f"wsus-client\x1f{self.rng.key}\x1f{host.id}", 16), version=4))
             common = {"wsus": server_host.id, "client_id": client_id, "fqdn": f"{host.name.lower()}.{topo.domain}"}
             plan.add(at, self.id, host.id, "wsus.resolve", name=server.fqdn, server=resolver,
                      txid=rng.randrange(1, 65536), txid6=rng.randrange(1, 65536))
@@ -235,7 +235,7 @@ class WsusClient(Actor):
         cookie = _b64(f"wsus-cookie\x1f{label}", 168)
         events = []
         for event_id, at, update_id, count in a["events"]:
-            instance = str(uuid.UUID(bytes=stream(f"wsus-event\x1f{label}\x1f{event_id}\x1f{at}", 16),
+            instance = str(uuid.UUID(bytes=label_bytes(f"wsus-event\x1f{label}\x1f{event_id}\x1f{at}", 16),
                                      version=4)).upper()
             strings = ("" if count is None else
                        f'<ReplacementStrings soapenc:arrayType="xsd:string[1]"><string>{count}</string>'
@@ -355,7 +355,7 @@ class WsusClient(Actor):
                f"Range: bytes=0-{size - 1}\r\n\r\n").encode()
         get_reply = (f"HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n{server}"
                      f"Content-Range: bytes 0-{size - 1}/{size}\r\nContent-Length: {size}\r\n\r\n").encode()
-        conn.exchange(get, get_reply + stream(f"wsus-content\x1f{update['sha1']}", size))
+        conn.exchange(get, get_reply + label_bytes(f"wsus-content\x1f{update['sha1']}", size))
 
     def close(self, rt) -> None:
         for key in [k for k in rt.clients if k[0] == self.id]:
