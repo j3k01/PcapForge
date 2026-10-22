@@ -266,7 +266,8 @@ questions:
   `tests/test_siem_queries.py` (CI job `siem-queries`; the SPL starts with
   `index=* sourcetype=pcapforge:<dataset>`). `zeek` queries one Zeek log (`--zeek`):
   `{log: modbus, where: {pdu_type: REQ, func: [WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.orig_h]}`
-  (`where`: field -> value, a list means any of them; then `show: [fields]` or `count_by: [fields]`); the guide
+  (`where`: field -> value, a list means any of them; `endswith`: field -> suffix, e.g. names under a DNS
+  parent domain; then `show: [fields]` or `count_by: [fields]`); the guide
   prints it as a jq command and `tests/test_zeek_hunts.py` runs it on every level. Add it only where a Zeek
   log can show the answer.
 - A question must be answerable from the capture plus the briefing alone.

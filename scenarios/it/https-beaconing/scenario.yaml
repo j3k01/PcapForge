@@ -1,0 +1,402 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-https-beaconing
+title: Periodic HTTPS beaconing from an office PC to an external service
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, beaconing, c2, tls, https, dns, windows, active-directory, wsus]
+summary: >
+  The office-LAN baseline (Windows Server DHCP behind the firewall relay, intranet HTTPS over
+  Edge/IIS, WSUS, Active Directory) with one incident: a single workstation checks in over HTTPS
+  to an external-looking service at a regular interval. The check-in is a benign TLS client fetching
+  a small static page from a local test server (CONTRIBUTING benign-equivalent rule), reached
+  through the firewall at a fictional domain the site DNS resolves. Nothing malicious runs; the
+  observable pattern is a rare destination contacted on a conspicuously regular cadence. On easy the
+  interval is short and fixed and the SNI stands out; on medium it jitters; on hard it is long and
+  jittered and the browser-identical ClientHello blends with the Edge and WSUS traffic.
+
+briefing: |
+  You are on the SOC of {site_name} ({domain}). The attached capture comes from the SPAN port of
+  the office access switch ({sensor_subnet}). The sensor keeps internal traffic only; Internet-bound
+  sessions are logged by the firewall instead. The firewall flagged repeated outbound TLS
+  connections from the office LAN to an unfamiliar external service, always to the same name and at
+  a suspiciously regular pace, while the workstation's user was not actively browsing. Normal office
+  traffic - intranet HTTPS to the portal and helpdesk, Windows Update against WSUS, DHCP, DNS and
+  the Active Directory logons - is all present too. Work out which host is beaconing, where it is
+  calling, how often, and when it started.
+
+mitre:
+  - {framework: enterprise, id: T1071.001, name: "Application Layer Protocol: Web Protocols"}
+  - {framework: enterprise, id: T1573, name: Encrypted Channel}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+    # The segment behind the firewall that stands in for the Internet: the beacon's destination gets
+    # a documentation-range (RFC 5737 TEST-NET-3) address, so it reads as external next to the site.
+    - {id: wan, cidr: 203.0.113.0/24}
+  hosts:
+    # The firewall routes between the office LAN, the server subnet and the external segment, and
+    # relays DHCP for the office.
+    - {id: firewall, device: fortigate, subnets: [office, servers, wan], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    # Office PCs that boot during the capture, and the ones that were already running.
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    # A PC delivered for a new employee, leasing its first address on this LAN.
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+    # The workstation that beacons: an ordinary office PC, in the inventory, doing normal work too.
+    - {id: beacon_pc, device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-0231", role: workstation}
+    # The external-looking service the beacon calls. Not in the asset inventory; the beacon actor
+    # registers its fictional domain in the site DNS zone as an A record to this host.
+    - {id: beacon_c2, device: linux-laptop, subnet: wan, name: "edge-cache-07", inventory: false}
+
+actors:
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: [ws, beacon_pc]
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, newpc, beacon_pc]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, newpc, beacon_pc]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, newpc, beacon_pc]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, newpc, beacon_pc]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, newpc, beacon_pc]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, newpc, beacon_pc]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+  # The external-looking beacon endpoint and the incident: one PC checks in on a regular cadence.
+  - id: beacon_service
+    type: tls.beacon_server
+    hosts: beacon_c2
+    params: {domains: "${vars.beacon_domains}"}
+  - id: beacon
+    type: tls.beacon
+    hosts: beacon_pc
+    incident: true
+    params:
+      server: beacon_c2
+      dns: dc
+      interval: "${vars.beacon_interval}"
+      jitter: "${vars.beacon_jitter}"
+      resume: "${vars.beacon_resume}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: false
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      beacon_interval: 30
+      beacon_jitter: 0.0
+      beacon_resume: false
+      beacon_domains: [cdn7.telemetry-sync-nodes.net]
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 30, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      beacon_interval: {range: [55, 75]}
+      beacon_jitter: 0.12
+      beacon_resume: false
+      beacon_domains: [api.metrics-collector.io, static.content-edge-cache.net, sync.cloud-telemetry.app, assets.analytics-delivery.co, update.software-mirror-cdn.net]
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 130, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      beacon_interval: {range: [600, 900]}
+      beacon_jitter: 0.1
+      beacon_resume: true
+      beacon_domains: [api.metrics-collector.io, static.content-edge-cache.net, sync.cloud-telemetry.app, assets.analytics-delivery.co, update.software-mirror-cdn.net]
+
+questions:
+  - id: beacon_source_ip
+    text: Which host on the office LAN is beaconing (the source of the periodic HTTPS check-ins)? Give its IP address.
+    answer: "${facts.beacon.source.ip}"
+    type: ip
+    points: 15
+    hint: >-
+      Group the TLS ClientHellos by SNI and source. Normal browsing hits the intranet and helpdesk
+      names from many PCs; the beacon is one host repeatedly opening the same unfamiliar external name.
+    check:
+      filter: 'tls.handshake.type == 1 && tls.handshake.extensions_server_name == "${facts.beacon.domain}" && ip.src == ${facts.beacon.source.ip}'
+      expect: {min: "${facts.beacon.checkin_count}"}
+    hunt:
+      dataset: tls
+      spl: 'index=* sourcetype=pcapforge:tls server_name="${facts.beacon.domain}" | stats count AS checkins, min(ts) AS first BY src, server_name, dest'
+      kql: 'server_name : "${facts.beacon.domain}"'
+      zeek: {log: ssl, where: {server_name: "${facts.beacon.domain}"}, count_by: [id.orig_h, server_name, id.resp_h]}
+      look_for: >-
+        Every TLS session to the beacon domain comes from the one workstation; the intranet names come
+        from all of them. The source of those sessions is the beaconing host.
+  - id: beacon_source_mac
+    text: What is the MAC address of the beaconing workstation?
+    answer: "${facts.beacon.source.mac}"
+    type: mac
+    points: 10
+    hint: The workstation is on the sensor segment, so its own Ethernet source address is on each ClientHello it sends.
+    check:
+      filter: 'tls.handshake.type == 1 && tls.handshake.extensions_server_name == "${facts.beacon.domain}" && eth.src == ${facts.beacon.source.mac}'
+      expect: {min: 1}
+    hunt:
+      dataset: flows
+      spl: 'index=* sourcetype=pcapforge:flows dest=${facts.beacon.destination.ip} dest_port=443 | stats count BY src, src_mac, dest'
+      kql: 'dest : "${facts.beacon.destination.ip}" and dest_port : 443'
+      look_for: The flows to the beacon destination name the source host and its MAC (src_mac).
+  - id: beacon_domain
+    text: Which destination domain name does the beacon call (the SNI of the check-ins)?
+    answer: "${facts.beacon.domain}"
+    accept: ["${facts.beacon.domain}"]
+    type: text
+    points: 15
+    hint: A TLS ClientHello names the destination in its Server Name Indication extension (tls.handshake.extensions_server_name).
+    check:
+      filter: 'tls.handshake.type == 1 && tls.handshake.extensions_server_name == "${facts.beacon.domain}"'
+      expect: {min: 1}
+    hunt:
+      dataset: tls
+      spl: "index=* sourcetype=pcapforge:tls | stats count BY server_name, dest | sort count"
+      kql: 'server_name : "${facts.beacon.domain}"'
+      zeek: {log: ssl, count_by: [server_name, id.resp_h]}
+      look_for: >-
+        The rare SNI: the intranet names appear in many sessions, the beacon domain in a steady trickle
+        to a single external address no other host contacts.
+  - id: beacon_dest_ip
+    text: Which IP address does the beacon connect to?
+    answer: "${facts.beacon.destination.ip}"
+    type: ip
+    points: 10
+    hint: The destination of the TLS sessions carrying that SNI, outside the office and server subnets.
+    check:
+      filter: 'tls.handshake.type == 1 && tls.handshake.extensions_server_name == "${facts.beacon.domain}" && ip.dst == ${facts.beacon.destination.ip}'
+      expect: {min: 1}
+    hunt:
+      dataset: tls
+      spl: 'index=* sourcetype=pcapforge:tls server_name="${facts.beacon.domain}" | stats count BY dest, dest_port, cert_issuer'
+      kql: 'server_name : "${facts.beacon.domain}"'
+      zeek: {log: ssl, where: {server_name: "${facts.beacon.domain}"}, count_by: [id.resp_h]}
+      look_for: >-
+        The address the beacon's TLS sessions go to. Its certificate issuer is a public CA, not the
+        domain's AD CS root that signs the intranet sites.
+  - id: beacon_interval
+    text: >-
+      How often does the host check in, in seconds? Estimate the interval between consecutive
+      check-ins (the regular cadence).
+    answer: "${facts.beacon.interval_s}"
+    type: number
+    tolerance: 30
+    points: 15
+    hint: >-
+      Sort the beacon's TLS sessions by time and take the differences between consecutive check-ins.
+      The cadence is regular (with a little jitter on the harder levels); use the average spacing.
+    hunt:
+      dataset: tls
+      spl: 'index=* sourcetype=pcapforge:tls server_name="${facts.beacon.domain}" | sort 0 _time | streamstats current=f last(epoch) AS prev BY src, server_name | eval interval_s=round(epoch-prev, 1) | stats count, avg(interval_s) AS mean_interval_s, min(interval_s) AS min_interval_s, max(interval_s) AS max_interval_s BY src, server_name'
+      kql: 'server_name : "${facts.beacon.domain}"'
+      look_for: >-
+        The mean gap between consecutive check-ins to the beacon domain is the interval; it barely
+        varies, which is what makes the activity stand out from human browsing.
+  - id: beacon_first_checkin
+    text: At what time (UTC) was the first check-in to that destination?
+    answer: "${facts.beacon.first_checkin.time}"
+    type: timestamp
+    tolerance_s: 2
+    points: 10
+    hint: The first TLS session (its TCP SYN / ClientHello) from the beaconing host to the beacon domain.
+    check:
+      filter: "frame.number == ${facts.beacon.first_checkin.frame}"
+      expect: {count: 1}
+    hunt:
+      dataset: tls
+      spl: 'index=* sourcetype=pcapforge:tls server_name="${facts.beacon.domain}" | stats min(ts) AS first_checkin BY src, server_name'
+      kql: 'server_name : "${facts.beacon.domain}"'
+      look_for: The earliest check-in to the beacon domain.
+  - id: beacon_count
+    text: How many check-ins to that destination are in the capture?
+    answer: "${facts.beacon.checkin_count}"
+    type: number
+    points: 10
+    hint: Count the TLS ClientHellos (one per check-in) from the beaconing host to the beacon domain.
+    check:
+      filter: 'tls.handshake.type == 1 && tls.handshake.extensions_server_name == "${facts.beacon.domain}" && ip.src == ${facts.beacon.source.ip}'
+      expect: {min: "${facts.beacon.checkin_count}"}
+    hunt:
+      dataset: tls
+      spl: 'index=* sourcetype=pcapforge:tls server_name="${facts.beacon.domain}" src=${facts.beacon.source.ip} | stats count AS checkins'
+      kql: 'server_name : "${facts.beacon.domain}" and src : "${facts.beacon.source.ip}"'
+      look_for: One ClientHello per check-in; count them.
+  - id: technique
+    text: Which MITRE ATT&CK technique best describes regular HTTPS check-ins to a command-and-control service?
+    answer: T1071.001
+    accept: [T1071.001, "Application Layer Protocol", "Web Protocols", T1071]
+    type: text
+    points: 5
+    hunt:
+      dataset: tls
+      spl: "index=* sourcetype=pcapforge:tls | stats count BY server_name, dest"
+      kql: "server_name : *"
+      look_for: >-
+        Beaconing over HTTPS is Application Layer Protocol: Web Protocols (T1071.001); the TLS wrapper
+        is an Encrypted Channel (T1573).
+
+translations:
+  pl:
+    title: Regularne beaconowanie HTTPS z komputera biurowego do usługi zewnętrznej
+    briefing: |
+      Jesteś w zespole SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu
+      SPAN przełącznika dostępowego sieci biurowej ({sensor_subnet}). Sensor zachowuje tylko ruch
+      wewnętrzny; sesje do Internetu loguje firewall. Firewall oznaczył powtarzające się wychodzące
+      połączenia TLS z sieci biurowej do nieznanej usługi zewnętrznej, zawsze pod tę samą nazwę i w
+      podejrzanie regularnym tempie, podczas gdy użytkownik stacji nie przeglądał aktywnie sieci.
+      Obecny jest też cały normalny ruch biurowy - HTTPS do intranetu i helpdesku, Windows Update z
+      WSUS, DHCP, DNS i logowania do Active Directory. Ustal, który host beaconuje, dokąd dzwoni, jak
+      często i kiedy się zaczęło.
+    questions:
+      beacon_source_ip:
+        text: Który host w sieci biurowej beaconuje (źródło okresowych zameldowań HTTPS)? Podaj jego adres IP.
+        hint: >-
+          Pogrupuj ClientHello TLS według SNI i źródła. Normalne przeglądanie trafia do nazw intranetu i
+          helpdesku z wielu komputerów; beacon to jeden host wielokrotnie otwierający tę samą nieznaną nazwę zewnętrzną.
+      beacon_source_mac:
+        text: Jaki jest adres MAC beaconującej stacji roboczej?
+        hint: Stacja jest w segmencie sensora, więc jej własny adres źródłowy Ethernet jest w każdym wysyłanym przez nią ClientHello.
+      beacon_domain:
+        text: Jaką nazwę domeny docelowej wywołuje beacon (SNI zameldowań)?
+        hint: ClientHello TLS podaje cel w rozszerzeniu Server Name Indication (tls.handshake.extensions_server_name).
+      beacon_dest_ip:
+        text: Z jakim adresem IP łączy się beacon?
+        hint: Cel sesji TLS z tym SNI, poza podsieciami biurową i serwerową.
+      beacon_interval:
+        text: >-
+          Jak często host się melduje, w sekundach? Oszacuj odstęp między kolejnymi zameldowaniami
+          (regularny rytm).
+        hint: >-
+          Posortuj sesje TLS beacona według czasu i policz różnice między kolejnymi zameldowaniami.
+          Rytm jest regularny (z niewielkim jitterem na trudniejszych poziomach); użyj średniego odstępu.
+      beacon_first_checkin:
+        text: O której godzinie (UTC) nastąpiło pierwsze zameldowanie do tego celu?
+        hint: Pierwsza sesja TLS (jej TCP SYN / ClientHello) z beaconującego hosta do domeny beacona.
+      beacon_count:
+        text: Ile zameldowań do tego celu jest w nagraniu?
+        hint: Policz ClientHello TLS (jedno na zameldowanie) z beaconującego hosta do domeny beacona.
+      technique:
+        text: Która technika MITRE ATT&CK najlepiej opisuje regularne zameldowania HTTPS do usługi command-and-control?
+  de:
+    title: Regelmäßiges HTTPS-Beaconing von einem Büro-PC zu einem externen Dienst
+    briefing: |
+      Sie sind im SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom SPAN-Port des
+      Access-Switches im Büronetz ({sensor_subnet}). Der Sensor behält nur internen Verkehr; Sitzungen
+      ins Internet protokolliert die Firewall. Die Firewall meldete wiederholte ausgehende
+      TLS-Verbindungen aus dem Büronetz zu einem unbekannten externen Dienst, immer zum selben Namen
+      und in verdächtig regelmäßigem Takt, während der Benutzer der Station nicht aktiv surfte. Auch
+      der gesamte normale Büroverkehr ist vorhanden - HTTPS zum Intranet und Helpdesk, Windows Update
+      gegen WSUS, DHCP, DNS und die Active-Directory-Anmeldungen. Ermitteln Sie, welcher Host
+      beacont, wohin er ruft, wie oft und wann es begann.
+    questions:
+      beacon_source_ip:
+        text: Welcher Host im Büronetz beacont (die Quelle der periodischen HTTPS-Check-ins)? Geben Sie seine IP-Adresse an.
+        hint: >-
+          Gruppieren Sie die TLS-ClientHellos nach SNI und Quelle. Normales Surfen trifft die Intranet- und
+          Helpdesk-Namen von vielen PCs; der Beacon ist ein Host, der denselben unbekannten externen Namen wiederholt öffnet.
+      beacon_source_mac:
+        text: Wie lautet die MAC-Adresse der beaconenden Arbeitsstation?
+        hint: Die Station ist im Sensorsegment, daher steht ihre eigene Ethernet-Quelladresse auf jedem ClientHello, das sie sendet.
+      beacon_domain:
+        text: Welchen Zielnamen ruft der Beacon auf (die SNI der Check-ins)?
+        hint: Ein TLS-ClientHello nennt das Ziel in der Erweiterung Server Name Indication (tls.handshake.extensions_server_name).
+      beacon_dest_ip:
+        text: Mit welcher IP-Adresse verbindet sich der Beacon?
+        hint: Das Ziel der TLS-Sitzungen mit dieser SNI, außerhalb des Büro- und Serversubnetzes.
+      beacon_interval:
+        text: >-
+          Wie oft meldet sich der Host, in Sekunden? Schätzen Sie den Abstand zwischen aufeinanderfolgenden
+          Check-ins (den regelmäßigen Takt).
+        hint: >-
+          Sortieren Sie die TLS-Sitzungen des Beacons nach Zeit und bilden Sie die Differenzen zwischen
+          aufeinanderfolgenden Check-ins. Der Takt ist regelmäßig (mit etwas Jitter auf den schwereren Stufen); nehmen Sie den mittleren Abstand.
+      beacon_first_checkin:
+        text: Zu welcher Zeit (UTC) fand der erste Check-in zu diesem Ziel statt?
+        hint: Die erste TLS-Sitzung (ihr TCP-SYN / ClientHello) vom beaconenden Host zur Beacon-Domäne.
+      beacon_count:
+        text: Wie viele Check-ins zu diesem Ziel enthält der Mitschnitt?
+        hint: Zählen Sie die TLS-ClientHellos (eines pro Check-in) vom beaconenden Host zur Beacon-Domäne.
+      technique:
+        text: Welche MITRE-ATT&CK-Technik beschreibt regelmäßige HTTPS-Check-ins zu einem Command-and-Control-Dienst am besten?

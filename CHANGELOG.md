@@ -10,6 +10,65 @@
   Windows chatter, IPv6 and the Active Directory domain with an employee's logon. Questions on DHCP and its
   relay, the rebooted and the new host, the DHCPINFORM option, the logon account, the intranet sites, their
   CA and cipher suite, the WSUS server and port, its SOAP calls and the downloaded update.
+- `it-dns-tunneling`: DNS-based data transfer to a local resolver (MITRE ATT&CK T1071.004, T1048.003) on
+  the office-LAN background. The `dns.tunnel` actor makes one workstation send a run of DNS queries whose
+  leading label carries base32-encoded chunks of an opaque fake payload (`rng.label_bytes`) under a single
+  fictional parent domain, all through the site resolver (the DC), which forwards them like any external
+  name and answers SERVFAIL — no bytes leave the loopback range, only the observable pattern. easy: a
+  high-rate burst of long TXT labels; medium: a moderate rate of A/AAAA with shorter labels; hard:
+  low-and-slow A queries with near-normal labels interleaved with ordinary lookups. Questions on the
+  tunnelling host, the parent domain, the record type, the approximate bytes moved and the first encoded
+  query, with a Suricata rule and a Sigma rule (dns dataset) on the long labels under the parent.
+- `it-https-beaconing`: periodic HTTPS check-ins from an office PC to an external-looking service
+  (MITRE ATT&CK T1071.001, T1573) on the office-LAN background — the benign equivalent of C2 beaconing
+  (a TLS client fetching a small static page from a local test server at a jittered interval). New
+  `tls.beacon_server` actor (a TLS 1.2 endpoint serving a tiny page for a fictional domain, with a
+  certificate from a fictional public CA rather than the domain's AD CS root) and `tls.beacon` actor
+  (one workstation resolves that domain through the site DNS and checks in through the firewall at a
+  regular interval, reusing Edge's ClientHello from `tls.py`). easy: a short fixed interval with a
+  distinctive SNI; medium: a jittered interval and a per-seed plausible SNI; hard: a long jittered
+  interval with TLS session resumption so the beacon blends with the Edge/WSUS background and only the
+  cadence stands out. Questions on the beaconing host (IP / MAC), the destination domain and IP, the
+  interval (with tolerance), the first check-in time and the check-in count, with a TLS-SNI Suricata
+  rule and a Sigma rule over the tls dataset. The site DNS now resolves dotted host aliases as full
+  external FQDNs (an A record to the host), so a scenario's fictional external domain resolves through
+  the DC; background DNS clients enumerate only site-domain names, so the baseline is unchanged.
+- `it-volumetric-flood`: a volumetric network flood against a local sink (MITRE ATT&CK T1498, T1498.001) on
+  the office-LAN background. New `sink.server` actor (a benign Discard sink, RFC 863, on UDP 9 that drops
+  what it receives so the flood draws no ICMP replies) and `sink.flood` actor (one or more office hosts send
+  a bounded, high-rate burst of opaque UDP datagrams to the sink; each datagram is planned at its own time,
+  so the measured packet rate in the capture follows the plan and every datagram is its own one-packet flow
+  in the SIEM export). No amplification, reflection or spoofing. easy: one source at a constant rate; medium:
+  several sources; hard: a ramping rate inside a two-hour background. Questions on the target IP / port /
+  protocol, the source host(s), the start and end of the burst, the peak packets per second and the total
+  volume, with a Suricata threshold rule and a Sigma event_count correlation over the flows dataset.
+- `it-bulk-upload`: a bulk data upload to an external file host (MITRE ATT&CK T1048, T1567) on the
+  office-LAN background — the benign equivalent of data exfiltration (opaque random bytes to a local sink).
+  New `http.sink` actor (an external-looking file host accepting uploads over plain HTTP 80 and HTTPS 443,
+  answering each with a small 200 OK; its fictional cloud domains are dotted DNS aliases the site DNS
+  resolves) and `http.uploader` actor (one office PC resolves such a domain and uploads `rng.label_bytes`
+  through the firewall). easy: one large plain-HTTP POST with an obvious file name and
+  `Content-Type: application/octet-stream`; medium: several HTTPS uploads visible only as TLS record sizes
+  and the SNI; hard: uploads spread across the two-hour capture and sized to blend with the WSUS/BITS
+  download volume, so the tell is the upload/download ratio (bytes_out ≫ bytes_in) to the one external
+  destination. Questions on the uploading host, the destination IP and domain, the number of uploads, the
+  total bytes (with tolerance), the first upload time and (easy) the file name, with Suricata POST and
+  TLS-SNI rules and a Sigma rule over the flows dataset. Number-answer `tolerance` is now carried into
+  `answers.json`, and `ports.HTTP` (80) was added for the plain-HTTP sink.
+- `it-scan-auth-failures`: a port scan followed by authentication failures against local test services
+  (MITRE ATT&CK T1046, T1110, T1110.001, T1110.003) on the office-LAN background. New `tcp.scanner` actor
+  (a host not in the asset inventory runs a TCP connect sweep of common IT ports on the server subnet: the
+  domain controller's Kerberos / LDAP / SMB answer as open, while host-firewalled ports stay silent with a
+  retransmitted SYN — `compose/firewall.py`) and `kerberos.bruteforce` actor (repeated Kerberos AS-REQ
+  pre-authentication attempts against the KDC that fail with KDC_ERR_PREAUTH_FAILED (24); the encrypted
+  timestamp is opaque `rng.label_bytes` sealed with a wrong key, so the KDC's HMAC check rejects it — no
+  real cryptography). easy brute-forces one account; medium/hard spray a guess across many accounts over
+  spaced rounds; hard lands one final guess (the KDC issues a ticket-granting ticket). Questions on the
+  scanning host, the hosts and ports probed, the open ports, the targeted account(s), the failure count,
+  the KDC error code and whether a logon succeeded (and which account), with a krb5 Suricata rule on the
+  pre-auth failures and Sigma brute-force and port-sweep correlations over the kerberos and flows datasets.
+  Added `ports.SCAN_SSH` / `SCAN_RPC` / `SCAN_NETBIOS` / `SCAN_RDP` (22 / 135 / 139 / 3389) for the sweep's
+  closed-port probes.
 
 ### Traffic realism
 - `dhcp.server` `style: windows`: the Windows Server DHCP role (Windows option order, 8-day default lease,

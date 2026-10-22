@@ -117,6 +117,11 @@ And the matching entry in `answers.json`:
 | `ot-enip-drive-manipulation` | T0855, T0831 | An unapproved host opens an EtherNet/IP I/O connection to a PowerFlex drive and forces its speed reference. |
 | `ot-baseline-operations` | none | Normal operations only, for baselining and false-positive tuning. |
 | `it-baseline-operations` | none | An office LAN as the working day starts: Windows Server DHCP behind the firewall's relay, PCs that boot and confirm their leases, a new PC's first lease, intranet HTTPS, Windows Update against WSUS. |
+| `it-dns-tunneling` | T1071.004, T1048.003 | One office PC sends a run of DNS queries with long base32 labels under one fictional parent domain through the DC resolver (benign; the resolver forwards and SERVFAILs). |
+| `it-https-beaconing` | T1071.001, T1573 | One office PC checks in over HTTPS to an external-looking service at a regular interval (benign: a TLS client fetching a small static page from a local test server through the firewall); the tell is a rare destination on a conspicuously regular cadence. |
+| `it-volumetric-flood` | T1498, T1498.001 | One or more office PCs send a bounded high-rate burst of UDP datagrams to a local collector's sink service (benign Discard on port 9); no amplification or spoofing. |
+| `it-bulk-upload` | T1048, T1567 | One office PC uploads a large amount of opaque data to a fictional external cloud file host through the firewall (benign exfiltration equivalent): a plain-HTTP POST (easy) or HTTPS uploads whose tell is the outbound/inbound byte ratio (medium/hard). |
+| `it-scan-auth-failures` | T1046, T1110, T1110.001, T1110.003 | An unmanaged office host TCP-scans the server subnet for common IT ports (open vs filtered), then drives Kerberos AS pre-authentication failures (KDC_ERR_PREAUTH_FAILED) at the domain controller — brute force on one account (easy) or password spraying across many (medium/hard), with one successful guess on hard. |
 
 Every scenario has easy, medium and hard. In `ot-modbus-write-manipulation`, easy is 15 minutes with two
 PLCs and a rogue Raspberry Pi; hard is 2 hours with 3 to 5 Modbus PLCs, an S7-1500, OPC UA, a telecontrol

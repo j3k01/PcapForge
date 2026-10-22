@@ -209,6 +209,7 @@ def _number_link_ids(paths) -> None:
 
 # -- hunting queries over the logs (question `hunt.zeek`) ---------------------------------------
 # A query names a log, `where` (field -> value, or a list: any of them; all fields must match),
+# optionally `endswith` (field -> suffix of a string field, e.g. every name under a DNS parent domain),
 # and either `show` (fields printed per matching record) or `count_by` (matches counted per
 # combination of these fields). The hunting guide renders it as a jq command over the JSON log;
 # `hunt_rows` evaluates the same query in Python.
@@ -217,18 +218,20 @@ def _field(name: str) -> str:
     return "." + json.dumps(name) if not name.isidentifier() else "." + name
 
 
-def _select(where: dict) -> str:
+def _select(hunt: dict) -> str:
     terms = []
-    for name, value in where.items():
+    for name, value in hunt.get("where", {}).items():
         values = value if isinstance(value, list) else [value]
         alternatives = [f"{_field(name)} == {json.dumps(v)}" for v in values]
         terms.append(alternatives[0] if len(alternatives) == 1 else "(" + " or ".join(alternatives) + ")")
+    for name, suffix in hunt.get("endswith", {}).items():
+        terms.append(f'(({_field(name)} // "") | endswith({json.dumps(suffix)}))')
     return " and ".join(terms)
 
 
 def hunt_command(hunt: dict) -> str:
     """The jq command line that runs ``hunt`` over ``zeek/<log>.log``."""
-    select = _select(hunt.get("where", {}))
+    select = _select(hunt)
     path = f"zeek/{hunt['log']}.log"
     if "count_by" in hunt:
         fields = hunt["count_by"]
@@ -253,7 +256,9 @@ def hunt_rows(hunt: dict, records: list[dict]) -> list[list | dict]:
     """What ``hunt_command`` prints, one row per line (a list for ``show``, a dict for ``count_by``)."""
     matches = [r for r in records if all(
         any(_same(r.get(name), v) for v in (value if isinstance(value, list) else [value]))
-        for name, value in hunt.get("where", {}).items())]
+        for name, value in hunt.get("where", {}).items()) and all(
+        isinstance(r.get(name), str) and r[name].endswith(suffix)
+        for name, suffix in hunt.get("endswith", {}).items())]
     if "count_by" not in hunt:
         return [[r.get(f) for f in hunt["show"]] for r in matches]
     groups: dict[str, list[dict]] = {}

@@ -7,7 +7,10 @@ Current state:
   (`ot-modbus-alarm-masking`), and command injection over IEC 104, DNP3, BACnet and EtherNet/IP;
   the process, PLC count and device pool are drawn per seed;
 - IT scenarios: an office-LAN baseline (`it-baseline-operations`, sensor on the office switch: Windows
-  Server DHCP behind the firewall's relay, booting PCs, a new PC, Active Directory, intranet HTTPS, WSUS);
+  Server DHCP behind the firewall's relay, booting PCs, a new PC, Active Directory, intranet HTTPS, WSUS)
+  plus five incident scenarios — HTTPS beaconing (`it-https-beaconing`), DNS tunnelling
+  (`it-dns-tunneling`), port scan and Kerberos authentication failures (`it-scan-auth-failures`),
+  volumetric flood (`it-volumetric-flood`) and bulk upload (`it-bulk-upload`);
 - protocols: Modbus/TCP, OPC UA, S7comm, IEC 60870-5-104, DNP3, BACnet/IP, EtherNet/IP (CIP), DHCPv4,
   DNS/NTP/ARP, Windows name-resolution chatter and an Active Directory domain (Kerberos, LDAP, CLDAP, SMB 3
   SYSVOL reads), plus an IPv6 baseline (link-local, Router Advertisements, SLAAC, unicast Neighbor Discovery);
@@ -22,7 +25,6 @@ Effort: **S** = hours, **M** = 1–3 days, **L** = a week or more.
 Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ### Next up (open items, highest value first)
-- IT line: IT scenarios (section 3) on the office-LAN background.
 - Platform: PyPI distribution name, Docker image, docs site, macOS check (section 6).
 
 ## 1. Realism of the traffic (highest value, fully defensive)
@@ -78,12 +80,12 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 ## 3. IT line (benign equivalents only, see CONTRIBUTING.md)
 
 - [x] **IT background** (L): in `it-baseline-operations`: DHCP on the IT side (Windows Server DHCP behind the firewall's relay, INIT-REBOOT of booting PCs), intranet HTTPS (`https.*`: IIS with an AD CS certificate, Edge's ClientHello, TLS 1.2 full and resumed (session ID) handshakes, HTTP/2 record sizes; no real cryptography) and Windows Update against WSUS (`wsus.*`: SOAP scans over HTTP 8530 with Xpress-compressed replies, ReportEventBatch reporting, BITS downloads of an approved update), with the AD domain traffic (section 1). `siem/tls.jsonl` and `siem/http.jsonl` in the SIEM export. Not modelled: TLS session tickets (Schannel servers use the session ID cache unless tickets are configured), the WUA self-update check, RegisterComputer and driver synchronization.
-- [ ] **IT scenarios** (M each, maintainer-authored, reviewed against the defensive policy):
-  - periodic HTTPS check-ins to a local test server;
-  - DNS-based data transfer to a local resolver;
-  - port scan followed by authentication failures against local test services;
-  - volumetric flood against a local sink;
-  - bulk HTTP upload.
+- [x] **IT scenarios** (M each, maintainer-authored, reviewed against the defensive policy):
+  - [x] periodic HTTPS check-ins to a local test server (T1071.001, T1573): `it-https-beaconing` (`tls.beacon_server` / `tls.beacon` actors — one office PC opens a TLS 1.2 connection to an external-looking server at a regular interval and fetches a small static page, the fictional domain resolved via the site DNS and routed through the firewall; easy a short fixed interval with a distinctive SNI, medium jittered, hard a long jittered interval with TLS session resumption so the browser-identical ClientHello blends with the Edge/WSUS background and only the cadence gives it away; a TLS-SNI Suricata rule and a Sigma rule over the tls dataset);
+  - [x] DNS-based data transfer to a local resolver (T1071.004, T1048.003): `it-dns-tunneling` (`dns.tunnel` actor — one workstation sends a run of long base32 labels under one fictional parent domain through the DC resolver, which forwards and SERVFAILs; easy high-rate TXT, medium A/AAAA, hard low-and-slow interleaved with normal lookups);
+  - [x] port scan followed by authentication failures against local test services (T1046, T1110, T1110.001, T1110.003): `it-scan-auth-failures` (`tcp.scanner` / `kerberos.bruteforce` actors — an unmanaged office host runs a TCP connect sweep of common IT ports on the server subnet, the domain controller's services answering while host-firewalled ports stay silent, then drives Kerberos AS-REQ pre-authentication failures (KDC_ERR_PREAUTH_FAILED) at the KDC; easy brute-forces one account, medium/hard spray a guess across many accounts over spaced rounds, hard lands one guess (a ticket-granting ticket is issued); a krb5 Suricata rule and Sigma brute-force / port-sweep correlations over the kerberos and flows datasets);
+  - [x] volumetric flood against a local sink (T1498, T1498.001): `it-volumetric-flood` (`sink.server` / `sink.flood` actors — office hosts send a bounded high-rate burst of UDP datagrams to a benign Discard sink on port 9; easy one source at a constant rate, medium several sources, hard a ramping rate in a two-hour background; Suricata threshold rule and a Sigma event_count correlation over the flows dataset);
+  - [x] bulk upload to an external file host (T1048, T1567): `it-bulk-upload` (`http.sink` / `http.uploader` actors — one office PC uploads opaque random bytes to a fictional external cloud file host through the firewall; easy one large plain-HTTP POST with an obvious file name and Content-Type, medium several HTTPS uploads visible only as TLS record sizes, hard uploads spread over the capture and sized to blend with WSUS/BITS so the tell is the upload/download byte ratio bytes_out ≫ bytes_in; Suricata POST and TLS-SNI rules plus a Sigma flows rule).
 
 ## 4. Training workflow
 

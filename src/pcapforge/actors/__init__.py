@@ -19,7 +19,7 @@ def register(cls: type[Actor]) -> type[Actor]:
 
 def _load_builtin() -> None:
     from pcapforge.actors import (  # noqa: F401  (registration side effect)
-        ad, bacnet, dhcp, dnp3, dns, enip, https, iec104, modbus, ntp, opcua, s7, windows, wsus,
+        ad, bacnet, beacon, dhcp, dnp3, dns, enip, flood, https, iec104, intrusion, modbus, ntp, opcua, s7, upload, windows, wsus,
     )
 
 

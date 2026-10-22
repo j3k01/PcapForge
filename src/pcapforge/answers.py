@@ -83,6 +83,8 @@ class _Expander:
                 return self.host(value["$host"])
             if set(value) == {"$action"}:
                 return self.action(value["$action"])
+            if set(value) == {"$host_ips"}:
+                return [self.host(h)["ip"] for h in value["$host_ips"]]
             return {k: self(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
             return [self(v) for v in value]
@@ -107,6 +109,8 @@ def _questions(plan: Plan, ctx: dict) -> list[dict]:
                 entry["accept"] = resolve(spec["accept"], ctx)
             if "tolerance_s" in spec:
                 entry["tolerance_s"] = spec["tolerance_s"]
+            if "tolerance" in spec:
+                entry["tolerance"] = spec["tolerance"]
             entry["points"] = spec.get("points", DEFAULT_POINTS)
             if "hint" in spec:
                 entry["hint"] = resolve(spec["hint"], ctx)

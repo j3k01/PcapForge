@@ -1,0 +1,388 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-bulk-upload
+title: Bulk data upload from an office PC to an external file host
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, exfiltration, http, https, tls, upload, dlp, windows, data-transfer]
+summary: >
+  The office LAN of it-baseline-operations (DHCP, DNS, time, intranet HTTPS, Windows Update) with
+  one incident on top: a single office workstation uploads a large amount of opaque data to a
+  fictional external cloud file host through the firewall. On easy it is one big plain-HTTP POST
+  with an obvious file name and Content-Type; on medium several HTTPS uploads whose only visible
+  trace is the TLS record sizes and the SNI; on hard the uploads are spread across the capture and
+  sized to blend with the WSUS / BITS download volume, so the tell is the upload/download ratio to
+  the destination - the one host that sends far more than it receives to a single external address.
+  This is the benign equivalent of data exfiltration (opaque random bytes to a local sink); no
+  real tooling or payload is involved.
+
+briefing: |
+  You are in the SOC of {site_name} ({domain}). The attached capture comes from the SPAN port of
+  the office access switch ({sensor_subnet}); it mirrors the whole segment, so sessions that leave
+  the LAN through the firewall are visible here too. The data-loss-prevention team flagged an
+  unusually large outbound transfer from a workstation to a cloud file-sharing site that is not on
+  the approved list. Work out which host sent it, where it went and how much left the network.
+  Normal office traffic - web browsing, Windows updates, domain logons - is on the wire alongside it.
+
+mitre:
+  - {framework: enterprise, id: T1048, name: Exfiltration Over Alternative Protocol}
+  - {framework: enterprise, id: T1567, name: Exfiltration Over Web Service}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+    # An external-looking subnet reached through the firewall (RFC 5737 documentation range).
+    - {id: cloud, cidr: 203.0.113.0/24}
+  hosts:
+    # The firewall routes between the office LAN, the server subnet and the Internet, and relays DHCP.
+    - {id: firewall, device: fortigate, subnets: [office, servers, cloud], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    # Office PCs that boot during the capture, and the ones that were already running.
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    # The workstation the upload comes from: an ordinary, inventoried office PC.
+    - {id: upc, device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-3307", role: workstation}
+    # A PC delivered for a new employee: on this LAN for the first time, not in the asset inventory yet.
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+    # The external cloud file host the upload goes to (fictional domains, resolved by the site DNS).
+    - id: filehost
+      device: linux-laptop
+      subnet: cloud
+      name: "edge-ingest-07"
+      inventory: false
+      aliases: [vault-sync-eu.filetransfer-cloud.example, uploads.securefileshare.example, cdn-ingest.objectstore-eu.example, backup.cloud-archive.example]
+
+actors:
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: [ws, upc]
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, upc, newpc]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, upc, newpc]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, upc, newpc]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, upc, newpc]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, upc, newpc]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, upc, newpc]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+  # The benign external file host and the incident: one office PC bulk-uploads opaque data to it.
+  - {id: upload_service, type: http.sink, hosts: filehost}
+  - id: bulk_upload
+    type: http.uploader
+    hosts: upc
+    incident: true
+    params:
+      server: filehost
+      dns: dc
+      mode: "${vars.upload_mode}"
+      uploads: "${vars.upload_count}"
+      megabytes: "${vars.upload_mb}"
+      start: "${vars.upload_start}"
+      spread: "${vars.upload_spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: false
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      upload_mode: plain
+      plain_upload: true
+      upload_count: 1
+      upload_mb: [3, 7]
+      upload_start: [0.3, 0.6]
+      upload_spread: 0.05
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 30, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      upload_mode: tls
+      upload_count: [3, 5]
+      upload_mb: [5, 12]
+      upload_start: [0.2, 0.5]
+      upload_spread: 0.3
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 130, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      upload_mode: tls
+      upload_count: [6, 10]
+      upload_mb: [14, 24]
+      upload_start: [0.1, 0.3]
+      upload_spread: 0.85
+
+questions:
+  - id: upload_host
+    text: Which host on the office LAN uploaded a large amount of data off the network? Give its IP address.
+    answer: "${facts.bulk_upload.source.ip}"
+    type: ip
+    points: 15
+    hint: >-
+      Summarise the TCP flows by source and destination and compare bytes sent with bytes received.
+      One internal host sends far more than it receives to a single external destination.
+    check:
+      filter: "ip.src == ${facts.bulk_upload.source.ip} && ip.dst == ${facts.bulk_upload.dest.ip} && tcp"
+      expect: {min: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=tcp | stats sum(bytes_out) AS bytes_out sum(bytes_in) AS bytes_in BY src, dest | eval ratio=round(bytes_out/(bytes_in+1), 1) | where bytes_out > 1000000 AND ratio > 5 | sort - bytes_out"
+      kql: "transport : \"tcp\" and bytes_out > 1000000"
+      zeek: {log: conn, show: [ts, "id.orig_h", "id.resp_h", "id.resp_p", orig_bytes, resp_bytes]}
+      look_for: >-
+        The internal host (src) that sent far more than it received (high bytes_out, low bytes_in)
+        to one external destination (dest). Downloads (browsing, WSUS) have the opposite ratio.
+  - id: dest_ip
+    text: What is the IP address of the external host the data was uploaded to?
+    answer: "${facts.bulk_upload.dest.ip}"
+    type: ip
+    points: 10
+    hint: The destination of the high-volume outbound flows; it is outside the site's own subnets.
+    check:
+      filter: "ip.src == ${facts.bulk_upload.source.ip} && ip.dst == ${facts.bulk_upload.dest.ip} && tcp"
+      expect: {min: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=tcp dest=\"${facts.bulk_upload.dest.ip}\" | stats sum(bytes_out) AS bytes_out sum(bytes_in) AS bytes_in BY src, dest"
+      kql: "transport : \"tcp\" and dest : \"${facts.bulk_upload.dest.ip}\""
+      look_for: The destination address of the upload flows; it is reached through the firewall (routed, gateway MAC).
+  - id: dest_domain
+    text: Which domain name did the upload go to?
+    answer: "${facts.bulk_upload.domain}"
+    accept: ["${facts.bulk_upload.domain}"]
+    type: text
+    points: 10
+    hint: >-
+      The destination name is in clear text either way: the HTTP Host header of a plain-HTTP upload,
+      or the TLS Server Name Indication (SNI) of an HTTPS upload.
+    check:
+      filter: 'http.host == "${facts.bulk_upload.domain}" || tls.handshake.extensions_server_name == "${facts.bulk_upload.domain}"'
+      expect: {min: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=tcp dest=\"${facts.bulk_upload.dest.ip}\" | stats sum(bytes_out) AS bytes_out BY src, dest, app"
+      kql: "transport : \"tcp\" and dest : \"${facts.bulk_upload.dest.ip}\""
+      look_for: >-
+        The name of this destination is in the HTTP Host header (siem/http.jsonl, easy) or the TLS
+        SNI (siem/tls.jsonl, medium/hard) of the sessions to this IP.
+  - id: upload_count
+    text: How many separate uploads did that host make to the external host?
+    answer: "${facts.bulk_upload.upload_count}"
+    type: number
+    points: 10
+    hint: >-
+      Count the upload requests to the destination: a plain-HTTP POST, or a TLS ClientHello that
+      opens each HTTPS upload connection.
+    check:
+      filter: '(http.request.method == "POST" || tls.handshake.type == 1) && ip.dst == ${facts.bulk_upload.dest.ip}'
+      expect: {count: "${facts.bulk_upload.upload_count}"}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=tcp dest=\"${facts.bulk_upload.dest.ip}\" | stats count AS uploads sum(bytes_out) AS bytes_out BY src, dest"
+      kql: "transport : \"tcp\" and dest : \"${facts.bulk_upload.dest.ip}\""
+      look_for: The number of TCP flows (connections) from the host to the external destination.
+  - id: total_bytes
+    text: Roughly how many bytes in total were uploaded to the external host? (within tolerance)
+    answer: "${facts.bulk_upload.total_bytes}"
+    type: number
+    tolerance: 2000000
+    points: 15
+    hint: >-
+      Sum bytes_out of the flows to the destination (for plain HTTP, the POST's Content-Length).
+      It is the size of the uploaded data plus a little TLS / TCP framing overhead.
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=tcp dest=\"${facts.bulk_upload.dest.ip}\" | stats sum(bytes_out) AS bytes_out_total BY src, dest"
+      kql: "transport : \"tcp\" and dest : \"${facts.bulk_upload.dest.ip}\""
+      look_for: The total bytes_out to the destination approximates the volume uploaded.
+  - id: first_upload
+    text: At what time (UTC) did the first upload to the external host begin?
+    answer: "${facts.bulk_upload.first.time}"
+    type: timestamp
+    tolerance_s: 2
+    points: 10
+    hint: The earliest flow (or request) from the host to the external destination.
+    check:
+      filter: "frame.number == ${facts.bulk_upload.first.frame} && ip.src == ${facts.bulk_upload.source.ip} && ip.dst == ${facts.bulk_upload.dest.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=tcp dest=\"${facts.bulk_upload.dest.ip}\" | sort ts | head 1 | table ts, src, dest, bytes_out"
+      kql: "transport : \"tcp\" and dest : \"${facts.bulk_upload.dest.ip}\""
+      look_for: The earliest flow to the external destination is the start of the first upload.
+  - id: upload_filename
+    when: vars.plain_upload
+    text: What file name did the upload use? (the plain-HTTP upload)
+    answer: "${facts.bulk_upload.filename}"
+    accept: ["${facts.bulk_upload.filename}"]
+    type: text
+    points: 10
+    hint: The plain-HTTP POST carries the file name in its request URI (/upload/<name>) and its Content-Disposition header.
+    check:
+      filter: 'http.request.uri contains "${facts.bulk_upload.filename}"'
+      expect: {min: 1}
+    hunt:
+      dataset: http
+      spl: "index=* sourcetype=pcapforge:http method=POST uri=\"/upload/*\" | table ts, src, dest, host, uri, content_type, request_bytes"
+      kql: "method : \"POST\" and uri : /upload/*"
+      look_for: The POST to /upload/<file name>, Content-Type application/octet-stream, with the file size in Content-Length.
+
+translations:
+  pl:
+    title: Masowe wysłanie danych z komputera biurowego na zewnętrzny serwer plików
+    briefing: |
+      Jesteś w SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu SPAN
+      przełącznika dostępowego sieci biurowej ({sensor_subnet}); kopiuje on cały segment, więc widać
+      tu także sesje wychodzące z sieci przez firewall. Zespół DLP zgłosił nietypowo duży transfer
+      danych na zewnątrz z pewnej stacji roboczej do chmurowego serwisu wymiany plików spoza listy
+      zatwierdzonych. Ustal, który host to wysłał, dokąd trafiły dane i ile ich opuściło sieć.
+      Na łączu jest obok tego normalny ruch biurowy - przeglądanie stron, aktualizacje Windows, logowania do domeny.
+    questions:
+      upload_host:
+        text: Który host w sieci biurowej wysłał dużą ilość danych poza sieć? Podaj jego adres IP.
+        hint: >-
+          Zsumuj przepływy TCP według źródła i celu i porównaj bajty wysłane z odebranymi. Jeden
+          host wewnętrzny wysyła znacznie więcej, niż odbiera, do jednego zewnętrznego celu.
+      dest_ip:
+        text: Jaki jest adres IP zewnętrznego hosta, na który wysłano dane?
+        hint: Cel przepływów o dużym wolumenie wychodzącym; leży poza podsieciami tej organizacji.
+      dest_domain:
+        text: Na jaką nazwę domeny trafiło wysłanie?
+        hint: >-
+          Nazwa celu jest jawna w obu przypadkach: w nagłówku Host zwykłego HTTP albo w rozszerzeniu
+          SNI (Server Name Indication) przy wysłaniu po HTTPS.
+      upload_count:
+        text: Ile osobnych wysłań wykonał ten host na zewnętrzny serwer?
+        hint: >-
+          Policz żądania wysłania na cel: POST zwykłego HTTP albo ClientHello TLS otwierający każde
+          połączenie wysyłające po HTTPS.
+      total_bytes:
+        text: Ile mniej więcej bajtów łącznie wysłano na zewnętrzny serwer? (z tolerancją)
+        hint: >-
+          Zsumuj bytes_out przepływów do celu (dla zwykłego HTTP - Content-Length w POST). To rozmiar
+          wysłanych danych plus niewielki narzut ramek TLS / TCP.
+      first_upload:
+        text: O której godzinie (UTC) rozpoczęło się pierwsze wysłanie na zewnętrzny serwer?
+        hint: Najwcześniejszy przepływ (lub żądanie) od tego hosta do zewnętrznego celu.
+      upload_filename:
+        text: Jakiej nazwy pliku użyto przy wysłaniu? (wysłanie zwykłym HTTP)
+        hint: POST zwykłego HTTP niesie nazwę pliku w URI żądania (/upload/<nazwa>) oraz w nagłówku Content-Disposition.
+  de:
+    title: Massen-Datenupload von einem Büro-PC auf einen externen Dateiserver
+    briefing: |
+      Sie sind im SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom SPAN-Port des
+      Access-Switches im Büronetz ({sensor_subnet}); er spiegelt das gesamte Segment, daher sind hier
+      auch Sitzungen sichtbar, die das Netz über die Firewall verlassen. Das DLP-Team meldete einen
+      ungewöhnlich großen ausgehenden Transfer von einer Arbeitsstation zu einem Cloud-Dateidienst,
+      der nicht auf der Freigabeliste steht. Ermitteln Sie, welcher Host ihn gesendet hat, wohin die
+      Daten gingen und wie viel das Netz verlassen hat. Daneben läuft normaler Büroverkehr -
+      Surfen, Windows-Updates, Domänenanmeldungen.
+    questions:
+      upload_host:
+        text: Welcher Host im Büronetz hat eine große Datenmenge aus dem Netz hochgeladen? Geben Sie seine IP-Adresse an.
+        hint: >-
+          Fassen Sie die TCP-Flows nach Quelle und Ziel zusammen und vergleichen Sie gesendete mit
+          empfangenen Bytes. Ein interner Host sendet weit mehr, als er empfängt, zu einem externen Ziel.
+      dest_ip:
+        text: Wie lautet die IP-Adresse des externen Hosts, zu dem die Daten hochgeladen wurden?
+        hint: Das Ziel der ausgehenden Flows mit hohem Volumen; es liegt außerhalb der eigenen Subnetze der Organisation.
+      dest_domain:
+        text: Zu welchem Domänennamen ging der Upload?
+        hint: >-
+          Der Zielname steht jeweils im Klartext: im HTTP-Host-Header eines Plain-HTTP-Uploads oder
+          in der TLS-Server-Name-Indication (SNI) eines HTTPS-Uploads.
+      upload_count:
+        text: Wie viele getrennte Uploads hat dieser Host zum externen Host durchgeführt?
+        hint: >-
+          Zählen Sie die Upload-Anfragen an das Ziel: ein Plain-HTTP-POST oder ein TLS-ClientHello,
+          das jede HTTPS-Upload-Verbindung eröffnet.
+      total_bytes:
+        text: Wie viele Bytes wurden insgesamt ungefähr zum externen Host hochgeladen? (mit Toleranz)
+        hint: >-
+          Summieren Sie bytes_out der Flows zum Ziel (bei Plain-HTTP die Content-Length des POST). Es
+          ist die Größe der hochgeladenen Daten plus etwas TLS-/TCP-Rahmen-Overhead.
+      first_upload:
+        text: Zu welcher Uhrzeit (UTC) begann der erste Upload zum externen Host?
+        hint: Der früheste Flow (oder die früheste Anfrage) von diesem Host zum externen Ziel.
+      upload_filename:
+        text: Welchen Dateinamen verwendete der Upload? (der Plain-HTTP-Upload)
+        hint: Der Plain-HTTP-POST trägt den Dateinamen in der Anfrage-URI (/upload/<Name>) und im Content-Disposition-Header.

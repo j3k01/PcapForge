@@ -1,0 +1,441 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-scan-auth-failures
+title: Port scan and Kerberos authentication failures on the office LAN
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, recon, port-scan, kerberos, brute-force, password-spray, active-directory, windows, authentication]
+summary: >
+  The office-LAN baseline (DHCP, DNS, HTTPS to the intranet, WSUS, Active Directory) with an
+  intrusion on top. A host that is not a normal client of the servers sweeps the server subnet for
+  common IT service ports (bare TCP connects: open ports answer, firewalled ones stay silent) and
+  then hammers the domain controller's KDC with Kerberos AS-REQ pre-authentication attempts that
+  fail with KDC_ERR_PREAUTH_FAILED - password guessing against one account (brute force, easy) or
+  one guess sprayed across many accounts over spaced rounds (medium/hard). On hard one final guess
+  lands and the KDC issues a ticket-granting ticket. Everything is a benign local simulation on
+  127.77.0.0/16: the observable pattern of recon and credential guessing, no attack tooling.
+
+briefing: |
+  You are in the SOC of {site_name} ({domain}). The attached capture comes from the SPAN port of
+  the office access switch ({sensor_subnet}). The normal office traffic is here - DHCP, name
+  resolution, intranet HTTPS, Windows Update and the domain's Kerberos/LDAP/SMB - but a monitoring
+  rule also fired on a burst of failed logons against the domain controller. Only the known office
+  PCs and servers should talk to the server subnet, and a successful domain logon is a short,
+  successful Kerberos exchange, not a stream of rejections. Find the host behind the activity, scope
+  what it touched on the server subnet, and determine whether any account was compromised.
+
+mitre:
+  - {framework: enterprise, id: T1046, name: Network Service Discovery}
+  - {framework: enterprise, id: T1110, name: Brute Force}
+  - {framework: enterprise, id: T1110.001, name: "Brute Force: Password Guessing", when: "vars.spray_mode == 'brute-force'"}
+  - {framework: enterprise, id: T1110.003, name: "Brute Force: Password Spraying", when: "vars.spray_mode == 'spray'"}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [office, servers], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+    # A device on the office LAN that is not in the asset inventory: the source of the scan and the
+    # failed logons.
+    - {id: scanner, device: "${vars.scanner_device}", subnet: office, name: "nb-{code}-byod", inventory: false}
+
+actors:
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: ws
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, newpc]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, newpc]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, newpc]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # Active Directory: the domain controller serves Kerberos / LDAP / SYSVOL and the members refresh
+  # Group Policy; an employee logs on at a PC that booted (a normal, successful Kerberos exchange).
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, newpc]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, newpc]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, newpc]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+  # The intrusion: a TCP port sweep of the server subnet, then Kerberos AS pre-authentication
+  # failures against the KDC on the same host.
+  - id: scan
+    type: tcp.scanner
+    hosts: scanner
+    incident: true
+    params: {targets: [dc, web, wsus], start: "${vars.scan_start}"}
+  - id: bruteforce
+    type: kerberos.bruteforce
+    hosts: scanner
+    incident: true
+    params:
+      dc: dc
+      mode: "${vars.spray_mode}"
+      accounts: "${vars.spray_accounts}"
+      passwords: "${vars.spray_passwords}"
+      success: "${vars.spray_success}"
+      start: "${vars.auth_start}"
+      spread: "${vars.auth_spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: true
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      scanner_device: linux-laptop
+      scan_start: [0.2, 0.35]
+      spray_mode: brute-force
+      spray_accounts: [administrator]
+      spray_passwords: 12
+      spray_success: false
+      auth_start: [0.45, 0.6]
+      auth_spread: 0.2
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 31, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      scanner_device: linux-laptop
+      scan_start: [0.2, 0.4]
+      spray_mode: spray
+      spray_accounts: 8
+      spray_passwords: 2
+      spray_success: false
+      auth_start: [0.4, 0.55]
+      auth_spread: 0.35
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 131, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      scanner_device: linux-laptop
+      scan_start: [0.15, 0.35]
+      spray_mode: spray
+      spray_accounts: 12
+      spray_passwords: 3
+      spray_success: true
+      auth_start: [0.4, 0.55]
+      auth_spread: 0.4
+
+questions:
+  - id: scanner_ip
+    text: Which IP address scanned the server subnet and drove the failed logons?
+    answer: "${facts.scan.source.ip}"
+    type: ip
+    points: 15
+    hint: >-
+      One host opens short-lived TCP connections to the same ports across several server addresses
+      in a short window. Look for one source fanning out to many destination ports.
+    check:
+      filter: "tcp.flags.syn == 1 && tcp.flags.ack == 0 && tcp.dstport == 3389 && ip.src == ${facts.scan.source.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=tcp dest_port IN (22, 135, 139, 3389) | stats dc(dest) AS hosts, dc(dest_port) AS ports BY src"
+      kql: "transport : \"tcp\" and dest_port : (22 or 135 or 139 or 3389)"
+      zeek: {log: conn, where: {id.resp_p: [22, 135, 139, 3389]}, count_by: [id.orig_h]}
+      look_for: One source opening many different destination ports to several hosts - the port sweep.
+  - id: scan_start
+    text: At what time (UTC) did the port sweep begin (the first probe from that host)?
+    answer: "${facts.scan.scan_start.time}"
+    type: timestamp
+    tolerance_s: 2
+    points: 10
+    check:
+      filter: "frame.number == ${facts.scan.scan_start.frame} && ip.src == ${facts.scan.source.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} transport=tcp | sort 0 epoch | head 1 | table ts dest dest_port"
+      kql: "src : \"${facts.scan.source.ip}\" and transport : \"tcp\""
+      look_for: The earliest TCP connection from the scanning host.
+  - id: hosts_scanned
+    text: How many hosts on the server subnet did that host probe?
+    answer: "${facts.scan.host_count}"
+    type: number
+    points: 10
+    hint: Count the distinct destination addresses the scanning host sent SYNs to.
+    check:
+      filter: "tcp.flags.syn == 1 && tcp.flags.ack == 0 && tcp.dstport == 3389 && ip.src == ${facts.scan.source.ip}"
+      expect: {min: "${facts.scan.host_count}"}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} transport=tcp | stats dc(dest) AS hosts"
+      kql: "src : \"${facts.scan.source.ip}\" and transport : \"tcp\""
+      zeek: {log: conn, where: {id.orig_h: "${facts.scan.source.ip}", proto: tcp}, count_by: [id.resp_h]}
+      look_for: The distinct server addresses the scanner opened TCP connections to.
+  - id: ports_per_host
+    text: How many distinct TCP ports did the sweep probe on each host?
+    answer: "${facts.scan.port_count}"
+    type: number
+    points: 10
+    hint: The scanner tries the same fixed list of service ports on every target.
+    check:
+      filter: "tcp.flags.syn == 1 && tcp.flags.ack == 0 && ip.src == ${facts.scan.source.ip} && ip.dst == ${facts.scan.per_host[0].host.ip}"
+      expect: {min: "${facts.scan.port_count}"}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} transport=tcp | stats dc(dest_port) AS ports BY dest"
+      kql: "src : \"${facts.scan.source.ip}\" and transport : \"tcp\""
+      look_for: The number of different destination ports the scanner tried on one server.
+  - id: open_ports
+    text: Which TCP ports answered (open) on the scanned servers?
+    answer: "${facts.scan.open_ports}"
+    type: set
+    points: 15
+    hint: >-
+      An open port completes the handshake (the server answers the SYN with a SYN/ACK); a filtered
+      port stays silent and the client retransmits its SYN.
+    check:
+      filter: "tcp.flags.syn == 1 && tcp.flags.ack == 1 && ip.dst == ${facts.scan.source.ip}"
+      expect: {min: "${facts.scan.open_count}"}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} packets_in>0 | stats count BY dest, dest_port"
+      kql: "src : \"${facts.scan.source.ip}\" and packets_in > 0"
+      zeek: {log: conn, where: {id.orig_h: "${facts.scan.source.ip}", conn_state: [SF, S1, RSTO, RSTR]}, count_by: [id.resp_p]}
+      look_for: The destination ports the scanner's connections got a reply on - the listening services.
+  - id: targeted_accounts
+    text: Which domain account(s) did the failed Kerberos logons target?
+    answer: "${facts.bruteforce.accounts}"
+    type: set
+    points: 15
+    hint: >-
+      A logon starts with a Kerberos AS-REQ (kerberos.msg_type == 10) carrying an encrypted
+      pre-authentication timestamp (padata type 2). Read the client name of the ones from the
+      scanning host.
+    check:
+      filter: "kerberos.msg_type == 10 && kerberos.padata_type == 2 && ip.src == ${facts.bruteforce.source.ip}"
+      expect: {min: "${facts.bruteforce.account_count}"}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=AS result=error error_code=24 | stats count BY client, src"
+      kql: "request_type : \"AS\" and result : \"error\" and error_code : 24"
+      zeek: {log: kerberos, where: {request_type: AS, success: false}, count_by: [client, id.orig_h]}
+      look_for: The client names on the AS exchanges that failed pre-authentication, all from one source.
+  - id: failure_count
+    text: How many Kerberos pre-authentication attempts from that host failed?
+    answer: "${facts.bruteforce.failure_count}"
+    type: number
+    points: 15
+    hint: Count the KRB-ERROR messages with error code 24 (KDC_ERR_PREAUTH_FAILED) sent back to the scanning host.
+    check:
+      filter: "kerberos.msg_type == 30 && kerberos.error_code == 24 && ip.dst == ${facts.bruteforce.source.ip}"
+      expect: {count: "${facts.bruteforce.failure_count}"}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=AS result=error error_code=24 src=${facts.bruteforce.source.ip} | stats count AS failures"
+      kql: "request_type : \"AS\" and result : \"error\" and error_code : 24"
+      zeek: {log: kerberos, where: {request_type: AS, success: false}, count_by: [id.orig_h]}
+      look_for: The count of KDC_ERR_PREAUTH_FAILED replies to the scanning host.
+  - id: auth_error
+    text: With which Kerberos error code (name) did the KDC reject the attempts?
+    answer: "${facts.bruteforce.error_name}"
+    accept: ["${facts.bruteforce.error_name}", "KDC_ERR_PREAUTH_FAILED", "24", "preauth failed"]
+    type: text
+    points: 10
+    hint: The KDC answers an AS-REQ whose encrypted timestamp it cannot verify with a specific error code.
+    check:
+      filter: "kerberos.msg_type == 30 && kerberos.error_code == 24"
+      expect: {min: 1}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos result=error | stats count BY error_code, error"
+      kql: "result : \"error\" and error_code : 24"
+      look_for: Error code 24, KDC_ERR_PREAUTH_FAILED - a wrong pre-authentication secret (a bad password).
+  - id: logon_succeeded
+    text: Did any attempt from that host succeed (a ticket-granting ticket issued)? Answer yes or no.
+    answer: "${facts.bruteforce.succeeded_text}"
+    accept: ["${facts.bruteforce.succeeded_text}"]
+    type: text
+    points: 10
+    hint: >-
+      A success is an AS-REP (kerberos.msg_type == 11) returned to the scanning host among the
+      stream of KRB-ERRORs; its absence means every guess was rejected.
+    hunt:
+      dataset: kerberos
+      wireshark: "kerberos.msg_type == 11 && ip.dst == ${facts.bruteforce.source.ip}"
+      look_for: >-
+        An AS-REP (msg_type 11) to the scanning host means one guess landed; none among its stream of
+        KRB-ERRORs means every attempt failed. SPL/KQL: compare counts of
+        'request_type=AS result=success src=<scanner>' against 'result=error error_code=24'.
+  - id: compromised_account
+    when: vars.spray_success
+    text: Which account's password did the attacker guess (the KDC issued it a ticket-granting ticket)?
+    answer: "${facts.bruteforce.compromised}"
+    accept: ["${facts.bruteforce.compromised}"]
+    type: text
+    points: 10
+    hint: The one AS-REP (kerberos.msg_type == 11) returned to the scanning host names the account in its client name.
+    check:
+      filter: 'kerberos.msg_type == 11 && kerberos.CNameString == "${facts.bruteforce.compromised}" && ip.dst == ${facts.bruteforce.source.ip}'
+      expect: {min: 1}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=AS result=success src=${facts.bruteforce.source.ip} | stats count BY client"
+      kql: "request_type : \"AS\" and result : \"success\" and src : \"${facts.bruteforce.source.ip}\""
+      zeek: {log: kerberos, where: {request_type: AS, success: true, id.orig_h: "${facts.bruteforce.source.ip}"}, count_by: [client]}
+      look_for: The client name on the single successful AS exchange from the scanning host.
+
+translations:
+  pl:
+    title: Skanowanie portów i nieudane uwierzytelnienia Kerberos w sieci biurowej
+    briefing: |
+      Jesteś w SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu SPAN
+      przełącznika dostępowego sieci biurowej ({sensor_subnet}). Jest tu normalny ruch biurowy -
+      DHCP, rozwiązywanie nazw, HTTPS do intranetu, Windows Update oraz domenowy Kerberos/LDAP/SMB -
+      ale reguła monitorująca zareagowała na serię nieudanych logowań do kontrolera domeny. Z siecią
+      serwerów powinny rozmawiać tylko znane komputery i serwery biurowe, a udane logowanie domenowe
+      to krótka, udana wymiana Kerberos, a nie strumień odrzuceń. Znajdź host odpowiedzialny za tę
+      aktywność, określ, czego dotknął w sieci serwerów, i ustal, czy jakieś konto zostało przejęte.
+    questions:
+      scanner_ip:
+        text: Z jakiego adresu IP przeskanowano sieć serwerów i prowadzono nieudane logowania?
+        hint: Jeden host otwiera krótkie połączenia TCP do tych samych portów pod kilkoma adresami serwerów w krótkim oknie czasu. Szukaj jednego źródła rozsyłającego próby na wiele portów docelowych.
+      scan_start:
+        text: O której godzinie (UTC) rozpoczęło się skanowanie portów (pierwsza sonda z tego hosta)?
+      hosts_scanned:
+        text: Ile hostów w sieci serwerów sprawdził ten host?
+        hint: Policz różne adresy docelowe, do których host skanujący wysłał pakiety SYN.
+      ports_per_host:
+        text: Ile różnych portów TCP sprawdzało skanowanie na każdym hoście?
+        hint: Skaner próbuje tej samej stałej listy portów usług na każdym celu.
+      open_ports:
+        text: Które porty TCP odpowiedziały (otwarte) na skanowanych serwerach?
+        hint: Otwarty port kończy uzgadnianie (serwer odpowiada na SYN pakietem SYN/ACK); port filtrowany milczy, a klient retransmituje SYN.
+      targeted_accounts:
+        text: Na które konto (konta) domenowe były wymierzone nieudane logowania Kerberos?
+        hint: Logowanie zaczyna się od Kerberos AS-REQ (kerberos.msg_type == 10) ze szyfrowanym znacznikiem czasu pre-uwierzytelnienia (padata typ 2). Odczytaj nazwę klienta z żądań pochodzących od hosta skanującego.
+      failure_count:
+        text: Ile prób pre-uwierzytelnienia Kerberos z tego hosta zakończyło się niepowodzeniem?
+        hint: Policz komunikaty KRB-ERROR z kodem błędu 24 (KDC_ERR_PREAUTH_FAILED) odsyłane do hosta skanującego.
+      auth_error:
+        text: Jakim kodem błędu Kerberos (nazwą) KDC odrzucał próby?
+        hint: KDC odpowiada na AS-REQ, którego szyfrowanego znacznika czasu nie może zweryfikować, konkretnym kodem błędu.
+      logon_succeeded:
+        text: Czy któraś z prób z tego hosta się powiodła (wydano bilet TGT)? Odpowiedz tak lub nie.
+        hint: Sukces to AS-REP (kerberos.msg_type == 11) zwrócony do hosta skanującego pośród strumienia KRB-ERROR; jego brak oznacza, że każde zgadnięcie zostało odrzucone.
+      compromised_account:
+        text: Hasło którego konta zgadł atakujący (KDC wydał mu bilet TGT)?
+        hint: Jedyny AS-REP (kerberos.msg_type == 11) zwrócony do hosta skanującego zawiera nazwę konta w polu nazwy klienta.
+  de:
+    title: Portscan und fehlgeschlagene Kerberos-Authentifizierungen im Büronetz
+    briefing: |
+      Sie sind im SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom SPAN-Port des
+      Büro-Access-Switches ({sensor_subnet}). Der normale Büroverkehr ist hier - DHCP, Namensauflösung,
+      Intranet-HTTPS, Windows Update sowie das Kerberos/LDAP/SMB der Domäne -, aber eine
+      Überwachungsregel hat auch auf eine Welle fehlgeschlagener Anmeldungen am Domänencontroller
+      ausgelöst. Mit dem Serversubnetz sollten nur die bekannten Büro-PCs und -Server sprechen, und
+      eine erfolgreiche Domänenanmeldung ist ein kurzer, erfolgreicher Kerberos-Austausch, kein Strom
+      von Ablehnungen. Finden Sie den verantwortlichen Host, grenzen Sie ein, was er im Serversubnetz
+      berührt hat, und stellen Sie fest, ob ein Konto kompromittiert wurde.
+    questions:
+      scanner_ip:
+        text: Von welcher IP-Adresse wurde das Serversubnetz gescannt und die fehlgeschlagenen Anmeldungen ausgelöst?
+        hint: Ein Host öffnet kurzlebige TCP-Verbindungen zu denselben Ports über mehrere Serveradressen in kurzer Zeit. Suchen Sie nach einer Quelle, die sich auf viele Zielports verteilt.
+      scan_start:
+        text: Wann (UTC) begann der Portscan (die erste Probe von diesem Host)?
+      hosts_scanned:
+        text: Wie viele Hosts im Serversubnetz hat dieser Host sondiert?
+        hint: Zählen Sie die verschiedenen Zieladressen, an die der scannende Host SYNs gesendet hat.
+      ports_per_host:
+        text: Wie viele verschiedene TCP-Ports hat der Scan auf jedem Host sondiert?
+        hint: Der Scanner probiert auf jedem Ziel dieselbe feste Liste von Dienstports.
+      open_ports:
+        text: Welche TCP-Ports haben auf den gescannten Servern geantwortet (offen)?
+        hint: Ein offener Port schließt den Handshake ab (der Server antwortet auf das SYN mit einem SYN/ACK); ein gefilterter Port schweigt und der Client sendet sein SYN erneut.
+      targeted_accounts:
+        text: Auf welche(s) Domänenkonto(konten) zielten die fehlgeschlagenen Kerberos-Anmeldungen?
+        hint: Eine Anmeldung beginnt mit einem Kerberos-AS-REQ (kerberos.msg_type == 10) mit einem verschlüsselten Pre-Authentication-Zeitstempel (Padata-Typ 2). Lesen Sie den Client-Namen der Anfragen vom scannenden Host.
+      failure_count:
+        text: Wie viele Kerberos-Pre-Authentication-Versuche von diesem Host sind fehlgeschlagen?
+        hint: Zählen Sie die KRB-ERROR-Nachrichten mit Fehlercode 24 (KDC_ERR_PREAUTH_FAILED), die an den scannenden Host zurückgehen.
+      auth_error:
+        text: Mit welchem Kerberos-Fehlercode (Name) hat das KDC die Versuche abgelehnt?
+        hint: Das KDC beantwortet ein AS-REQ, dessen verschlüsselten Zeitstempel es nicht verifizieren kann, mit einem bestimmten Fehlercode.
+      logon_succeeded:
+        text: Ist ein Versuch von diesem Host gelungen (ein Ticket-Granting-Ticket ausgestellt)? Antworten Sie mit ja oder nein.
+        hint: Ein Erfolg ist ein AS-REP (kerberos.msg_type == 11), das inmitten des Stroms von KRB-ERRORs an den scannenden Host zurückgeht; sein Fehlen bedeutet, dass jeder Versuch abgelehnt wurde.
+      compromised_account:
+        text: Das Passwort welches Kontos hat der Angreifer erraten (das KDC stellte ihm ein Ticket-Granting-Ticket aus)?
+        hint: Das einzige AS-REP (kerberos.msg_type == 11), das an den scannenden Host zurückgeht, nennt das Konto in seinem Client-Namen.

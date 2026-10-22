@@ -1,0 +1,344 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-dns-tunneling
+title: DNS-based data transfer to a local resolver on an office LAN
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, dns, tunneling, exfiltration, windows, active-directory, dhcp, https, wsus]
+summary: >
+  The office-LAN baseline (Windows Server DHCP behind the firewall's relay, booting PCs, intranet
+  HTTPS, WSUS and an Active Directory domain). During the capture one workstation sends a run of DNS
+  queries whose leading label carries base32-encoded chunks of an opaque payload, all under a single
+  fictional parent domain, through the site resolver (the domain controller). The resolver forwards
+  them to the outside like any other external name on this isolated network and answers SERVFAIL -
+  no bytes ever leave the loopback range. This is the benign equivalent of DNS tunnelling: only the
+  observable pattern (long, high-entropy labels at volume to one parent from one host) is produced.
+  easy: a high-rate burst of long TXT queries; medium: a moderate rate of A/AAAA queries with shorter
+  labels; hard: low-and-slow A queries with near-normal label lengths, interleaved with ordinary lookups.
+
+briefing: |
+  You are joining the SOC of {site_name} ({domain}). The attached capture comes from the SPAN
+  port of the office access switch ({sensor_subnet}) during the working day. The sensor keeps
+  internal traffic only; Internet-bound sessions are logged by the firewall instead. The office PCs
+  resolve names through the domain controller, which forwards anything it is not authoritative for.
+  Something in the name resolution looks off this shift. Characterise it from the DNS the sensor sees:
+  who is doing it, where it points, and roughly how much is being moved.
+
+mitre:
+  - {framework: enterprise, id: T1071.004, name: "Application Layer Protocol: DNS"}
+  - {framework: enterprise, id: T1048.003, name: "Exfiltration Over Alternative Protocol: Exfiltration Over Unencrypted Non-C2 Protocol"}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+  hosts:
+    # The firewall routes between the office LAN and the server subnet and relays DHCP for the office.
+    - {id: firewall, device: fortigate, subnets: [office, servers], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    # IIS intranet web server (the portal and the helpdesk sites) and the WSUS server.
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    # Office PCs that boot during the capture, and the ones that were already running.
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    # A PC delivered for a new employee: on this LAN for the first time, not in the asset inventory yet.
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+
+actors:
+  # --- Office-LAN background (identical roles to it-baseline-operations) ---
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: ws
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, newpc]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, newpc]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, newpc]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, newpc]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, newpc]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, newpc]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+  # --- The incident: one workstation moves data out as encoded DNS labels through the DC resolver ---
+  - id: tunnel
+    type: dns.tunnel
+    hosts: "${vars.tunnel_host}"
+    incident: true
+    params:
+      server: dc
+      domain: "${vars.tunnel_domain}"
+      bytes: "${vars.tunnel_bytes}"
+      chunk: "${vars.tunnel_chunk}"
+      qtypes: "${vars.tunnel_qtypes}"
+      interval: "${vars.tunnel_interval}"
+      interleave: "${vars.tunnel_interleave}"
+      start: "${vars.tunnel_start}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: false
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      tunnel_host: ws1
+      tunnel_domain: {choose: [telemetry-sync.net, cdn-metric.net, edge-cache.io, ns-relay.net, api-beacon.net, mx-collector.net]}
+      tunnel_bytes: 1500
+      tunnel_chunk: 30
+      tunnel_qtypes: [TXT]
+      tunnel_interval: [1.0, 3.0]
+      tunnel_interleave: false
+      tunnel_start: [0.3, 0.5]
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 30, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      tunnel_host: ws1
+      tunnel_domain: {choose: [telemetry-sync.net, cdn-metric.net, edge-cache.io, ns-relay.net, api-beacon.net, mx-collector.net]}
+      tunnel_bytes: 1200
+      tunnel_chunk: 20
+      tunnel_qtypes: [A, AAAA]
+      tunnel_interval: [6.0, 12.0]
+      tunnel_interleave: false
+      tunnel_start: [0.2, 0.6]
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 130, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      tunnel_host: ws1
+      tunnel_domain: {choose: [telemetry-sync.net, cdn-metric.net, edge-cache.io, ns-relay.net, api-beacon.net, mx-collector.net]}
+      tunnel_bytes: 800
+      tunnel_chunk: 10
+      tunnel_qtypes: [A]
+      tunnel_interval: [30.0, 90.0]
+      tunnel_interleave: true
+      tunnel_start: [0.15, 0.7]
+
+questions:
+  - id: tunnel_host
+    text: Which host is sending the suspicious run of DNS queries? Give its IP address.
+    answer: "${facts.tunnel.source.ip}"
+    type: ip
+    points: 15
+    hint: >-
+      One office PC asks for an unusually long, random-looking label under the same parent domain over
+      and over. Group the queries by source and read off the one host doing it.
+    check:
+      filter: 'dns.flags.response == 0 && dns.qry.name contains "${facts.tunnel.domain}" && ip.src == ${facts.tunnel.source.ip}'
+      expect: {min: "${facts.tunnel.query_count}"}
+    hunt:
+      dataset: dns
+      spl: 'index=* sourcetype=pcapforge:dns query="*${facts.tunnel.domain}*" | eval first_label=mvindex(split(query,"."),0) | eval label_len=len(first_label) | stats count AS queries dc(query) AS unique_subdomains max(label_len) AS max_label_len BY src | sort - queries'
+      kql: 'query : *${facts.tunnel.domain}'
+      zeek: {log: dns, endswith: {query: ".${facts.tunnel.domain}"}, count_by: [id.orig_h]}
+      look_for: >-
+        One source accounts for all the long labels under the parent: high query count and many distinct
+        subdomains from a single host is the tell of DNS-based data transfer.
+  - id: parent_domain
+    text: Under which parent domain are the encoded labels sent? (the registrable domain the queries end with)
+    answer: "${facts.tunnel.domain}"
+    accept: ["${facts.tunnel.domain}"]
+    type: text
+    points: 15
+    hint: Every encoded query shares the same last two labels; the random part is the leading label (the subdomain).
+    check:
+      filter: 'dns.flags.response == 0 && dns.qry.name contains "${facts.tunnel.domain}"'
+      expect: {min: "${facts.tunnel.query_count}"}
+    hunt:
+      dataset: dns
+      spl: 'index=* sourcetype=pcapforge:dns query="*${facts.tunnel.domain}*" | rex field=query "(?<parent_domain>[^.]+\.[^.]+)$" | stats count AS queries dc(query) AS unique_subdomains BY parent_domain, src'
+      kql: 'query : *${facts.tunnel.domain}'
+      zeek: {log: dns, endswith: {query: ".${facts.tunnel.domain}"}, count_by: [query]}
+      look_for: >-
+        The one parent domain that collects hundreds of distinct random subdomains - no legitimate
+        service queries that many unique names under a single parent.
+  - id: record_type
+    text: Which DNS record type(s) does the encoded run use?
+    answer: "${facts.tunnel.qtypes}"
+    type: set
+    points: 10
+    hint: Read the query type (dns.qry.type) of the encoded queries - a tunnel often carries data in TXT, or hides it in A/AAAA lookups.
+    check:
+      filter: 'dns.flags.response == 0 && dns.qry.name contains "${facts.tunnel.domain}" && dns.qry.type in {${facts.tunnel.qtype_filter}}'
+      expect: {min: "${facts.tunnel.query_count}"}
+    hunt:
+      dataset: dns
+      spl: 'index=* sourcetype=pcapforge:dns query="*${facts.tunnel.domain}*" | stats count BY qtype'
+      kql: 'query : *${facts.tunnel.domain}'
+      zeek: {log: dns, endswith: {query: ".${facts.tunnel.domain}"}, count_by: [qtype_name]}
+      look_for: The record type the encoded queries ask for under the parent domain.
+  - id: bytes_transferred
+    text: >-
+      Roughly how many bytes of payload were moved out in the encoded labels? (sum of the decoded
+      bytes carried by the queries, give the approximate total)
+    answer: "${facts.tunnel.bytes_total}"
+    type: number
+    tolerance: 40
+    points: 15
+    hint: >-
+      Each label is base32: an N-character label carries about N*5/8 bytes. Multiply the per-query
+      payload by the number of encoded queries.
+    check:
+      filter: 'dns.flags.response == 0 && dns.qry.name contains "${facts.tunnel.domain}" && ip.src == ${facts.tunnel.source.ip}'
+      expect: {min: "${facts.tunnel.query_count}"}
+    hunt:
+      dataset: dns
+      spl: 'index=* sourcetype=pcapforge:dns query="*${facts.tunnel.domain}*" | eval first_label=mvindex(split(query,"."),0) | eval decoded_bytes=floor(len(first_label)*5/8) | stats sum(decoded_bytes) AS approx_bytes count AS queries BY src'
+      kql: 'query : *${facts.tunnel.domain}'
+      look_for: >-
+        Sum of the decoded label lengths across the encoded queries (about five bits of payload per
+        base32 character); the exact figure is reconstructed by decoding each label.
+  - id: first_query
+    text: At what time (UTC) was the first encoded query sent?
+    answer: "${facts.tunnel.first_query.time}"
+    type: timestamp
+    tolerance_s: 2
+    points: 10
+    check:
+      filter: 'frame.number == ${facts.tunnel.first_query.frame} && dns.flags.response == 0 && dns.qry.name contains "${facts.tunnel.domain}"'
+      expect: {count: 1}
+    hunt:
+      dataset: dns
+      spl: 'index=* sourcetype=pcapforge:dns query="*${facts.tunnel.domain}*" | sort 0 epoch | head 1 | table ts src query qtype'
+      kql: 'query : *${facts.tunnel.domain}'
+      zeek: {log: dns, endswith: {query: ".${facts.tunnel.domain}"}, show: [ts, id.orig_h, query, qtype_name]}
+      look_for: The earliest query under the parent domain - the start of the encoded run.
+
+translations:
+  pl:
+    title: Transfer danych przez DNS do lokalnego resolwera w sieci biurowej
+    briefing: |
+      Dołączasz do SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu SPAN
+      przełącznika dostępowego sieci biurowej ({sensor_subnet}) w trakcie dnia pracy. Sensor zachowuje
+      tylko ruch wewnętrzny; sesje do Internetu loguje firewall. Komputery biurowe rozwiązują nazwy
+      przez kontroler domeny, który przekazuje dalej wszystko, dla czego nie jest autorytatywny.
+      Na tej zmianie coś w rozwiązywaniu nazw wygląda podejrzanie. Scharakteryzuj to na podstawie DNS,
+      który widzi sensor: kto to robi, dokąd to kieruje i z grubsza ile danych jest wyprowadzane.
+    questions:
+      tunnel_host:
+        text: Który host wysyła podejrzaną serię zapytań DNS? Podaj jego adres IP.
+        hint: >-
+          Jeden komputer biurowy w kółko pyta o nietypowo długą, losowo wyglądającą etykietę pod tą samą
+          domeną nadrzędną. Pogrupuj zapytania według źródła i odczytaj jedyny host, który to robi.
+      parent_domain:
+        text: Pod jaką domeną nadrzędną wysyłane są zakodowane etykiety? (domena rejestrowalna, którą kończą się zapytania)
+        hint: Każde zakodowane zapytanie ma te same dwie ostatnie etykiety; losowa część to etykieta wiodąca (poddomena).
+      record_type:
+        text: Jakiego typu rekordów DNS używa zakodowana seria?
+        hint: Odczytaj typ zapytania (dns.qry.type) zakodowanych zapytań — tunel często niesie dane w TXT albo ukrywa je w zapytaniach A/AAAA.
+      bytes_transferred:
+        text: >-
+          Z grubsza ile bajtów danych wyprowadzono w zakodowanych etykietach? (suma bajtów odkodowanych
+          z zapytań, podaj przybliżoną wartość)
+        hint: >-
+          Każda etykieta jest w base32: etykieta o N znakach niesie około N*5/8 bajtów. Pomnóż ładunek
+          jednego zapytania przez liczbę zakodowanych zapytań.
+      first_query:
+        text: O której godzinie (UTC) wysłano pierwsze zakodowane zapytanie?
+  de:
+    title: Datenübertragung per DNS an einen lokalen Resolver im Büronetz
+    briefing: |
+      Sie verstärken das SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom
+      SPAN-Port des Access-Switches im Büronetz ({sensor_subnet}) während des Arbeitstages. Der Sensor
+      behält nur internen Verkehr; Sitzungen ins Internet protokolliert die Firewall. Die Büro-PCs
+      lösen Namen über den Domänencontroller auf, der alles weiterleitet, wofür er nicht autoritativ ist.
+      In dieser Schicht wirkt etwas an der Namensauflösung verdächtig. Charakterisieren Sie es anhand
+      des DNS, das der Sensor sieht: wer es tut, wohin es zeigt und ungefähr wie viel abfließt.
+    questions:
+      tunnel_host:
+        text: Welcher Host sendet die verdächtige Reihe von DNS-Anfragen? Geben Sie seine IP-Adresse an.
+        hint: >-
+          Ein Büro-PC fragt immer wieder nach einem ungewöhnlich langen, zufällig wirkenden Label unter
+          derselben übergeordneten Domäne. Gruppieren Sie die Anfragen nach Quelle und lesen Sie den
+          einen Host ab, der das tut.
+      parent_domain:
+        text: Unter welcher übergeordneten Domäne werden die kodierten Labels gesendet? (die registrierbare Domäne, mit der die Anfragen enden)
+        hint: Jede kodierte Anfrage teilt dieselben letzten beiden Labels; der zufällige Teil ist das führende Label (die Subdomain).
+      record_type:
+        text: Welche(n) DNS-Record-Typ(en) verwendet die kodierte Reihe?
+        hint: Lesen Sie den Anfragetyp (dns.qry.type) der kodierten Anfragen — ein Tunnel trägt Daten oft in TXT oder versteckt sie in A/AAAA-Abfragen.
+      bytes_transferred:
+        text: >-
+          Wie viele Nutzdaten-Bytes wurden ungefähr in den kodierten Labels abgeführt? (Summe der aus
+          den Anfragen dekodierten Bytes, geben Sie den ungefähren Gesamtwert an)
+        hint: >-
+          Jedes Label ist base32: ein Label mit N Zeichen trägt etwa N*5/8 Bytes. Multiplizieren Sie die
+          Nutzlast pro Anfrage mit der Anzahl der kodierten Anfragen.
+      first_query:
+        text: Zu welcher Uhrzeit (UTC) wurde die erste kodierte Anfrage gesendet?

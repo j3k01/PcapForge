@@ -1,0 +1,364 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-volumetric-flood
+title: Volumetric UDP flood against a local sink service on the office LAN
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, dos, flood, udp, volumetric, network-denial-of-service, windows, office]
+summary: >
+  The office-LAN baseline (Windows Server DHCP behind the firewall's relay, booting PCs, intranet
+  HTTPS, WSUS and, on medium/hard, DNS, Windows chatter, IPv6 and the Active Directory domain) with
+  one incident: one or more office workstations send a bounded, high-rate burst of UDP datagrams to a
+  local telemetry sink service (a benign Discard listener on UDP 9), a volumetric network flood
+  (MITRE ATT&CK T1498). There is no amplification, reflection or spoofing - the observable pattern is
+  simply a steep rise in packets per second to one destination. Easy is a single source at a constant
+  rate; medium adds more sources; hard ramps the rate inside a busy two-hour background. Analysts find
+  the target, the sources, the start and end of the burst, its peak packet rate and the total volume.
+
+briefing: |
+  You are on the SOC of {site_name} ({domain}). The attached capture comes from the SPAN port of the
+  office access switch ({sensor_subnet}). The service desk reports that the telemetry collector on the
+  server subnet became briefly unresponsive and its link saturated; the capture spans that period.
+  The sensor keeps internal traffic only; Internet-bound sessions are logged by the firewall instead.
+  Find out which host was overwhelmed, who was sending to it, when it started and stopped, how fast
+  the traffic came and how much of it there was.
+
+mitre:
+  - {framework: enterprise, id: T1498, name: Network Denial of Service}
+  - {framework: enterprise, id: T1498.001, name: Direct Network Flood}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [office, servers], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    # The local telemetry/metrics collector that runs the sink (Discard) service the flood targets.
+    - {id: sink, device: windows-server-vm, subnet: servers, name: "COLL-{CODE}-01"}
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+    # Ordinary office PCs that, during the capture, generate the flood (benign load-generator stand-in).
+    - {id: gen, count: "${vars.flood_sources}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-9{index:02d}", role: workstation}
+
+actors:
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: [ws, gen]
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, newpc, gen]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, newpc, gen]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, newpc, gen]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, newpc, gen]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, newpc, gen]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, newpc, gen]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+  # The benign sink (Discard, UDP 9) and the volumetric flood aimed at it.
+  - {id: sink_service, type: sink.server, hosts: sink}
+  - id: flood
+    type: sink.flood
+    hosts: gen
+    incident: true
+    params:
+      target: sink
+      rate: "${vars.flood_rate}"
+      window: "${vars.flood_window}"
+      start: "${vars.flood_start}"
+      ramp: "${vars.flood_ramp}"
+      size: 64
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: false
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      flood_sources: 1
+      flood_rate: 80
+      flood_window: 20
+      flood_start: [0.4, 0.6]
+      flood_ramp: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, vlan: 30, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      flood_sources: 3
+      flood_rate: 50
+      flood_window: 25
+      flood_start: [0.3, 0.6]
+      flood_ramp: false
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, vlan: 130, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      flood_sources: 3
+      flood_rate: 60
+      flood_window: 35
+      flood_start: [0.3, 0.6]
+      flood_ramp: true
+
+questions:
+  - id: target_ip
+    text: Which host was flooded? Give the destination IP address that received the burst.
+    answer: "${facts.flood.target.ip}"
+    type: ip
+    points: 10
+    hint: One destination receives a sudden, large share of the packets; sort conversations by packets to it.
+    check:
+      filter: "udp.dstport == 9 && ip.dst == ${facts.flood.target.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=udp dest_port=9 | stats count AS packets, dc(src) AS sources, min(ts) AS first_seen, max(ts) AS last_seen BY dest, dest_port, transport | sort - packets"
+      kql: "transport : \"udp\" and dest_port : 9"
+      look_for: The destination of every one-way UDP datagram on port 9; one collector takes them all.
+  - id: target_port
+    text: On which UDP port did the flood land?
+    answer: "${facts.flood.port}"
+    type: number
+    points: 5
+    check:
+      filter: "udp.dstport == 9 && ip.dst == ${facts.flood.target.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=udp dest_port=9 | stats count BY dest, dest_port, transport"
+      kql: "transport : \"udp\" and dest_port : 9"
+      look_for: The destination port shared by the flood datagrams (the Discard sink service, 9).
+  - id: protocol
+    text: Which transport protocol carried the flood?
+    answer: udp
+    accept: [udp, UDP]
+    type: text
+    points: 5
+    hint: Look at the transport of the one-way datagrams to the collector.
+    check:
+      filter: "udp && ip.dst == ${facts.flood.target.ip} && udp.dstport == 9"
+      expect: {min: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows dest_port=9 | stats count BY transport, dest, dest_port"
+      kql: "dest_port : 9 and transport : \"udp\""
+      look_for: Every flow to the sink is UDP; there is no TCP handshake, just one-way datagrams.
+  - id: source_ips
+    text: Which office host(s) sent the flood? Give the source IP address(es).
+    answer: "${facts.flood.source_ips}"
+    type: set
+    points: 15
+    hint: One or more office workstations send to the collector far more than any normal client does.
+    foreach: facts.flood.sources
+    check:
+      filter: "udp.dstport == 9 && ip.dst == ${facts.flood.target.ip} && ip.src == ${item.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=udp dest_port=9 | stats count AS packets BY src, dest | sort - packets"
+      kql: "transport : \"udp\" and dest_port : 9"
+      look_for: The source addresses of the UDP datagrams to the collector on port 9.
+  - id: flood_start
+    text: At what time (UTC) was the first flood datagram sent?
+    answer: "${facts.flood.first_packet.time}"
+    type: timestamp
+    tolerance_s: 1
+    points: 10
+    hint: Order the UDP datagrams to the collector by time and read the first one.
+    check:
+      filter: "frame.number == ${facts.flood.first_packet.frame} && udp.dstport == 9 && ip.dst == ${facts.flood.target.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=udp dest_port=9 | sort _time | head 1 | table ts, src, dest, dest_port"
+      kql: "transport : \"udp\" and dest_port : 9"
+      look_for: The earliest UDP datagram to the collector on port 9.
+  - id: flood_end
+    text: At what time (UTC) was the last flood datagram sent?
+    answer: "${facts.flood.last_packet.time}"
+    type: timestamp
+    tolerance_s: 1
+    points: 10
+    hint: The burst stops; read the time of the last UDP datagram to the collector.
+    check:
+      filter: "frame.number == ${facts.flood.last_packet.frame} && udp.dstport == 9 && ip.dst == ${facts.flood.target.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=udp dest_port=9 | sort - _time | head 1 | table ts, src, dest, dest_port"
+      kql: "transport : \"udp\" and dest_port : 9"
+      look_for: The latest UDP datagram to the collector on port 9.
+  - id: peak_pps
+    text: What was the peak rate of the flood, in packets per second (to the nearest few)?
+    answer: "${facts.flood.peak_pps}"
+    type: number
+    tolerance: 25
+    points: 15
+    hint: Count the UDP datagrams to the collector in one-second buckets and take the largest bucket.
+    hunt:
+      dataset: flows
+      wireshark: "udp.dstport == 9 && ip.dst == ${facts.flood.target.ip}"
+      spl: "index=* sourcetype=pcapforge:flows transport=udp dest_port=9 | bin _time span=1s | stats count AS pps BY _time, dest | stats max(pps) AS peak_pps BY dest"
+      kql: "transport : \"udp\" and dest_port : 9"
+      look_for: Flood packets per second per destination; the highest one-second count is the peak rate.
+  - id: total_packets
+    text: How many datagrams did the flood deliver to the collector in total?
+    answer: "${facts.flood.total_packets}"
+    type: number
+    tolerance: 1
+    points: 10
+    hint: Count every UDP datagram sent to the collector on port 9.
+    check:
+      filter: "udp.dstport == 9 && ip.dst == ${facts.flood.target.ip}"
+      expect: {min: "${facts.flood.total_packets}"}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows transport=udp dest_port=9 | stats count AS total_packets BY dest"
+      kql: "transport : \"udp\" and dest_port : 9"
+      look_for: The total number of one-way UDP datagrams to the collector on port 9.
+
+translations:
+  pl:
+    title: Wolumetryczny zalew UDP na lokalną usługę-ujście w sieci biurowej
+    briefing: |
+      Jesteś w SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu SPAN
+      przełącznika dostępowego sieci biurowej ({sensor_subnet}). Help desk zgłasza, że kolektor
+      telemetrii w podsieci serwerowej na chwilę przestał odpowiadać, a jego łącze się zapchało;
+      nagranie obejmuje ten okres. Sensor zachowuje tylko ruch wewnętrzny; sesje do Internetu
+      loguje firewall. Ustal, który host został przeciążony, kto do niego wysyłał, kiedy to się
+      zaczęło i skończyło, jak szybki był ruch i ile go było.
+    questions:
+      target_ip:
+        text: Który host został zalany? Podaj docelowy adres IP, który odebrał zalew.
+        hint: Jeden adres docelowy odbiera nagle dużą część pakietów; posortuj konwersacje według liczby pakietów do niego.
+      target_port:
+        text: Na którym porcie UDP wylądował zalew?
+      protocol:
+        text: Który protokół transportowy przenosił zalew?
+        hint: Spójrz na transport jednokierunkowych datagramów do kolektora.
+      source_ips:
+        text: Który host (hosty) biurowy wysłał zalew? Podaj źródłowy adres (adresy) IP.
+        hint: Jedna lub więcej stacji roboczych wysyła do kolektora dużo więcej niż jakikolwiek normalny klient.
+      flood_start:
+        text: O której godzinie (UTC) wysłano pierwszy datagram zalewu?
+        hint: Uporządkuj datagramy UDP do kolektora według czasu i odczytaj pierwszy.
+      flood_end:
+        text: O której godzinie (UTC) wysłano ostatni datagram zalewu?
+        hint: Zalew się kończy; odczytaj czas ostatniego datagramu UDP do kolektora.
+      peak_pps:
+        text: Jaka była szczytowa szybkość zalewu, w pakietach na sekundę (z dokładnością do kilku)?
+        hint: Policz datagramy UDP do kolektora w kubełkach jednosekundowych i weź największy kubełek.
+      total_packets:
+        text: Ile datagramów zalew dostarczył do kolektora łącznie?
+        hint: Policz każdy datagram UDP wysłany do kolektora na port 9.
+  de:
+    title: Volumetrischer UDP-Flood gegen einen lokalen Senkendienst im Büronetz
+    briefing: |
+      Sie sind im SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom SPAN-Port des
+      Access-Switches im Büronetz ({sensor_subnet}). Der Service Desk meldet, dass der Telemetrie-
+      Kollektor im Serversubnetz kurzzeitig nicht mehr erreichbar war und seine Leitung ausgelastet
+      wurde; der Mitschnitt umfasst diesen Zeitraum. Der Sensor behält nur internen Verkehr; Sitzungen
+      ins Internet protokolliert die Firewall. Finden Sie heraus, welcher Host überlastet wurde, wer an
+      ihn gesendet hat, wann es begann und endete, wie schnell der Verkehr war und wie viel es war.
+    questions:
+      target_ip:
+        text: Welcher Host wurde geflutet? Geben Sie die Ziel-IP-Adresse an, die den Ausbruch empfing.
+        hint: Ein Ziel erhält plötzlich einen großen Anteil der Pakete; sortieren Sie die Konversationen nach Paketen dorthin.
+      target_port:
+        text: Auf welchem UDP-Port landete der Flood?
+      protocol:
+        text: Welches Transportprotokoll trug den Flood?
+        hint: Sehen Sie sich das Transportprotokoll der einseitigen Datagramme an den Kollektor an.
+      source_ips:
+        text: Welche(r) Büro-Host(s) sendete(n) den Flood? Geben Sie die Quell-IP-Adresse(n) an.
+        hint: Ein oder mehrere Arbeitsplätze senden weit mehr an den Kollektor als jeder normale Client.
+      flood_start:
+        text: Zu welcher Uhrzeit (UTC) wurde das erste Flood-Datagramm gesendet?
+        hint: Ordnen Sie die UDP-Datagramme an den Kollektor nach Zeit und lesen Sie das erste.
+      flood_end:
+        text: Zu welcher Uhrzeit (UTC) wurde das letzte Flood-Datagramm gesendet?
+        hint: Der Ausbruch endet; lesen Sie die Zeit des letzten UDP-Datagramms an den Kollektor.
+      peak_pps:
+        text: Wie hoch war die Spitzenrate des Floods in Paketen pro Sekunde (auf einige genau)?
+        hint: Zählen Sie die UDP-Datagramme an den Kollektor in Ein-Sekunden-Fenstern und nehmen Sie das größte.
+      total_packets:
+        text: Wie viele Datagramme lieferte der Flood insgesamt an den Kollektor?
+        hint: Zählen Sie jedes UDP-Datagramm, das an den Kollektor auf Port 9 gesendet wurde.

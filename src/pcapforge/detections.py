@@ -29,6 +29,7 @@ from pcapforge.zeek import hunt_command
 SID_BASE = 9100000          # local sid range reserved for pcapforge (9100000-9199999)
 SID_BAND_BASE = SID_BASE + 100
 SID_OT_BASE = SID_BASE + 1000   # IEC 104 +0.., DNP3 +10.., BACnet +20.., EtherNet/IP +30..
+SID_IT_BASE = SID_BASE + 2000   # IT line: DnsTunneling +0.., HttpsBeaconing +100.., ScanAuthFailures +200.., VolumetricFlood +300.., BulkUpload +400..
 MODBUS_PORT = 502
 WRITER_TYPES = ("modbus.operator",)
 CLIENT_TYPES = ("modbus.poller", "modbus.operator")
@@ -78,7 +79,178 @@ def _rule(sid: int, header: str, msg: str, options: str, metadata: str, purpose:
 
 
 def suricata_rules(answers: dict) -> list[Rule]:
-    return _modbus_rules(answers) + _ot_rules(answers)
+    return (_modbus_rules(answers) + _ot_rules(answers) + _it_dns_tunnel_rules(answers)
+            + _it_scan_auth_rules(answers) + _it_https_beacon_rules(answers)
+            + _it_volumetric_flood_rules(answers)
+            + _it_bulk_upload_rules(answers))
+
+
+def _it_volumetric_flood_rules(answers: dict) -> list[Rule]:
+    """The volumetric UDP flood of the volumetric-flood incident (it-volumetric-flood): a high rate of
+    datagrams to the local sink (Discard, UDP 9). A threshold rule fires on >=50 datagrams to one
+    destination in a second. The office baseline sends nothing to this port, so the rule is inert on it."""
+    if not any(a["type"] == "sink.flood" and a["incident"] for a in answers["actors"]):
+        return []
+    ips = host_ips(answers)
+    sinks = [ips[h] for a in answers["actors"] if a["type"] == "sink.server" for h in a["hosts"]]
+    dest = _addresses(sinks) if sinks else "any"
+    return [_rule(SID_IT_BASE + 300, f"any any -> {dest} 9",
+                  "PCAPFORGE IT volumetric UDP flood to a sink service (>=50 datagrams/s to one host)",
+                  "threshold: type both, track by_dst, count 50, seconds 1;",
+                  "mitre_attack T1498, mitre_attack T1498.001",
+                  "A high rate of UDP datagrams to the sink (Discard, port 9): at least 50 to one "
+                  "destination within a second. A volumetric network flood (direct network flood); the "
+                  "office baseline sends nothing to this port.", proto="udp")]
+
+
+def _it_dns_tunnel_rules(answers: dict) -> list[Rule]:
+    """DNS queries with a long base32-like leading label under the single fictional parent domain of
+    the DNS-tunnelling incident (it-dns-tunneling): one host encoding data into subdomains. The
+    ``content`` match on the parent keeps the rule inert on every other site and the baseline."""
+    actor = next((a for a in answers["actors"] if a["type"] == "dns.tunnel" and a["incident"]), None)
+    if not actor:
+        return []
+    facts = answers["facts"].get(actor["id"], {})
+    parent, label_len = facts.get("domain"), facts.get("label_len")
+    if not parent or not label_len:
+        return []
+    options = f'dns.query; content:"{parent}"; nocase; pcre:"/^[a-z2-7]{{{label_len},}}\\./i"; '
+    purpose = (f"A DNS query whose leading label is {label_len}+ base32-like characters under {parent}: "
+               "one host encoding data into subdomains of a single parent (DNS-based data transfer / "
+               "exfiltration over DNS). No legitimate name on this site looks like this.")
+    return [_rule(SID_IT_BASE, "any any -> any any",
+                  f"PCAPFORGE IT DNS tunnelling: long encoded label under {parent}",
+                  options, "mitre_attack T1071.004, mitre_attack T1048.003", purpose, proto="dns")]
+
+
+def _it_https_beacon_rules(answers: dict) -> list[Rule]:
+    """The periodic HTTPS check-ins of the beaconing incident (it-https-beaconing): a TLS
+    ClientHello whose SNI is the one fictional beacon domain, from the beaconing host to the external
+    service. The ``content`` match on that domain keeps the rule inert on every other site and the
+    office baseline, where the SNIs are the intranet site names."""
+    actor = next((a for a in answers["actors"] if a["type"] == "tls.beacon" and a["incident"]), None)
+    if not actor:
+        return []
+    facts = answers["facts"].get(actor["id"], {})
+    domain = facts.get("domain")
+    src, dst = facts.get("source", {}).get("ip"), facts.get("destination", {}).get("ip")
+    if not (domain and src and dst):
+        return []
+    return [_rule(SID_IT_BASE + 100, f"{_addresses([src])} any -> {_addresses([dst])} any",
+                  f"PCAPFORGE IT HTTPS beaconing: periodic TLS check-in to {domain}",
+                  f'flow:to_server; tls.sni; content:"{domain}"; nocase; endswith;',
+                  "mitre_attack T1071.001, mitre_attack T1573", proto="tls",
+                  purpose=(f"A TLS ClientHello to {domain} from the beaconing workstation. Benign browsing on "
+                           "this site goes to the intranet site names; a steady cadence of check-ins to this "
+                           "one external name is the beacon."))]
+
+
+def _it_scan_auth_rules(answers: dict) -> list[Rule]:
+    """Kerberos pre-authentication failures of the scan-and-brute-force incident
+    (it-scan-auth-failures): a KRB-ERROR with KDC_ERR_PREAUTH_FAILED (24) is a wrong password. The
+    office baseline never fails pre-authentication, so the rule is inert on it."""
+    if not any(a["type"] == "kerberos.bruteforce" and a["incident"] for a in answers["actors"]):
+        return []
+    return [_rule(SID_IT_BASE + 200, "any any -> any any",
+                  "PCAPFORGE IT Kerberos pre-authentication failure (KDC_ERR_PREAUTH_FAILED) - possible password guessing",
+                  "krb5_err_code:24;", "mitre_attack T1110, mitre_attack T1110.003",
+                  "A Kerberos AS-REQ failed pre-authentication (a wrong password). A burst of these from one "
+                  "source is password guessing (one account) or spraying (many accounts).", proto="krb5")]
+
+
+def _it_bulk_upload_rules(answers: dict) -> list[Rule]:
+    """The bulk upload of the exfiltration-equivalent incident (it-bulk-upload): a plain-HTTP POST
+    (easy) or a TLS session (medium/hard) carrying a large upload to the external file host. Both
+    rules name the external sink's address and the TLS one its SNI, so they are inert on every other
+    site and the office baseline, which never talks to it."""
+    actor = next((a for a in answers["actors"] if a["type"] == "http.uploader" and a["incident"]), None)
+    sinks = [a for a in answers["actors"] if a["type"] == "http.sink"]
+    if not actor or not sinks:
+        return []
+    ips = host_ips(answers)
+    dst = _addresses([ips[h] for a in sinks for h in a["hosts"]])
+    domain = answers["facts"].get(actor["id"], {}).get("domain")
+    rules = [_rule(SID_IT_BASE + 400, f"$HOME_NET any -> {dst} any",
+                   "PCAPFORGE IT bulk HTTP upload (POST) to an external file host",
+                   'flow:to_server,established; http.method; content:"POST";',
+                   "mitre_attack T1048.003, mitre_attack T1567", proto="http",
+                   purpose=("A plain-HTTP POST to the external file host: a bulk upload in clear text "
+                            "(obvious file name and Content-Type)."))]
+    if domain:
+        rules.append(_rule(SID_IT_BASE + 401, f"$HOME_NET any -> {dst} any",
+                           f"PCAPFORGE IT bulk data upload over TLS to {domain}",
+                           f'flow:to_server; tls.sni; content:"{domain}"; nocase;',
+                           "mitre_attack T1048, mitre_attack T1567", proto="tls",
+                           purpose=(f"A TLS session to {domain} (the external file host). The upload is "
+                                    "visible only as TLS record sizes; its volume shows as bytes_out >> "
+                                    "bytes_in in the flow summaries.")))
+    return rules
+
+
+def _it_dns_tunnel_sigma(answers: dict) -> list[dict]:
+    """Sigma over the dns dataset for the DNS-tunnelling incident: a long base32-like leading label
+    under the one fictional parent domain."""
+    actor = next((a for a in answers["actors"] if a["type"] == "dns.tunnel" and a["incident"]), None)
+    if not actor:
+        return []
+    facts = answers["facts"].get(actor["id"], {})
+    parent, label_len = facts.get("domain"), facts.get("label_len")
+    if not parent or not label_len:
+        return []
+    detection = {"selection": {"query|endswith": f".{parent}",
+                               "query|re": f"^[a-z2-7]{{{label_len},}}\\."},
+                 "condition": "selection"}
+    return [_sigma(answers, key="it-dns-tunnelling-long-labels",
+                   title=f"DNS tunnelling: long encoded labels under {parent}",
+                   description=(f"DNS queries whose leading label is {label_len}+ base32-like characters under "
+                                f"the single parent {parent}: one host encoding data into subdomains (DNS-based "
+                                "data transfer / exfiltration over DNS)."),
+                   service="dns", level="high", detection=detection,
+                   tags=["attack.exfiltration", "attack.command_and_control", "attack.t1048.003", "attack.t1071.004"],
+                   falsepositives=["A chatty client that encodes long tokens into subdomains (some AV or CDN clients)."],
+                   fields=["ts", "src", "dest", "query", "qtype", "query_frame"])]
+
+
+def _it_scan_auth_sigma(answers: dict) -> list[dict]:
+    """Sigma for the scan-and-brute-force incident (it-scan-auth-failures): Kerberos
+    pre-authentication failures correlated into brute force, and a TCP service-port sweep."""
+    rules: list[dict] = []
+    if any(a["type"] == "kerberos.bruteforce" and a["incident"] for a in answers["actors"]):
+        rules.append(_sigma(
+            answers, key="kerberos-preauth-failure", title="Kerberos pre-authentication failure",
+            description="A Kerberos AS-REQ rejected with KDC_ERR_PREAUTH_FAILED (24): a wrong pre-authentication "
+                        "secret (a bad password). Base rule of the brute-force correlation.",
+            service="kerberos", level="low",
+            detection={"selection": {"request_type": "AS", "result": "error", "error_code": 24}, "condition": "selection"},
+            tags=["attack.t1110"],
+            falsepositives=["A user mistyping a password; a service with a stale cached credential."],
+            fields=None, name="pcapforge_kerberos_preauth_failure"))
+        rules.append(_correlation(
+            answers, key="kerberos-brute-force", title="Kerberos password guessing or spraying from one host",
+            description="At least five Kerberos pre-authentication failures from one source within five minutes: "
+                        "password guessing against one account, or spraying one guess across many accounts.",
+            level="high", kind="value_count", rules=["pcapforge_kerberos_preauth_failure"], group_by=["src"],
+            timespan="5m", condition={"gte": 5}, field="client", generate=False,
+            tags=["attack.t1110", "attack.t1110.001", "attack.t1110.003"],
+            falsepositives=["A misconfigured service account retrying a stale password."]))
+    if any(a["type"] == "tcp.scanner" and a["incident"] for a in answers["actors"]):
+        rules.append(_sigma(
+            answers, key="tcp-service-probe", title="TCP connection to a server service port",
+            description="A TCP connection (attempt) to a server-subnet service port (base rule of the "
+                        "port-sweep correlation).",
+            service="flows", level="informational",
+            detection={"selection": {"transport": "tcp", "dest_port": [22, 135, 139, 3389, 88, 389, 445, 443, 8530]},
+                       "condition": "selection"},
+            tags=["attack.t1046"], falsepositives=["See the port-sweep correlation."],
+            fields=None, name="pcapforge_tcp_service_probe"))
+        rules.append(_correlation(
+            answers, key="tcp-port-sweep", title="TCP port sweep of the server subnet",
+            description="One host opened or tried at least five different service ports within ten minutes: a TCP "
+                        "port sweep (network service discovery).",
+            level="high", kind="value_count", rules=["pcapforge_tcp_service_probe"], group_by=["src"],
+            timespan="10m", condition={"gte": 5}, field="dest_port", generate=False, tags=["attack.t1046"],
+            falsepositives=["A vulnerability scan or asset inventory run by IT."]))
+    return rules
 
 
 def _modbus_rules(answers: dict) -> list[Rule]:
@@ -370,10 +542,89 @@ def _profile_points(answers: dict, servers: list[dict], table: str, predicate) -
     return sorted(names)
 
 
+def _it_https_beacon_sigma(answers: dict) -> list[dict]:
+    """Sigma over the tls dataset for the beaconing incident (it-https-beaconing): TLS check-ins to
+    the one fictional beacon domain from the beaconing host."""
+    actor = next((a for a in answers["actors"] if a["type"] == "tls.beacon" and a["incident"]), None)
+    if not actor:
+        return []
+    facts = answers["facts"].get(actor["id"], {})
+    domain = facts.get("domain")
+    src = facts.get("source", {}).get("ip")
+    if not domain or not src:
+        return []
+    detection = {"selection": {"server_name": domain}, "condition": "selection"}
+    return [_sigma(
+        answers, key="it-https-beaconing", title=f"HTTPS beaconing to {domain}",
+        description=(f"TLS sessions whose SNI is the single external name {domain}, contacted on a regular "
+                     "cadence from one office workstation while its user is not browsing - the observable "
+                     "pattern of command-and-control beaconing over HTTPS. Benign browsing on this site uses "
+                     "the intranet site names."),
+        service="tls", level="high", detection=detection,
+        tags=["attack.command_and_control", "attack.t1071.001", "attack.t1573"],
+        falsepositives=["A background service or updater that polls one external endpoint on a timer."],
+        fields=["ts", "src", "dest", "server_name", "ja4", "cert_issuer", "client_hello_frame"])]
+
+
+def _it_volumetric_flood_sigma(answers: dict) -> list[dict]:
+    """Sigma for the volumetric-flood incident (it-volumetric-flood): a correlation over the flows
+    dataset that fires when many UDP datagrams reach one destination's sink port within a minute."""
+    if not any(a["type"] == "sink.flood" and a["incident"] for a in answers["actors"]):
+        return []
+    ips = host_ips(answers)
+    sinks = [ips[h] for a in answers["actors"] if a["type"] == "sink.server" for h in a["hosts"]]
+    selection: dict = {"transport": "udp", "dest_port": 9}
+    if sinks:
+        selection["dest"] = sinks
+    rules = [_sigma(answers, key="it-flood-udp-sink-datagram",
+                    title="UDP datagram to the sink service (volumetric-flood base rule)",
+                    description="A one-way UDP datagram to the sink (Discard, port 9), the base rule of the "
+                                "volumetric-flood correlation.",
+                    service="flows", level="informational",
+                    detection={"selection": selection, "condition": "selection"},
+                    tags=["attack.t1498", "attack.t1498.001"],
+                    falsepositives=["See the volumetric-flood correlation."], fields=None,
+                    name="pcapforge_it_flood_datagram")]
+    rules.append(_correlation(
+        answers, key="it-volumetric-flood", title="Volumetric UDP flood to a local sink service",
+        description="At least 500 UDP datagrams reached one destination's sink port (9) within a minute: a "
+                    "volumetric network flood (direct network flood). The office baseline sends nothing to "
+                    "this port.",
+        level="high", kind="event_count", rules=["pcapforge_it_flood_datagram"], group_by=["dest"],
+        timespan="1m", condition={"gte": 500}, generate=False, tags=["attack.t1498", "attack.t1498.001"],
+        falsepositives=["A legitimate high-rate telemetry or backup stream to the collector."]))
+    return rules
+
+
+def _it_bulk_upload_sigma(answers: dict) -> list[dict]:
+    """Sigma over the flows dataset for the bulk-upload incident (it-bulk-upload): TCP flows to the
+    external file host, where one office host sends far more than it receives."""
+    actor = next((a for a in answers["actors"] if a["type"] == "http.uploader" and a["incident"]), None)
+    sinks = [a for a in answers["actors"] if a["type"] == "http.sink"]
+    if not actor or not sinks:
+        return []
+    ips = host_ips(answers)
+    dst = [ips[h] for a in sinks for h in a["hosts"]]
+    return [_sigma(
+        answers, key="it-bulk-upload", title="Large data upload to an external file host",
+        description=("TCP flows from an office host to an external file host (dest outside the site "
+                     "subnets), where the host sends far more than it receives (bytes_out >> bytes_in): "
+                     "a bulk upload / possible data exfiltration. Downloads such as browsing and Windows "
+                     "Update have the opposite ratio."),
+        service="flows", level="high",
+        detection={"selection": {"dest": dst, "transport": "tcp"}, "condition": "selection"},
+        tags=["attack.exfiltration", "attack.t1048", "attack.t1567"],
+        falsepositives=["A sanctioned backup or large file transfer to an approved external service."],
+        fields=["ts", "src", "dest", "dest_port", "bytes_out", "bytes_in", "app"])]
+
+
 def sigma_rules(answers: dict) -> list[dict]:
     """Sigma detections derived from the site model, one dict per rule (same roles as the
     Suricata rules)."""
-    return _modbus_sigma_rules(answers) + _ot_sigma_rules(answers)
+    return (_modbus_sigma_rules(answers) + _ot_sigma_rules(answers) + _it_dns_tunnel_sigma(answers)
+            + _it_scan_auth_sigma(answers) + _it_https_beacon_sigma(answers)
+            + _it_volumetric_flood_sigma(answers)
+            + _it_bulk_upload_sigma(answers))
 
 
 def _ot_sigma_rules(answers: dict) -> list[dict]:

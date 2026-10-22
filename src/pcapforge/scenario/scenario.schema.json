@@ -554,6 +554,11 @@
                     "description": "field -> value (or a list: any of them); every field must match",
                     "additionalProperties": {"type": ["string", "number", "boolean", "array"]}
                   },
+                  "endswith": {
+                    "type": "object",
+                    "description": "field -> suffix the string field must end with; every field must match",
+                    "additionalProperties": {"type": "string"}
+                  },
                   "show": {"type": "array", "items": {"type": "string"}, "minItems": 1,
                            "description": "fields printed for each matching record"},
                   "count_by": {"type": "array", "items": {"type": "string"}, "minItems": 1,
