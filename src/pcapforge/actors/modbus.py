@@ -657,13 +657,21 @@ class ModbusScanner(ModbusClientActor):
         start_lo, start_hi = self.span(self.param("start", [0.2, 0.5]))
         t = plan.duration * rng.uniform(start_lo, start_hi)
         scan_start = None
+        # Low-and-slow sweep: with ``spread`` (seconds) the probes and per-PLC sessions are spaced
+        # out across the window instead of back to back. Off by default (byte-identical draws).
+        spread = min(float(self.param("spread", 0) or 0), plan.duration * 0.5)
+        steps = len(sweep) + len(targets)
+        step = spread / steps if spread and steps else None
+
+        def _gap(lo: float, hi: float) -> float:
+            return rng.uniform(0.6, 1.0) * step if step is not None else rng.uniform(lo, hi)
 
         # Port sweep: a SYN to port 502 on each swept host, ordered by address (the attacker walks
         # the subnet). Hosts that do not serve Modbus answer with a RST; the PLCs are probed below.
         for swept in sorted(sweep, key=lambda h: h.id):
             action = plan.add(t, self.id, host.id, "modbus.probe", target=swept.id)
             scan_start = scan_start or action
-            t += rng.uniform(0.05, 0.4)
+            t += _gap(0.05, 0.4)
 
         identities, enumerated = [], []
         for target in targets:
@@ -685,7 +693,7 @@ class ModbusScanner(ModbusClientActor):
             identities.append({"target": host_ref(target.id), "unit_id": unit,
                                "identity": reported, "identify": action_ref(ident)})
             enumerated.append(host_ref(target.id))
-            t = session.t + rng.uniform(0.2, 1.0)
+            t = session.t + _gap(0.2, 1.0)
             plan.event(ident, self.id, f"Device identification and register enumeration of {target.id}",
                        ["T0846", "T0888", "T0861"], vendor=identity.get("VendorName"),
                        product=identity.get("ProductCode"))

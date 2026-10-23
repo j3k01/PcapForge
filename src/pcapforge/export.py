@@ -98,7 +98,7 @@ FIELDS = [
     "cip.cm.fwo.type", "cip.cm.fwo.consize",
     # Kerberos KDC exchanges (the first msg_type is the message's; a TGS-REQ also carries its AP-REQ).
     "kerberos.msg_type", "kerberos.CNameString", "kerberos.SNameString", "kerberos.realm", "kerberos.crealm",
-    "kerberos.error_code", "kerberos.padata_type",
+    "kerberos.error_code", "kerberos.padata_type", "kerberos.ENCTYPE",
     # SMB 2/3: header, tree and file names (tshark tracks them across the session), sizes.
     "smb2.cmd", "smb2.flags.response", "smb2.msg_id", "smb2.sesid", "smb2.tid", "smb2.nt_status", "smb2.tree",
     "smb2.share_type", "smb2.filename", "smb2.flags.signature", "smb2.dialect", "smb2.eof", "smb2.read_length",
@@ -106,6 +106,9 @@ FIELDS = [
     "tls.handshake.type", "tls.handshake.version", "tls.handshake.ciphersuite", "tls.handshake.extensions_server_name",
     "tls.handshake.extensions_alpn_str", "tls.handshake.ja4", "x509sat.uTF8String", "x509ce.dNSName",
     "http.host", "http.user_agent", "http.content_type", "http.content_length_header", "http.content_encoding",
+    # LDAP (TCP 389): bind name, search request (base / scope / filter parts) and the result entries / code.
+    "ldap.messageID", "ldap.name", "ldap.baseObject", "ldap.scope", "ldap.present", "ldap.attributeDesc",
+    "ldap.assertionValue", "ldap.objectName", "ldap.resultCode",
 ]
 F = {name: index for index, name in enumerate(FIELDS)}
 
@@ -151,6 +154,7 @@ BROWSER_COMMANDS = {1: "host_announcement", 2: "announcement_request", 8: "elect
 DHCP_TYPES = {1: "discover", 2: "offer", 3: "request", 4: "decline", 5: "ack", 6: "nak", 7: "release",
               8: "inform"}
 KERBEROS_PORT = 88
+LDAP_SCOPES = {0: "base", 1: "one", 2: "tree"}
 KRB_REQUESTS = {10: "AS", 12: "TGS"}
 KRB_REPLIES = {11: "AS", 13: "TGS"}
 KRB_ERROR = 30
@@ -418,7 +422,7 @@ def _is_service_port(port: int | None) -> bool:
 
 # JSON-lines files written as the capture streams by (flows.jsonl is written at the end).
 DATASETS = ("modbus", "dns", "ntp", "name_resolution", "arp", "dhcp", "iec104", "dnp3", "bacnet", "enip",
-            "kerberos", "smb", "tls", "http")
+            "kerberos", "ldap", "smb", "tls", "http")
 
 
 class ExportError(RuntimeError):
@@ -501,6 +505,8 @@ class _Exporter:
         self.tls_pending: dict[tuple, dict] = {}
         self.http = self.datasets["http"]
         self.http_pending: dict[tuple, deque[dict]] = defaultdict(deque)
+        self.ldap = self.datasets["ldap"]
+        self.ldap_pending: dict[tuple, dict] = {}
 
     # -- per frame -------------------------------------------------------------------
     def frame(self, row: list[str]) -> None:
@@ -559,10 +565,51 @@ class _Exporter:
             self._kerberos(row, key, transport, number, epoch, conn)
         elif row[F["smb2.cmd"]]:
             self._smb(row, key, number, epoch, conn)
+        elif app == "ldap" and transport == "tcp" and row[F["ldap.messageID"]]:
+            self._ldap(row, key, number, epoch, conn)
         elif row[F["tls.handshake.type"]] and transport == "tcp":
             self._tls(row, key, number, epoch, conn)
         elif app == "http" and (row[F["http.request.method"]] or row[F["http.response.code"]]):
             self._http(row, key, number, epoch, conn)
+
+    # -- ldap --------------------------------------------------------------------------
+    def _ldap(self, row, key, number, epoch, conn) -> None:
+        """One record per LDAP operation on TCP 389: a (simple) bind with its bound name, or a
+        search request paired with its result (base, scope, reconstructed filter, entry count and
+        result code). Sealed SASL searches are opaque and never reach this dissector."""
+        mids = [_int(m) for m in _all(row, "ldap.messageID")]
+        mid = mids[0] if mids else None
+        name = _first(row, "ldap.name")
+        if name:                                     # bindRequest (simple bind carries the DN)
+            self.ldap.append({
+                **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "transport": "tcp",
+                "app": "ldap", "operation": "bind", "message_id": mid, "bind_name": name,
+                "base": None, "scope": None, "filter": None, "entries": None, "result": None,
+                "request_frame": number, "response_frame": None})
+            return
+        descs, values = _all(row, "ldap.attributeDesc"), _all(row, "ldap.assertionValue")
+        presents = _all(row, "ldap.present")
+        if descs or presents:                        # searchRequest
+            parts = [f"({a}={v})" for a, v in zip(descs, values)] + [f"({p}=*)" for p in presents]
+            filt = parts[0] if len(parts) == 1 else "(&" + "".join(parts) + ")"
+            record = {
+                **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "transport": "tcp",
+                "app": "ldap", "operation": "search_request", "message_id": mid, "bind_name": None,
+                "base": _first(row, "ldap.baseObject") or "", "scope": LDAP_SCOPES.get(_int(_first(row, "ldap.scope"))),
+                "filter": filt, "entries": 0, "result": None, "request_frame": number, "response_frame": None}
+            self.ldap.append(record)
+            self.ldap_pending[(key, mid)] = record
+            return
+        record = self.ldap_pending.get((key, mid))
+        objects = _all(row, "ldap.objectName")
+        if objects and record is not None:           # searchResultEntry messages
+            record["entries"] += len(objects)
+        codes = _all(row, "ldap.resultCode")
+        if codes and record is not None:             # searchResultDone
+            code = _int(codes[-1])
+            record["result"] = "success" if code == 0 else f"error_{code}"
+            record["response_frame"] = number
+            self.ldap_pending.pop((key, mid), None)
 
     # -- tls ---------------------------------------------------------------------------
     def _tls(self, row, key, number, epoch, conn) -> None:
@@ -1014,12 +1061,14 @@ class _Exporter:
         msg_type = _int(_first(row, "kerberos.msg_type"))
         names = _all(row, "kerberos.SNameString")
         client = _first(row, "kerberos.CNameString") or None
+        etypes = [int(e) for e in _all(row, "kerberos.ENCTYPE")]
         if msg_type in KRB_REQUESTS:
             record = {
                 **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "transport": transport,
                 "app": "kerberos", "request_type": KRB_REQUESTS[msg_type], "client": client,
                 "realm": _first(row, "kerberos.realm") or None,
                 "service": "/".join(names) if msg_type == 10 and names else None,
+                "etype": etypes or None, "etype_first": etypes[0] if etypes else None,
                 "preauth": (str(PA_ENC_TIMESTAMP) in _all(row, "kerberos.padata_type")) if msg_type == 10 else None,
                 "result": None, "error": None, "error_code": None, "response_time_ms": None,
                 "request_frame": number, "response_frame": None,
@@ -1040,6 +1089,7 @@ class _Exporter:
                 **_stamp(epoch), "src": conn["dest"], "src_port": conn["dest_port"], "dest": conn["src"],
                 "dest_port": conn["src_port"], "src_mac": None, "transport": transport, "app": "kerberos",
                 "request_type": KRB_REPLIES.get(msg_type), "client": None, "realm": None, "service": None,
+                "etype": None, "etype_first": None,
                 "preauth": None, "result": None, "error": None, "error_code": None, "response_time_ms": None,
                 "request_frame": None,
             }

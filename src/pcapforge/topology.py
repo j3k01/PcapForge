@@ -119,7 +119,7 @@ class Topology:
     def __init__(self, scenario_doc: dict, vars_: dict, world_rng: Rng) -> None:
         topo = scenario_doc["topology"]
         ctx = {"vars": vars_}
-        self.sensor: str = topo["sensor"]
+        self.sensor: str = resolve(topo["sensor"], ctx)
         self.subnet_specs = {s["id"]: s for s in topo["subnets"]}
         self.subnets: dict[str, Subnet] = {}
         self.hosts: list[Host] = []

@@ -1,0 +1,352 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-kerberoasting
+title: Kerberoasting on the office domain
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, kerberos, kerberoasting, active-directory, windows, credential-access, service-accounts, rc4]
+summary: >
+  The office-LAN baseline (DHCP, DNS, HTTPS to the intranet, WSUS, Active Directory) with a
+  Kerberoasting incident on top. A domain user on a managed workstation logs on normally and then,
+  in a burst, asks the domain controller for Kerberos service tickets (TGS-REQ) for many service
+  accounts' Service Principal Names, requesting RC4-HMAC (etype 23) where a Windows client offers
+  AES first. The KDC answers with RC4-encrypted service tickets an attacker would crack offline.
+  easy requests many SPNs in seconds, RC4 only, from one host; medium requests fewer, interleaved
+  with legitimate AES service tickets; hard spreads the requests low-and-slow across the whole
+  capture with the user also doing normal domain work. Everything is a benign local simulation on
+  127.77.0.0/16: the observable pattern of bulk service-ticket requests, no cracking and no real
+  cryptography (opaque ticket bytes).
+
+briefing: |
+  You are in the SOC of {site_name} ({domain}). The attached capture comes from the SPAN port of
+  the office access switch ({sensor_subnet}). The normal office traffic is here - DHCP, name
+  resolution, intranet HTTPS, Windows Update and the domain's Kerberos/LDAP/SMB - but a detection
+  rule fired on an unusual run of Kerberos service-ticket requests. A normal logon asks the KDC for
+  a handful of service tickets (LDAP to a domain controller, CIFS for a file share) using AES
+  encryption. Watch for a single host asking for a long run of service tickets for different
+  services and requesting the legacy RC4 cipher. Find the host and account behind it, scope which
+  services were requested, and determine what the attacker was after.
+
+mitre:
+  - {framework: enterprise, id: T1558.003, name: "Steal or Forge Kerberos Tickets: Kerberoasting"}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [office, servers], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+    # A managed office workstation whose signed-in user runs the Kerberoasting (an authenticated
+    # insider / a compromised account); it is a normal domain member in the asset inventory.
+    - {id: roaster, device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-3001", role: workstation}
+
+actors:
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: [ws, roaster]
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, newpc, roaster]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, newpc, roaster]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, newpc, roaster]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # Active Directory: the domain controller serves Kerberos / LDAP / SYSVOL with a set of service
+  # accounts (SPNs) the roasting targets; the members refresh Group Policy and an employee logs on.
+  - id: domain_service
+    type: ad.dc
+    hosts: dc
+    params: {directory: {service_accounts: "${vars.svc_accounts}"}}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, newpc, roaster]
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, newpc, roaster]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, newpc, roaster]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+  # The incident: the signed-in user requests RC4 service tickets for many service accounts' SPNs.
+  - id: roast
+    type: kerberos.roast
+    hosts: roaster
+    incident: true
+    params:
+      dc: dc
+      targets: "${vars.roast_spns}"
+      normal_tickets: "${vars.roast_normal}"
+      start: "${vars.roast_start}"
+      spread: "${vars.roast_spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      svc_accounts: 10
+      roast_spns: 10
+      roast_normal: 0
+      roast_start: [0.3, 0.45]
+      roast_spread: 0.03
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 33, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      svc_accounts: 12
+      roast_spns: 6
+      roast_normal: 4
+      roast_start: [0.3, 0.5]
+      roast_spread: 0.15
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 133, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      svc_accounts: 12
+      roast_spns: 8
+      roast_normal: 6
+      roast_start: [0.15, 0.3]
+      roast_spread: 0.75
+
+questions:
+  - id: roaster_ip
+    text: Which host requested the run of RC4 Kerberos service tickets? Give its IP address.
+    answer: "${facts.roast.source.ip}"
+    type: ip
+    points: 15
+    hint: >-
+      A Kerberos service-ticket request is a TGS-REQ (kerberos.msg_type == 10 for AS, 12 for TGS).
+      Look for one host whose TGS-REQs list only RC4-HMAC (kerberos.ENCTYPE == 23) and never AES
+      (ENCTYPE 18), for many different services.
+    check:
+      filter: "kerberos.msg_type == 12 && kerberos.ENCTYPE == 23 && !(kerberos.ENCTYPE == 18) && ip.src == ${facts.roast.source.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=TGS etype_first=23 | stats dc(service) AS spns, min(ts) AS first BY src, client | sort - spns"
+      kql: "request_type : \"TGS\" and etype_first : 23"
+      zeek: {log: kerberos, where: {request_type: TGS, cipher: rc4-hmac}, count_by: [id.orig_h]}
+      look_for: One source requesting RC4 (etype 23) service tickets for many distinct services (SPNs).
+  - id: roaster_account
+    text: Which domain account (user) was signed in on that host and drove the requests?
+    answer: "${facts.roast.user}"
+    accept: ["${facts.roast.user}"]
+    type: text
+    points: 15
+    hint: >-
+      The user logged on with a Kerberos AS exchange (kerberos.msg_type == 10) carrying an encrypted
+      pre-authentication timestamp (padata type 2). Read the client name of the AS-REQ from that host.
+    check:
+      filter: "kerberos.msg_type == 10 && kerberos.padata_type == 2 && kerberos.CNameString == \"${facts.roast.user}\" && ip.src == ${facts.roast.source.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=TGS etype_first=23 src=${facts.roast.source.ip} | stats dc(service) AS spns BY client, src"
+      kql: "request_type : \"TGS\" and etype_first : 23 and src : \"${facts.roast.source.ip}\""
+      zeek: {log: kerberos, where: {request_type: TGS, cipher: rc4-hmac}, count_by: [client]}
+      look_for: The client name on the RC4 TGS exchanges from that host (the reply names the account).
+  - id: spn_count
+    text: For how many distinct services (SPNs) did the host request RC4 tickets?
+    answer: "${facts.roast.spn_count}"
+    type: number
+    points: 15
+    hint: Count the distinct service principal names in the host's RC4-only TGS-REQs.
+    check:
+      filter: "kerberos.msg_type == 12 && kerberos.ENCTYPE == 23 && !(kerberos.ENCTYPE == 18) && ip.src == ${facts.roast.source.ip}"
+      expect: {min: "${facts.roast.spn_count}"}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=TGS etype_first=23 src=${facts.roast.source.ip} | stats dc(service) AS spns"
+      kql: "request_type : \"TGS\" and etype_first : 23 and src : \"${facts.roast.source.ip}\""
+      zeek: {log: kerberos, where: {request_type: TGS, cipher: rc4-hmac, id.orig_h: "${facts.roast.source.ip}"}, count_by: [service]}
+      look_for: The number of distinct services the host requested RC4 tickets for.
+  - id: etype
+    text: Which Kerberos encryption type (etype number) did the host request for the service tickets?
+    answer: "${facts.roast.etype}"
+    type: number
+    points: 10
+    hint: Read the Encryption Type list in the TGS-REQ body (kerberos.ENCTYPE). 23 is RC4-HMAC; Windows normally requests 18 (AES256).
+    check:
+      filter: "kerberos.msg_type == 12 && kerberos.ENCTYPE == 23 && !(kerberos.ENCTYPE == 18) && ip.src == ${facts.roast.source.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=TGS src=${facts.roast.source.ip} | stats count BY etype_first"
+      kql: "request_type : \"TGS\" and etype_first : 23 and src : \"${facts.roast.source.ip}\""
+      look_for: etype_first 23 is RC4-HMAC - the legacy cipher a roasting tool asks for so the ticket can be cracked offline.
+  - id: first_request
+    text: At what time (UTC) was the first RC4 service-ticket request sent?
+    answer: "${facts.roast.first_request.time}"
+    type: timestamp
+    tolerance_s: 2
+    points: 10
+    check:
+      filter: "frame.number == ${facts.roast.first_request.frame} && kerberos.msg_type == 12 && kerberos.ENCTYPE == 23 && ip.src == ${facts.roast.source.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=TGS etype_first=23 src=${facts.roast.source.ip} | sort 0 epoch | head 1 | table ts client service"
+      kql: "request_type : \"TGS\" and etype_first : 23 and src : \"${facts.roast.source.ip}\""
+      look_for: The earliest RC4 TGS-REQ from the host - the start of the roast.
+  - id: target_service
+    text: Name one service (its SPN) the host requested an RC4 ticket for.
+    answer: "${facts.roast.target_spn}"
+    accept: ["${facts.roast.target_spn}", "${facts.roast.target_spn_host}"]
+    type: text
+    points: 15
+    hint: The TGS-REQ's Server Name (kerberos.SNameString) is the SPN, e.g. MSSQLSvc/<host>:1433 or HTTP/<host>.
+    check:
+      filter: "kerberos.msg_type == 12 && kerberos.ENCTYPE == 23 && kerberos.SNameString == \"${facts.roast.target_spn_class}\" && kerberos.SNameString == \"${facts.roast.target_spn_host}\" && ip.src == ${facts.roast.source.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=TGS etype_first=23 src=${facts.roast.source.ip} | stats count BY service"
+      kql: "request_type : \"TGS\" and etype_first : 23 and src : \"${facts.roast.source.ip}\""
+      zeek: {log: kerberos, where: {request_type: TGS, cipher: rc4-hmac, id.orig_h: "${facts.roast.source.ip}"}, count_by: [service]}
+      look_for: The SPNs (service field) of the host's RC4 TGS requests; each names a service account's service.
+
+translations:
+  pl:
+    title: Kerberoasting w domenie biurowej
+    briefing: |
+      Jesteś w SOC {site_name} ({domain}). Przechwycenie pochodzi z portu SPAN przełącznika
+      dostępowego biura ({sensor_subnet}). Jest tu normalny ruch biurowy - DHCP, rozwiązywanie
+      nazw, intranet po HTTPS, Windows Update oraz Kerberos/LDAP/SMB domeny - ale reguła wykryła
+      nietypową serię żądań biletów usługowych Kerberos. Normalne logowanie prosi KDC o kilka
+      biletów usługowych (LDAP do kontrolera domeny, CIFS do udziału plików) szyfrowanych AES.
+      Zwróć uwagę na pojedynczy host proszący o długą serię biletów do różnych usług i żądający
+      przestarzałego szyfru RC4. Znajdź host i konto za tym stojące, ustal, o które usługi
+      proszono, i określ, co było celem atakującego.
+    questions:
+      roaster_ip:
+        text: Który host zażądał serii biletów usługowych Kerberos z RC4? Podaj jego adres IP.
+        hint: >-
+          Żądanie biletu usługowego to TGS-REQ (kerberos.msg_type == 10 dla AS, 12 dla TGS). Szukaj
+          hosta, którego TGS-REQ wymieniają tylko RC4-HMAC (kerberos.ENCTYPE == 23), nigdy AES
+          (ENCTYPE 18), dla wielu różnych usług.
+      roaster_account:
+        text: Które konto domenowe (użytkownik) było zalogowane na tym hoście i napędzało żądania?
+        hint: >-
+          Użytkownik zalogował się wymianą AS Kerberos (kerberos.msg_type == 10) ze zaszyfrowanym
+          znacznikiem czasu wstępnego uwierzytelnienia (padata typ 2). Odczytaj nazwę klienta AS-REQ
+          z tego hosta.
+      spn_count:
+        text: Dla ilu różnych usług (SPN) host zażądał biletów RC4?
+        hint: Policz różne nazwy SPN w żądaniach TGS-REQ hosta używających tylko RC4.
+      etype:
+        text: Którego typu szyfrowania Kerberos (numer etype) host zażądał dla biletów usługowych?
+        hint: Odczytaj listę Encryption Type w ciele TGS-REQ (kerberos.ENCTYPE). 23 to RC4-HMAC; Windows zwykle prosi o 18 (AES256).
+      first_request:
+        text: O której godzinie (UTC) wysłano pierwsze żądanie biletu usługowego RC4?
+        hint: Najwcześniejsze TGS-REQ z RC4 z tego hosta to początek roastu.
+      target_service:
+        text: Podaj jedną usługę (jej SPN), dla której host zażądał biletu RC4.
+        hint: Nazwa serwera w TGS-REQ (kerberos.SNameString) to SPN, np. MSSQLSvc/<host>:1433 albo HTTP/<host>.
+  de:
+    title: Kerberoasting in der Büro-Domäne
+    briefing: |
+      Sie sind im SOC von {site_name} ({domain}). Die Aufzeichnung stammt vom SPAN-Port des
+      Büro-Zugangsswitches ({sensor_subnet}). Der normale Büroverkehr ist hier - DHCP,
+      Namensauflösung, Intranet über HTTPS, Windows Update sowie Kerberos/LDAP/SMB der Domäne -
+      aber eine Regel hat eine ungewöhnliche Folge von Kerberos-Dienstticket-Anfragen gemeldet.
+      Eine normale Anmeldung fragt das KDC nach einigen Diensttickets (LDAP zu einem Domänencontroller,
+      CIFS für eine Dateifreigabe) mit AES-Verschlüsselung. Achten Sie auf einen einzelnen Host, der
+      eine lange Folge von Tickets für verschiedene Dienste anfordert und die veraltete RC4-Chiffre
+      verlangt. Finden Sie Host und Konto dahinter, ermitteln Sie, welche Dienste angefragt wurden,
+      und bestimmen Sie, worauf der Angreifer aus war.
+    questions:
+      roaster_ip:
+        text: Welcher Host hat die Folge von RC4-Kerberos-Diensttickets angefordert? Geben Sie seine IP-Adresse an.
+        hint: >-
+          Eine Diensticket-Anfrage ist ein TGS-REQ (kerberos.msg_type == 10 für AS, 12 für TGS).
+          Suchen Sie einen Host, dessen TGS-REQs nur RC4-HMAC (kerberos.ENCTYPE == 23) und nie AES
+          (ENCTYPE 18) auflisten, für viele verschiedene Dienste.
+      roaster_account:
+        text: Welches Domänenkonto (Benutzer) war auf diesem Host angemeldet und trieb die Anfragen?
+        hint: >-
+          Der Benutzer meldete sich mit einem Kerberos-AS-Austausch (kerberos.msg_type == 10) mit
+          verschlüsseltem Vorauthentifizierungs-Zeitstempel (padata Typ 2) an. Lesen Sie den
+          Client-Namen des AS-REQ von diesem Host.
+      spn_count:
+        text: Für wie viele verschiedene Dienste (SPNs) hat der Host RC4-Tickets angefordert?
+        hint: Zählen Sie die verschiedenen SPNs in den RC4-only-TGS-REQs des Hosts.
+      etype:
+        text: Welchen Kerberos-Verschlüsselungstyp (etype-Nummer) hat der Host für die Diensttickets angefordert?
+        hint: Lesen Sie die Encryption-Type-Liste im TGS-REQ-Body (kerberos.ENCTYPE). 23 ist RC4-HMAC; Windows fragt normalerweise 18 (AES256) an.
+      first_request:
+        text: Wann (UTC) wurde die erste RC4-Diensticket-Anfrage gesendet?
+        hint: Der früheste RC4-TGS-REQ von diesem Host ist der Beginn des Roasts.
+      target_service:
+        text: Nennen Sie einen Dienst (seinen SPN), für den der Host ein RC4-Ticket angefordert hat.
+        hint: Der Servername im TGS-REQ (kerberos.SNameString) ist der SPN, z. B. MSSQLSvc/<host>:1433 oder HTTP/<host>.

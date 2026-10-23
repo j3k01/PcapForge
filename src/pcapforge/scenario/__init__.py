@@ -139,8 +139,9 @@ def validate(doc: dict, source: str = "<scenario>") -> None:
         raise ScenarioError(f"{source} is not a valid scenario:\n" + "\n".join(lines))
     hosts = {h["id"] for h in doc["topology"]["hosts"]}
     subnets = {s["id"] for s in doc["topology"]["subnets"]}
-    if doc["topology"]["sensor"] not in subnets:
-        raise ScenarioError(f"{source}: sensor subnet '{doc['topology']['sensor']}' is not defined")
+    sensor = doc["topology"]["sensor"]
+    if "${" not in str(sensor) and sensor not in subnets:
+        raise ScenarioError(f"{source}: sensor subnet '{sensor}' is not defined")
     for host in doc["topology"]["hosts"]:
         for subnet in host.get("subnets", [host.get("subnet")]):
             if subnet not in subnets and "${" not in str(subnet):

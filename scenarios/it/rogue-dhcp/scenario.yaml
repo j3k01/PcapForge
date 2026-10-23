@@ -1,0 +1,419 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-rogue-dhcp
+title: Rogue DHCP server on the office LAN
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, dhcp, dhcp-spoofing, rogue-dhcp, aitm, mitm, active-directory, windows, raspberry-pi]
+summary: >
+  The office-LAN baseline (Windows Server DHCP behind the firewall's relay, DNS, HTTPS to the
+  intranet, WSUS, Active Directory) with a rogue DHCP server on top. A small unmanaged device on the
+  office segment (a Raspberry Pi running dnsmasq) answers clients' Discovers and Requests before the
+  legitimate server's relayed Offer arrives, so hosts that join during the capture take its lease and
+  come up with the rogue's own default gateway and DNS resolver. On easy the rogue is obvious (a
+  Raspberry Pi OUI and a wrong subnet mask) and several new PCs take it; on medium it blends in (a
+  plausible lease and mask, only the router and DNS differ) and the affected hosts do a few lookups
+  against the rogue resolver; on hard it appears late, affects a single host and hands out a very
+  short lease. Everything is a benign local simulation on 127.77.0.0/16: the observable pattern of
+  DHCP spoofing, no attack tooling, no interception of real traffic.
+
+briefing: |
+  You are in the SOC of {site_name} ({domain}). The attached capture comes from the SPAN port of the
+  office access switch ({sensor_subnet}). The normal office traffic is here - DHCP, name resolution,
+  intranet HTTPS, Windows Update and the domain's Kerberos/LDAP/SMB. Addresses on this LAN are handed
+  out by the Windows Server DHCP role on the domain controller, reached through the firewall's DHCP
+  relay, so its Offers and ACKs arrive on this segment from the relay. A monitoring rule fired on a
+  DHCP Offer that did not come from the relay, and the helpdesk reports that a couple of freshly
+  imaged PCs came up with a default gateway and DNS server nobody recognises. Find the device that is
+  answering DHCP on this LAN, read the configuration it hands out, work out which hosts accepted its
+  lease, and contrast it with the legitimate server so you can tell the two apart.
+
+mitre:
+  - {framework: enterprise, id: T1557, name: Adversary-in-the-Middle}
+  - {framework: enterprise, id: T1557.003, name: "Adversary-in-the-Middle: DHCP Spoofing"}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [office, servers], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+    # Freshly imaged PCs that join during the capture and accept the first Offer they see.
+    - {id: victim, count: "${vars.victim_count}", device: windows-workstation, subnet: office, name: "WS-{CODE}-05{index:02d}", role: workstation, inventory: false}
+    # The rogue: an unmanaged Raspberry Pi running dnsmasq, plugged into the office segment.
+    - {id: rogue, device: raspberry-pi, subnet: office, name: raspberrypi, inventory: false}
+
+actors:
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: ws
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, newpc]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, newpc]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, newpc]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, newpc]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, newpc]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, newpc]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+  # The incident: a rogue DHCP server (dnsmasq on a Raspberry Pi) answering on the office segment,
+  # handing out itself as the router and DNS resolver, and the hosts that join and take its lease.
+  - id: rogue_dhcp
+    type: dhcp.server
+    hosts: rogue
+    incident: true
+    params:
+      subnet: office
+      rogue: true
+      style: dnsmasq
+      router: rogue
+      dns: rogue
+      mask: "${vars.rogue_mask}"
+      lease: "${vars.rogue_lease}"
+  - id: rogue_lease
+    type: dhcp.client
+    hosts: victim
+    incident: true
+    params: {server: rogue, join: "${vars.rogue_join}"}
+  # The rogue's own resolver answers the few lookups the affected hosts make (medium/hard).
+  - id: rogue_resolver
+    type: dns.server
+    hosts: rogue
+    when: vars.rogue_dns
+  - id: rogue_lookups
+    type: dns.client
+    hosts: victim
+    when: vars.rogue_dns
+    params: {server: rogue, per_hour: [6, 12]}
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: false
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      victim_count: 2
+      rogue_mask: 23
+      rogue_mask_differs: true
+      rogue_lease: 1h
+      rogue_join: [0.1, 0.4]
+      rogue_dns: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 32, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      victim_count: 2
+      rogue_mask: 24
+      rogue_mask_differs: false
+      rogue_lease: 8h
+      rogue_join: [0.2, 0.6]
+      rogue_dns: true
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 132, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      victim_count: 1
+      rogue_mask: 24
+      rogue_mask_differs: false
+      rogue_lease: 2m
+      rogue_join: [0.7, 0.9]
+      rogue_dns: true
+
+questions:
+  - id: rogue_server_ip
+    text: Which IP address is answering DHCP on this LAN besides the legitimate server (the rogue DHCP server)?
+    answer: "${facts.rogue_dhcp.hosts[0].ip}"
+    type: ip
+    points: 15
+    hint: >-
+      The legitimate replies arrive from the relay agent. A second source sends Offers and ACKs from
+      its own address on this segment; its DHCP Server Identifier (option 54) is that same address.
+    check:
+      filter: "dhcp.option.dhcp in {2, 5} && dhcp.option.dhcp_server_id == ${facts.rogue_dhcp.hosts[0].ip} && ip.src == ${facts.rogue_dhcp.hosts[0].ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message IN (offer, ack) server_id!=\"${facts.dhcp_service.hosts[0].ip}\" | stats count BY server_id, src, eth_src"
+      kql: "message : (\"offer\" or \"ack\") and not server_id : \"${facts.dhcp_service.hosts[0].ip}\""
+      zeek: {log: dhcp, count_by: [server_addr]}
+      look_for: >-
+        Offers and ACKs whose server identifier (option 54) is not the legitimate server; the rogue
+        sends them from its own address on this segment (Zeek's server_addr), not from the relay.
+  - id: rogue_server_mac
+    text: What is the MAC address of the rogue DHCP server?
+    answer: "${facts.rogue_dhcp.hosts[0].observed_mac}"
+    type: mac
+    points: 10
+    hint: The rogue is on this segment, so its Offers and ACKs carry its own Ethernet source address (no relay, no gateway MAC).
+    check:
+      filter: "dhcp.option.dhcp in {2, 5} && dhcp.option.dhcp_server_id == ${facts.rogue_dhcp.hosts[0].ip} && eth.src == ${facts.rogue_dhcp.hosts[0].observed_mac}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message IN (offer, ack) server_id!=\"${facts.dhcp_service.hosts[0].ip}\" | stats count BY eth_src, server_id"
+      kql: "message : (\"offer\" or \"ack\") and not server_id : \"${facts.dhcp_service.hosts[0].ip}\""
+      look_for: The Ethernet source (eth_src) of the rogue's Offers and ACKs.
+  - id: rogue_vendor
+    text: Which hardware vendor does the rogue server's MAC address belong to?
+    answer: "${facts.rogue_dhcp.hosts[0].vendor}"
+    accept: ["${facts.rogue_dhcp.hosts[0].vendor}", "Raspberry Pi"]
+    type: text
+    points: 10
+    hint: The first three octets of a MAC (the OUI) identify the manufacturer; tshark resolves it in the frame.
+    check:
+      filter: "dhcp.option.dhcp in {2, 5} && dhcp.option.dhcp_server_id == ${facts.rogue_dhcp.hosts[0].ip} && eth.src == ${facts.rogue_dhcp.hosts[0].observed_mac}"
+      expect: {min: 1}
+  - id: rogue_router
+    text: Which default gateway (router, option 3) does the rogue server hand out? Give its IP address.
+    answer: "${facts.rogue_dhcp.router.ip}"
+    type: ip
+    points: 10
+    hint: Read the Router option of a rogue Offer or ACK and compare it with the gateway the legitimate server gives.
+    check:
+      filter: "dhcp.option.dhcp in {2, 5} && dhcp.option.dhcp_server_id == ${facts.rogue_dhcp.hosts[0].ip} && dhcp.option.router == ${facts.rogue_dhcp.router.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message IN (offer, ack) server_id!=\"${facts.dhcp_service.hosts[0].ip}\" | stats count BY server_id, router{}"
+      kql: "message : (\"offer\" or \"ack\") and not server_id : \"${facts.dhcp_service.hosts[0].ip}\""
+      look_for: The Router option (3) of the rogue's replies - it points at the rogue itself, not the firewall.
+  - id: rogue_dns
+    text: Which DNS server (option 6) does the rogue hand out? Give its IP address.
+    answer: "${facts.rogue_dhcp.dns.ip}"
+    type: ip
+    points: 10
+    hint: The Domain Name Server option of a rogue reply names the resolver the affected hosts will use.
+    check:
+      filter: "dhcp.option.dhcp in {2, 5} && dhcp.option.dhcp_server_id == ${facts.rogue_dhcp.hosts[0].ip} && dhcp.option.domain_name_server == ${facts.rogue_dhcp.dns.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message IN (offer, ack) server_id!=\"${facts.dhcp_service.hosts[0].ip}\" | stats count BY server_id, dns_servers{}"
+      kql: "message : (\"offer\" or \"ack\") and not server_id : \"${facts.dhcp_service.hosts[0].ip}\""
+      look_for: The Domain Name Server option (6) of the rogue's replies - the resolver the affected hosts adopt.
+  - id: rogue_mask
+    when: vars.rogue_mask_differs
+    text: Which subnet mask (option 1) does the rogue hand out, which differs from the real /24 of this segment?
+    answer: "${facts.rogue_dhcp.mask}"
+    accept: ["${facts.rogue_dhcp.mask}"]
+    type: text
+    points: 10
+    hint: Compare the Subnet Mask option of a rogue Offer with the mask the legitimate server grants.
+    check:
+      filter: "dhcp.option.dhcp in {2, 5} && dhcp.option.dhcp_server_id == ${facts.rogue_dhcp.hosts[0].ip} && dhcp.option.subnet_mask == ${facts.rogue_dhcp.mask}"
+      expect: {min: 1}
+  - id: affected_clients
+    text: Which hosts accepted a lease from the rogue server? Give their host names.
+    answer: "${facts.rogue_lease.names}"
+    type: set
+    points: 15
+    hint: >-
+      A client that selected the rogue sends a broadcast DHCP Request naming the rogue in the Server
+      Identifier (option 54); its Host Name option (12) is the host.
+    foreach: facts.rogue_lease.clients
+    check:
+      filter: 'dhcp.option.dhcp == 3 && dhcp.option.dhcp_server_id == ${facts.rogue_dhcp.hosts[0].ip} && dhcp.option.hostname == "${item.host.name}"'
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message=request server_id=\"${facts.rogue_dhcp.hosts[0].ip}\" | stats count BY host_name, client_mac, server_id"
+      kql: "message : \"request\" and server_id : \"${facts.rogue_dhcp.hosts[0].ip}\""
+      zeek: {log: dhcp, where: {server_addr: "${facts.rogue_dhcp.hosts[0].ip}"}, show: [mac, host_name, assigned_addr]}
+      look_for: The clients whose Request selected the rogue (server identifier = the rogue); their host names and the addresses they took.
+  - id: first_offer
+    text: At what time (UTC) did the rogue DHCP server send its first Offer (its first reply to a client)?
+    answer: "${facts.rogue_lease.first_join.time}"
+    type: timestamp
+    tolerance_s: 2
+    points: 10
+    hint: Find the earliest DHCP Offer whose server identifier is the rogue; it follows the first Discover it answered.
+    check:
+      filter: "dhcp.option.dhcp == 2 && dhcp.option.dhcp_server_id == ${facts.rogue_dhcp.hosts[0].ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message=offer server_id=\"${facts.rogue_dhcp.hosts[0].ip}\" | sort 0 epoch | head 1 | table ts server_id assigned_addr"
+      kql: "message : \"offer\" and server_id : \"${facts.rogue_dhcp.hosts[0].ip}\""
+      look_for: The earliest Offer from the rogue server.
+  - id: legit_server_id
+    text: For contrast, what is the server identifier (option 54) of the legitimate DHCP server on this LAN?
+    answer: "${facts.dhcp_service.hosts[0].ip}"
+    type: ip
+    points: 10
+    hint: The legitimate Offers and ACKs arrive from the relay but name the real server (the domain controller) in option 54.
+    check:
+      filter: "dhcp.option.dhcp in {2, 5} && dhcp.option.dhcp_server_id == ${facts.dhcp_service.hosts[0].ip} && ip.src == ${facts.dhcp_service.relay.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message IN (offer, ack) | stats count BY server_id, relay_addr, src"
+      kql: "message : (\"offer\" or \"ack\") and relay_addr : *"
+      zeek: {log: dhcp, count_by: [server_addr]}
+      look_for: The server identifier of the Offers and ACKs that come through the relay - the legitimate Windows Server DHCP.
+
+translations:
+  pl:
+    title: Nieautoryzowany serwer DHCP w sieci biurowej
+    briefing: |
+      Jesteś w SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu SPAN
+      przełącznika dostępowego sieci biurowej ({sensor_subnet}). Jest tu normalny ruch biurowy - DHCP,
+      rozwiązywanie nazw, HTTPS do intranetu, Windows Update oraz domenowy Kerberos/LDAP/SMB. Adresy w
+      tej sieci przydziela rola Windows Server DHCP na kontrolerze domeny, osiągana przez agenta
+      przekazującego DHCP na zaporze, więc jej Offer i ACK trafiają na ten segment od agenta. Reguła
+      monitorująca zareagowała na Offer DHCP, który nie pochodził od agenta, a helpdesk zgłasza, że
+      kilka świeżo przygotowanych komputerów uruchomiło się z bramą domyślną i serwerem DNS, których
+      nikt nie rozpoznaje. Znajdź urządzenie odpowiadające na DHCP w tej sieci, odczytaj konfigurację,
+      którą rozdaje, ustal, które hosty przyjęły jego dzierżawę, i zestaw je z legalnym serwerem, aby
+      odróżnić jeden od drugiego.
+    questions:
+      rogue_server_ip:
+        text: Który adres IP, poza legalnym serwerem, odpowiada na DHCP w tej sieci (nieautoryzowany serwer DHCP)?
+        hint: Legalne odpowiedzi przychodzą od agenta przekazującego. Drugie źródło wysyła Offer i ACK z własnego adresu w tym segmencie; jego identyfikator serwera DHCP (opcja 54) to ten sam adres.
+      rogue_server_mac:
+        text: Jaki jest adres MAC nieautoryzowanego serwera DHCP?
+        hint: Nieautoryzowany serwer jest w tym segmencie, więc jego Offer i ACK niosą jego własny adres źródłowy Ethernet (bez przekazywania, bez MAC bramy).
+      rogue_vendor:
+        text: Do którego producenta sprzętu należy adres MAC nieautoryzowanego serwera?
+        hint: Pierwsze trzy oktety adresu MAC (OUI) identyfikują producenta; tshark rozwiązuje go w ramce.
+      rogue_router:
+        text: Którą bramę domyślną (router, opcja 3) rozdaje nieautoryzowany serwer? Podaj jej adres IP.
+        hint: Odczytaj opcję Router w Offer lub ACK od nieautoryzowanego serwera i porównaj z bramą, którą daje legalny serwer.
+      rogue_dns:
+        text: Który serwer DNS (opcja 6) rozdaje nieautoryzowany serwer? Podaj jego adres IP.
+        hint: Opcja Domain Name Server w odpowiedzi od nieautoryzowanego serwera wskazuje resolver, którego użyją dotknięte hosty.
+      rogue_mask:
+        text: Którą maskę podsieci (opcja 1) rozdaje nieautoryzowany serwer, różną od rzeczywistej /24 tego segmentu?
+        hint: Porównaj opcję Subnet Mask w Offer od nieautoryzowanego serwera z maską, którą przyznaje legalny serwer.
+      affected_clients:
+        text: Które hosty przyjęły dzierżawę od nieautoryzowanego serwera? Podaj ich nazwy hostów.
+        hint: Klient, który wybrał nieautoryzowany serwer, wysyła rozgłoszeniowy DHCP Request z nieautoryzowanym serwerem w identyfikatorze serwera (opcja 54); jego opcja Host Name (12) to ten host.
+      first_offer:
+        text: O której godzinie (UTC) nieautoryzowany serwer DHCP wysłał swój pierwszy Offer (pierwszą odpowiedź do klienta)?
+        hint: Znajdź najwcześniejszy DHCP Offer, którego identyfikatorem serwera jest nieautoryzowany serwer; następuje on po pierwszym Discover, na który odpowiedział.
+      legit_server_id:
+        text: Dla kontrastu, jaki jest identyfikator serwera (opcja 54) legalnego serwera DHCP w tej sieci?
+        hint: Legalne Offer i ACK przychodzą od agenta przekazującego, ale w opcji 54 nazywają rzeczywisty serwer (kontroler domeny).
+  de:
+    title: Nicht autorisierter DHCP-Server im Büronetz
+    briefing: |
+      Sie sind im SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom SPAN-Port des
+      Büro-Access-Switches ({sensor_subnet}). Der normale Büroverkehr ist hier - DHCP, Namensauflösung,
+      Intranet-HTTPS, Windows Update sowie das Kerberos/LDAP/SMB der Domäne. Adressen in diesem LAN
+      vergibt die Windows-Server-DHCP-Rolle auf dem Domänencontroller, erreicht über den DHCP-Relay der
+      Firewall, sodass ihre Offers und ACKs auf diesem Segment vom Relay eintreffen. Eine
+      Überwachungsregel hat auf ein DHCP-Offer ausgelöst, das nicht vom Relay kam, und der Helpdesk
+      meldet, dass einige frisch aufgesetzte PCs mit einem Standardgateway und DNS-Server hochgefahren
+      sind, die niemand kennt. Finden Sie das Gerät, das in diesem LAN auf DHCP antwortet, lesen Sie die
+      Konfiguration, die es verteilt, ermitteln Sie, welche Hosts seine Lease angenommen haben, und
+      stellen Sie es dem legitimen Server gegenüber, um beide auseinanderzuhalten.
+    questions:
+      rogue_server_ip:
+        text: Welche IP-Adresse antwortet neben dem legitimen Server auf DHCP in diesem LAN (der nicht autorisierte DHCP-Server)?
+        hint: Die legitimen Antworten kommen vom Relay-Agenten. Eine zweite Quelle sendet Offers und ACKs von ihrer eigenen Adresse auf diesem Segment; ihr DHCP-Server-Identifier (Option 54) ist dieselbe Adresse.
+      rogue_server_mac:
+        text: Wie lautet die MAC-Adresse des nicht autorisierten DHCP-Servers?
+        hint: Der nicht autorisierte Server ist auf diesem Segment, also tragen seine Offers und ACKs seine eigene Ethernet-Quelladresse (kein Relay, keine Gateway-MAC).
+      rogue_vendor:
+        text: Zu welchem Hardwarehersteller gehört die MAC-Adresse des nicht autorisierten Servers?
+        hint: Die ersten drei Oktette einer MAC (die OUI) identifizieren den Hersteller; tshark löst ihn im Frame auf.
+      rogue_router:
+        text: Welches Standardgateway (Router, Option 3) verteilt der nicht autorisierte Server? Geben Sie seine IP-Adresse an.
+        hint: Lesen Sie die Router-Option eines Offers oder ACKs des nicht autorisierten Servers und vergleichen Sie sie mit dem Gateway, das der legitime Server vergibt.
+      rogue_dns:
+        text: Welchen DNS-Server (Option 6) verteilt der nicht autorisierte Server? Geben Sie seine IP-Adresse an.
+        hint: Die Domain-Name-Server-Option einer Antwort des nicht autorisierten Servers benennt den Resolver, den die betroffenen Hosts verwenden.
+      rogue_mask:
+        text: Welche Subnetzmaske (Option 1) verteilt der nicht autorisierte Server, die vom echten /24 dieses Segments abweicht?
+        hint: Vergleichen Sie die Subnetzmasken-Option eines Offers des nicht autorisierten Servers mit der Maske, die der legitime Server vergibt.
+      affected_clients:
+        text: Welche Hosts haben eine Lease vom nicht autorisierten Server angenommen? Geben Sie ihre Hostnamen an.
+        hint: Ein Client, der den nicht autorisierten Server gewählt hat, sendet ein Broadcast-DHCP-Request, das den nicht autorisierten Server im Server-Identifier (Option 54) nennt; seine Host-Name-Option (12) ist der Host.
+      first_offer:
+        text: Wann (UTC) sendete der nicht autorisierte DHCP-Server sein erstes Offer (seine erste Antwort an einen Client)?
+        hint: Suchen Sie das früheste DHCP-Offer, dessen Server-Identifier der nicht autorisierte Server ist; es folgt auf das erste Discover, das er beantwortet hat.
+      legit_server_id:
+        text: Wie lautet zum Vergleich der Server-Identifier (Option 54) des legitimen DHCP-Servers in diesem LAN?
+        hint: Die legitimen Offers und ACKs kommen vom Relay-Agenten, nennen aber in Option 54 den echten Server (den Domänencontroller).

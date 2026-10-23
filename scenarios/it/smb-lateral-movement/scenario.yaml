@@ -1,0 +1,381 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-smb-lateral-movement
+title: SMB lateral movement across the office workstations
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, lateral-movement, smb, admin-shares, kerberos, active-directory, windows, valid-accounts]
+summary: >
+  The office-LAN baseline (DHCP, DNS, HTTPS to the intranet, WSUS, Active Directory with Kerberos /
+  LDAP / SMB) with a lateral-movement incident on top. One host authenticates once with a single
+  domain account and then, host after host, asks the KDC for a cifs/<workstation> service ticket and
+  opens an SMB 3.1.1 session to the administrative shares (ADMIN$, IPC$, C$) of many workstations,
+  listing the share and logging off. Easy: every workstation in about a minute from a host that is
+  not in the inventory. Medium: a subset, buried in the normal SYSVOL Group Policy traffic. Hard: a
+  handful of targets over two hours from a legitimate admin workstation, one of which refuses the
+  ADMIN$ connection (STATUS_ACCESS_DENIED). Everything is a benign local simulation on 127.77.0.0/16:
+  the observable pattern of admin-share access with a reused credential, no service install, no remote
+  execution and no attack tooling.
+
+briefing: |
+  You are in the SOC of {site_name} ({domain}). The attached capture comes from the SPAN port of
+  the office access switch ({sensor_subnet}). The normal office traffic is here - DHCP, name
+  resolution, intranet HTTPS, Windows Update and the domain's Kerberos / LDAP / SMB - but EDR also
+  flagged a workstation being reached on its hidden ADMIN$ share. On this network the only SMB a
+  client normally speaks is to the domain controller's SYSVOL share for Group Policy; workstations do
+  not open each other's administrative shares. Find the host doing it, the account it used, how many
+  workstations it reached and in what order, and whether any target refused access.
+
+mitre:
+  - {framework: enterprise, id: T1021.002, name: "Remote Services: SMB/Windows Admin Shares"}
+  - {framework: enterprise, id: T1078.002, name: "Valid Accounts: Domain Accounts"}
+  - {framework: enterprise, id: T1083, name: File and Directory Discovery}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [office, servers], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+    # The source of the lateral movement. On easy/medium it is a host that is not in the asset
+    # inventory (a laptop with a stolen credential); on hard it is a legitimate admin workstation.
+    - {id: byod, device: windows-workstation, subnet: office, name: "nb-{code}-adm", inventory: false, when: "not vars.legit_source"}
+    - {id: jump, device: windows-workstation, subnet: office, name: "WS-{CODE}-ADM1", role: workstation, when: "vars.legit_source"}
+
+actors:
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: ws
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, newpc]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, newpc]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, newpc]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # Active Directory: the DC serves Kerberos / LDAP / SYSVOL and the members refresh Group Policy;
+  # an employee logs on at a PC that booted (a normal, successful Kerberos exchange).
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, newpc]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  # On hard the lateral-movement source is a legitimate admin workstation and refreshes Group Policy
+  # like any other domain member, so its Kerberos / SMB blends into the background.
+  - id: admin_member
+    type: ad.member
+    hosts: jump
+    when: vars.legit_source
+    params: {dc: dc}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, newpc]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, newpc]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+  # The incident: the office workstations get an SMB server role for this scenario, and one source
+  # host reaches their administrative shares with one reused domain account.
+  - id: workstation_smb
+    type: smb.server
+    hosts: [pc, ws]
+    params: {dc: dc, deny: "${vars.deny_target}"}
+  - id: lateral
+    type: smb.lateral
+    hosts: "${vars.source_host}"
+    incident: true
+    params:
+      dc: dc
+      targets: [pc, ws]
+      count: "${vars.targets_hit}"
+      account: "${vars.lateral_account}"
+      start: "${vars.lateral_start}"
+      spread: "${vars.lateral_spread}"
+      deny_target: "${vars.deny_target}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: true
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      legit_source: false
+      source_host: byod
+      targets_hit: all
+      lateral_account: svc_backup
+      lateral_start: [0.15, 0.3]
+      lateral_spread: 0.07
+      deny_target: false
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 32, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      legit_source: false
+      source_host: byod
+      targets_hit: 4
+      lateral_account: {choose: [svc_backup, adm.helpdesk, svc_sccm]}
+      lateral_start: [0.2, 0.4]
+      lateral_spread: 0.4
+      deny_target: false
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 132, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      legit_source: true
+      source_host: jump
+      targets_hit: 3
+      lateral_account: {choose: [adm.desktop, da_jkowalski, t2.admin]}
+      lateral_start: [0.2, 0.45]
+      lateral_spread: 0.85
+      deny_target: ws1
+
+questions:
+  - id: source_host
+    text: Which host opened administrative shares on multiple workstations? Give its IP address.
+    answer: "${facts.lateral.source.ip}"
+    type: ip
+    points: 15
+    hint: >-
+      On this LAN a client's only normal SMB peer is the domain controller's SYSVOL share. Look for one
+      host opening SMB tree connects to the ADMIN$ / C$ shares of several office workstations.
+    check:
+      filter: "smb2.cmd == 3 && smb2.tree contains \"ADMIN$\" && ip.src == ${facts.lateral.source.ip}"
+      expect: {min: "${facts.lateral.target_count}"}
+    hunt:
+      dataset: smb
+      spl: "index=* sourcetype=pcapforge:smb command=tree_connect tree=\"*ADMIN$\" | stats dc(dest) AS targets BY src"
+      kql: "command : \"tree_connect\" and tree : *ADMIN$"
+      zeek: {log: smb_mapping, endswith: {path: ADMIN$}, count_by: [id.orig_h]}
+      look_for: One source opening ADMIN$ tree connects to many workstations; the office baseline has none.
+  - id: lateral_account
+    text: Which domain account did that host authenticate with?
+    answer: "${facts.lateral.account}"
+    accept: ["${facts.lateral.account}"]
+    type: text
+    points: 15
+    hint: >-
+      The access starts with a Kerberos AS exchange (kerberos.msg_type == 10) from that host; its client
+      name is the account. A person's account does not end with "$".
+    check:
+      filter: "kerberos.msg_type == 10 && kerberos.CNameString == \"${facts.lateral.account}\" && ip.src == ${facts.lateral.source.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=AS src=${facts.lateral.source.ip} | stats count BY client, result"
+      kql: "request_type : \"AS\" and src : \"${facts.lateral.source.ip}\""
+      zeek: {log: kerberos, where: {request_type: AS, id.orig_h: "${facts.lateral.source.ip}"}, count_by: [client]}
+      look_for: The client name on the AS exchanges from the source host - the reused domain account.
+  - id: target_count
+    text: How many workstations did it reach on their ADMIN$ share?
+    answer: "${facts.lateral.target_count}"
+    type: number
+    points: 15
+    hint: Count the distinct destinations of its ADMIN$ tree connects (a refused one still sent the request).
+    check:
+      filter: "smb2.cmd == 3 && smb2.tree contains \"ADMIN$\" && ip.src == ${facts.lateral.source.ip}"
+      expect: {count: "${facts.lateral.target_count}"}
+    hunt:
+      dataset: smb
+      spl: "index=* sourcetype=pcapforge:smb command=tree_connect tree=\"*ADMIN$\" src=${facts.lateral.source.ip} | stats dc(dest) AS targets"
+      kql: "command : \"tree_connect\" and tree : *ADMIN$ and src : \"${facts.lateral.source.ip}\""
+      look_for: The distinct workstation addresses the source opened an ADMIN$ tree connect to.
+  - id: first_target
+    text: Which workstation did it reach first? Give its name or IP address.
+    answer: "${facts.lateral.first_target.name}"
+    accept: ["${facts.lateral.first_target.name}", "${facts.lateral.first_target.ip}"]
+    type: text
+    points: 10
+    hint: Sort the ADMIN$ tree connects from the source host by time; the earliest names the first target.
+    check:
+      filter: "frame.number == ${facts.lateral.first_tree_connect.frame} && smb2.cmd == 3 && ip.dst == ${facts.lateral.first_target.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: smb
+      spl: "index=* sourcetype=pcapforge:smb command=tree_connect tree=\"*ADMIN$\" src=${facts.lateral.source.ip} | sort 0 epoch | head 1 | table ts dest tree"
+      kql: "command : \"tree_connect\" and tree : *ADMIN$ and src : \"${facts.lateral.source.ip}\""
+      look_for: The earliest ADMIN$ tree connect from the source host and the target it went to.
+  - id: first_access_time
+    text: At what time (UTC) did it open the first ADMIN$ share (the first tree connect)?
+    answer: "${facts.lateral.first_tree_connect.time}"
+    type: timestamp
+    tolerance_s: 2
+    points: 10
+    check:
+      filter: "frame.number == ${facts.lateral.first_tree_connect.frame} && smb2.cmd == 3"
+      expect: {count: 1}
+    hunt:
+      dataset: smb
+      spl: "index=* sourcetype=pcapforge:smb command=tree_connect tree=\"*ADMIN$\" src=${facts.lateral.source.ip} | sort 0 epoch | head 1 | table ts dest"
+      kql: "command : \"tree_connect\" and tree : *ADMIN$ and src : \"${facts.lateral.source.ip}\""
+      look_for: The timestamp of the earliest ADMIN$ tree connect from the source host.
+  - id: share_name
+    text: Which hidden administrative share did it open on the targets?
+    answer: ADMIN$
+    accept: [ADMIN$, "ADMIN$ (C$, IPC$)"]
+    type: text
+    points: 5
+    hint: The tree connect path ends in the share name; the administrative share that maps to %SystemRoot% ends in a "$".
+    check:
+      filter: "smb2.cmd == 3 && smb2.tree contains \"ADMIN$\""
+      expect: {min: 1}
+    hunt:
+      dataset: smb
+      spl: "index=* sourcetype=pcapforge:smb command=tree_connect src=${facts.lateral.source.ip} | stats count BY tree, share_type"
+      kql: "command : \"tree_connect\" and src : \"${facts.lateral.source.ip}\""
+      look_for: The share names the source connected to on the workstations (ADMIN$, IPC$, C$).
+  - id: denied_target
+    when: vars.deny_target
+    text: One workstation refused the ADMIN$ connection (access denied). Which one? Give its name or IP address.
+    answer: "${facts.lateral.denied_target.name}"
+    accept: ["${facts.lateral.denied_target.name}", "${facts.lateral.denied_target.ip}"]
+    type: text
+    points: 15
+    hint: >-
+      A refused tree connect is answered with STATUS_ACCESS_DENIED (0xc0000022) instead of a share
+      type. Read the source of the error response.
+    check:
+      filter: "smb2.cmd == 3 && smb2.nt_status == 0xc0000022 && ip.src == ${facts.lateral.denied_target.ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: smb
+      spl: "index=* sourcetype=pcapforge:smb command=tree_connect tree=\"*ADMIN$\" success=false | stats count BY dest, status"
+      kql: "command : \"tree_connect\" and tree : *ADMIN$ and success : false"
+      look_for: The ADMIN$ tree connect that failed (success=false, status 0xc0000022) and the target that refused it.
+
+translations:
+  pl:
+    title: Ruch boczny po SMB między stacjami biurowymi
+    briefing: |
+      Jesteś w SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu SPAN
+      przełącznika dostępowego sieci biurowej ({sensor_subnet}). Jest tu normalny ruch biurowy - DHCP,
+      rozwiązywanie nazw, intranet po HTTPS, Windows Update oraz domenowy Kerberos / LDAP / SMB - ale
+      EDR zgłosił sięganie do ukrytego udziału ADMIN$ pewnej stacji roboczej. W tej sieci klient zwykle
+      mówi po SMB tylko do udziału SYSVOL kontrolera domeny (Group Policy); stacje nie otwierają
+      wzajemnie swoich udziałów administracyjnych. Znajdź host, który to robi, użyte konto, ile stacji
+      osiągnął i w jakiej kolejności oraz czy któryś cel odmówił dostępu.
+    questions:
+      source_host:
+        text: Który host otwierał udziały administracyjne na wielu stacjach roboczych? Podaj jego adres IP.
+        hint: W tej sieci jedynym normalnym partnerem SMB klienta jest udział SYSVOL kontrolera domeny. Szukaj jednego hosta otwierającego tree connect do udziałów ADMIN$ / C$ kilku stacji.
+      lateral_account:
+        text: Jakiego konta domenowego użył ten host do uwierzytelnienia?
+        hint: Dostęp zaczyna się od wymiany Kerberos AS (kerberos.msg_type == 10) z tego hosta; nazwa klienta to konto. Konto osoby nie kończy się znakiem „$”.
+      target_count:
+        text: Do ilu stacji roboczych sięgnął na ich udziale ADMIN$?
+        hint: Policz różne adresy docelowe jego tree connectów do ADMIN$ (odrzucony cel także wysłał żądanie).
+      first_target:
+        text: Do której stacji roboczej sięgnął jako pierwszej? Podaj jej nazwę lub adres IP.
+        hint: Posortuj tree connecty do ADMIN$ z hosta źródłowego według czasu; najwcześniejszy wskazuje pierwszy cel.
+      first_access_time:
+        text: O której godzinie (UTC) otworzył pierwszy udział ADMIN$ (pierwszy tree connect)?
+      share_name:
+        text: Który ukryty udział administracyjny otwierał na celach?
+        hint: Ścieżka tree connect kończy się nazwą udziału; udział administracyjny mapujący %SystemRoot% kończy się znakiem „$”.
+      denied_target:
+        text: Jedna stacja robocza odmówiła połączenia z ADMIN$ (odmowa dostępu). Która? Podaj jej nazwę lub adres IP.
+        hint: Odrzucony tree connect jest odpowiadany kodem STATUS_ACCESS_DENIED (0xc0000022) zamiast typu udziału. Odczytaj źródło odpowiedzi z błędem.
+  de:
+    title: SMB-Lateral-Movement über die Büro-Arbeitsplätze
+    briefing: |
+      Sie sind im SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom SPAN-Port des
+      Access-Switches im Büronetz ({sensor_subnet}). Der normale Büroverkehr ist hier - DHCP,
+      Namensauflösung, Intranet über HTTPS, Windows Update sowie das Kerberos / LDAP / SMB der Domäne -
+      aber die EDR hat den Zugriff auf die versteckte ADMIN$-Freigabe eines Arbeitsplatzes gemeldet. In
+      diesem Netz spricht ein Client normalerweise nur mit der SYSVOL-Freigabe des Domänencontrollers
+      (Gruppenrichtlinien); Arbeitsplätze öffnen nicht gegenseitig ihre administrativen Freigaben.
+      Finden Sie den Host, der das tut, das verwendete Konto, wie viele Arbeitsplätze er erreicht hat
+      und in welcher Reihenfolge, und ob ein Ziel den Zugriff verweigert hat.
+    questions:
+      source_host:
+        text: Welcher Host hat administrative Freigaben auf mehreren Arbeitsplätzen geöffnet? Geben Sie seine IP-Adresse an.
+        hint: In diesem Netz ist der einzige normale SMB-Partner eines Clients die SYSVOL-Freigabe des Domänencontrollers. Suchen Sie einen Host, der SMB-Tree-Connects zu den ADMIN$ / C$ Freigaben mehrerer Arbeitsplätze öffnet.
+      lateral_account:
+        text: Mit welchem Domänenkonto hat sich dieser Host authentifiziert?
+        hint: Der Zugriff beginnt mit einem Kerberos-AS-Austausch (kerberos.msg_type == 10) von diesem Host; der Client-Name ist das Konto. Ein Personenkonto endet nicht mit „$“.
+      target_count:
+        text: Wie viele Arbeitsplätze hat er auf deren ADMIN$-Freigabe erreicht?
+        hint: Zählen Sie die verschiedenen Ziele seiner ADMIN$-Tree-Connects (ein abgelehntes Ziel hat die Anfrage trotzdem gesendet).
+      first_target:
+        text: Welchen Arbeitsplatz hat er zuerst erreicht? Geben Sie Namen oder IP-Adresse an.
+        hint: Sortieren Sie die ADMIN$-Tree-Connects vom Quell-Host nach Zeit; der früheste nennt das erste Ziel.
+      first_access_time:
+        text: Um welche Uhrzeit (UTC) hat er die erste ADMIN$-Freigabe geöffnet (der erste Tree-Connect)?
+      share_name:
+        text: Welche versteckte administrative Freigabe hat er auf den Zielen geöffnet?
+        hint: Der Tree-Connect-Pfad endet mit dem Freigabenamen; die administrative Freigabe, die auf %SystemRoot% zeigt, endet mit „$“.
+      denied_target:
+        text: Ein Arbeitsplatz hat die ADMIN$-Verbindung verweigert (Zugriff verweigert). Welcher? Geben Sie Namen oder IP-Adresse an.
+        hint: Ein abgelehnter Tree-Connect wird mit STATUS_ACCESS_DENIED (0xc0000022) statt eines Freigabetyps beantwortet. Lesen Sie die Quelle der Fehlerantwort.

@@ -105,8 +105,8 @@ STYLES = {
 DEFAULT_STYLE = {"windows": "windows", "linux": "dhcpcd"}
 DISCOVER_OP, REBOOT_OP = "dhcp.discover", "dhcp.reboot"
 JOIN_OPS = frozenset({DISCOVER_OP, REBOOT_OP})  # the first message of a host that joins during the capture
-SERVER_STYLES = ("fortigate", "windows")
-DEFAULT_LEASE = {"fortigate": "8h", "windows": "8d"}  # windows: the Windows Server scope default (8 days)
+SERVER_STYLES = ("fortigate", "windows", "dnsmasq")
+DEFAULT_LEASE = {"fortigate": "8h", "windows": "8d", "dnsmasq": "1h"}  # windows: Windows Server scope default (8 days); dnsmasq: its own default
 
 
 # -- wire format -------------------------------------------------------------------------
@@ -238,11 +238,13 @@ class _DhcpServerProtocol(asyncio.DatagramProtocol):
             if reply_type == ACK and lease and fqdn is not None:
                 options.append((CLIENT_FQDN, b"\x00\xff\xff" + fqdn[3:]))
             return options + [(code, configured[code]) for code in sorted(set(requested))]
-        # ISC dhcpd style: lease, T1, T2, the mask, then the requested options in the client's order.
+        # ISC dhcpd style: lease, T1, T2, the mask, then the requested options. dnsmasq (the rogue
+        # device's server) sorts them by option code; dhcpd/fortigate keep the client's order.
         options = [message_type, server_id]
         if lease:
             options += [times[2], times[0], times[1]]
-        return options + [mask] + [(code, configured[code]) for code in requested]
+        order = sorted(set(requested)) if actor.style == "dnsmasq" else requested
+        return options + [mask] + [(code, configured[code]) for code in order]
 
 
 @register
@@ -284,19 +286,26 @@ class DhcpServer(Actor):
                 raise ScenarioError(f"{self.type} '{self.id}': '{host.id}' has no interface on '{self.subnet}' "
                                     f"and no router connects the two to relay DHCP")
         spec = topology.subnet_specs[self.subnet]
-        prefix = ipaddress.ip_network(spec["cidr"]).prefixlen if "cidr" in spec else int(spec["prefix"])
+        net_prefix = ipaddress.ip_network(spec["cidr"]).prefixlen if "cidr" in spec else int(spec["prefix"])
+        # A rogue server may offer a wrong subnet mask (option 1); the real subnet prefix is the default.
+        prefix = int(self.param("mask", net_prefix))
         self.mask = ipaddress.IPv4Network(f"0.0.0.0/{prefix}").netmask.packed
-        first, last = (int(v) for v in self.param("pool", [100, 199]))
-        if not 2 <= first <= last <= 2 ** (32 - prefix) - 3:
-            raise ScenarioError(f"{self.type} '{self.id}': pool {first}-{last} does not fit a /{prefix}")
-        if self.subnet in topology.pools:
-            raise ScenarioError(f"{self.type} '{self.id}': '{self.subnet}' already has a DHCP server")
-        topology.pools[self.subnet] = (first, last)
+        self.rogue = bool(self.param("rogue", False))
+        if not self.rogue:
+            # The authoritative scope owns the subnet's address pool; a rogue leaves the pool alone.
+            first, last = (int(v) for v in self.param("pool", [100, 199]))
+            if not 2 <= first <= last <= 2 ** (32 - net_prefix) - 3:
+                raise ScenarioError(f"{self.type} '{self.id}': pool {first}-{last} does not fit a /{net_prefix}")
+            if self.subnet in topology.pools:
+                raise ScenarioError(f"{self.type} '{self.id}': '{self.subnet}' already has a DHCP server")
+            topology.pools[self.subnet] = (first, last)
         self.lease_s = int(parse_duration(self.param("lease", DEFAULT_LEASE[self.style])))
         self.dns = topology.select(self.param("dns"))[0] if self.param("dns") else None
         self.ntp = topology.select(self.param("ntp"))[0] if self.param("ntp") else None
         self.router = host if host.router else next(
             (h for h in topology.hosts if h.router and self.subnet in h.subnets), None)
+        if self.param("router"):  # a rogue hands out its own address as the default gateway
+            self.router = topology.select(self.param("router"))[0]
         self.plan_.facts[self.id] = {
             "hosts": [host_ref(host.id)],
             "subnet": self.subnet,
@@ -310,6 +319,9 @@ class DhcpServer(Actor):
             "ntp": host_ref(self.ntp.id) if self.ntp else None,
             "domain": topology.domain if self.dns else None,
         }
+        if self.rogue:
+            self.plan_.facts[self.id].update(
+                {"rogue": True, "mask": socket.inet_ntoa(self.mask), "source": host_ref(host.id)})
 
     def configured(self) -> dict[int, bytes]:
         """Option code -> value (recording addresses) of the options the server hands out."""
@@ -383,6 +395,7 @@ class DhcpClient(Actor):
         if reboot and join is None:
             raise ScenarioError(f"{self.type} '{self.id}': reboot needs join (when the host comes back)")
         facts = []
+        first_join, first_at = None, None
         for host in self.hosts:
             server = next((a for a in scopes if a.subnet in host.subnets), None)
             if server is None or host.router:
@@ -432,6 +445,8 @@ class DhcpClient(Actor):
             if released is not None:
                 plan.event(released, self.id, f"{host.name} releases its DHCP lease and leaves", [],
                            host=host_ref(host.id))
+            if joined is not None and (first_at is None or joined_at < first_at):
+                first_at, first_join = joined_at, joined
             facts.append({
                 "host": host_ref(host.id),
                 "style": style,
@@ -441,7 +456,9 @@ class DhcpClient(Actor):
                 "renewals": [action_ref(a) for a in renewals],
                 "released": action_ref(released) if released else None,
             })
-        plan.facts[self.id] = {"server": host_ref(server_host.id), "clients": facts}
+        plan.facts[self.id] = {"server": host_ref(server_host.id), "clients": facts,
+                               "names": [h.name for h in self.hosts],
+                               "first_join": action_ref(first_join) if first_join is not None else None}
 
     # -- recording ----------------------------------------------------------------------
     def execute(self, action, rt) -> None:

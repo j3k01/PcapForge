@@ -85,10 +85,40 @@ class Issued:
     label: str
 
 
+@dataclass(frozen=True)
+class ServiceAccount:
+    """A domain user with one or more Service Principal Names (a Kerberoasting target). Added only
+    when a scenario opts in through the ``ad.dc`` ``directory`` param; the office baseline has none."""
+    sam: str                    # sAMAccountName, e.g. "svc-sql01"
+    spn: tuple[str, ...]        # SPN components, e.g. ("MSSQLSvc", "sql01.example.local:1433")
+    dn: str
+    kvno: int
+    admin_count: int = 0        # 1 for a privileged service account (a high-value roast target)
+
+
+# (sAMAccountName, SPN service class, host label, port) catalogue a scenario draws service accounts
+# from. The host labels are fictional application servers under the domain; no traffic is sent to
+# them, so they need not be topology hosts.
+SERVICE_ACCOUNT_POOL = (
+    ("svc-sql01",      "MSSQLSvc", "sql01",        1433),
+    ("svc-sqlrs",      "MSSQLSvc", "sqlrs01",      1433),
+    ("svc-sqldev",     "MSSQLSvc", "sqldev01",     1433),
+    ("svc-reporting",  "MSSQLSvc", "rpt01",        1433),
+    ("svc-oracle",     "MSSQLSvc", "ora01",        1521),
+    ("svc-web",        "HTTP",     "intranet-app", None),
+    ("svc-sharepoint", "HTTP",     "sp01",         None),
+    ("svc-erp",        "HTTP",     "erp01",        None),
+    ("svc-jenkins",    "HTTP",     "ci01",         None),
+    ("svc-backup",     "CIFS",     "backup01",     None),
+    ("svc-filer",      "CIFS",     "filer01",      None),
+    ("svc-vmware",     "STS",      "vcenter01",    None),
+)
+
+
 class Directory:
     """Synthetic AD domain of the site, served by one DC."""
 
-    def __init__(self, topology, dc, rng, start_epoch: float) -> None:
+    def __init__(self, topology, dc, rng, start_epoch: float, population: dict | None = None) -> None:
         self.topology = topology
         self.domain = topology.domain
         self.realm = self.domain.upper()
@@ -114,6 +144,13 @@ class Directory:
                 start_epoch - rng.uniform(5, 200) * 86400),
         )
         self.issued: dict[bytes, Issued] = {}
+        self.service_accounts: tuple[ServiceAccount, ...] = ()
+        self.spn_owner: dict[tuple[str, ...], str] = {}
+        if population:
+            self.service_accounts = self._service_accounts(population, rng.child("service_accounts"))
+            self.spn_owner = {sa.spn: sa.sam for sa in self.service_accounts}
+        # Opt-in LDAP reconnaissance directory (it-ldap-reconnaissance); None on the baseline.
+        self.recon_dir = None
 
     # accounts and keys
     def account(self, sam: str) -> Account:
@@ -145,13 +182,17 @@ class Directory:
         """(account, kvno) whose key encrypts tickets for ``spn``."""
         if spn[0] == "krbtgt":
             return "krbtgt", KRBTGT_KVNO
+        sam = self.spn_owner.get(tuple(spn))
+        if sam is not None:                     # a service account's SPN (a Kerberoasting target)
+            return sam, self.service_account(sam).kvno
         fqdn = spn[1]
         host = next(h for h in self.topology.hosts if f"{h.name}.{self.domain}".lower() == fqdn)
         return f"{host.name.upper()[:15]}$", (self.dc_kvno if host.id == self.dc.id else 2)
 
-    def ticket(self, client: str, spn: tuple[str, ...], issued: float) -> bytes:
+    def ticket(self, client: str, spn: tuple[str, ...], issued: float, etype: int = krb.AES256) -> bytes:
         """Ticket for ``client`` to ``spn`` issued ``issued`` seconds into the capture (also tickets
-        from before it, which the member still holds); the same bytes on both sides."""
+        from before it, which the member still holds); the same bytes on both sides. ``etype`` is the
+        ticket enc-part's encryption type (RC4-HMAC for a Kerberoasting answer, else AES256)."""
         label = f"{self.realm}\x1f{client}\x1f{'/'.join(spn)}\x1f{issued:.6f}"
         account = self.account(client)
         cname = krb.principal(krb.NT_PRINCIPAL, client)
@@ -160,7 +201,7 @@ class Directory:
         cipher = krb.seal("ticket\x1f" + label, krb.enc_ticket_part_size(self.realm, cname, pac), self.key(owner))
         session = hashlib.sha256(self.secret + b"session\x1f" + label.encode()).digest()
         self.issued[cipher] = Issued(client, spn, session, label)
-        return krb.ticket(self.realm, krb.principal(krb.NT_SRV_INST, *spn), kvno, cipher)
+        return krb.ticket(self.realm, krb.principal(krb.NT_SRV_INST, *spn), kvno, cipher, etype=etype)
 
     def holder(self, ticket_cipher: bytes, spn_kind: str) -> Issued | None:
         """Client of a ticket the service ``spn_kind`` can decrypt, else None."""
@@ -169,6 +210,29 @@ class Directory:
             return None
         owner, _ = self._owner(issued.service)
         return issued if krb.sealed_by(ticket_cipher, self.key(owner)) else None
+
+    # service accounts (Kerberoasting targets)
+    def _service_accounts(self, population: dict, rng) -> tuple[ServiceAccount, ...]:
+        count = int(population.get("service_accounts", 0))
+        if count <= 0:
+            return ()
+        pool = list(SERVICE_ACCOUNT_POOL)
+        rng.shuffle(pool)
+        admins = int(population.get("admin_service_accounts", 1))
+        ou = f"OU=Service Accounts,{self.base}"
+        out = []
+        for index, (sam, cls, label, port) in enumerate(pool[:min(count, len(pool))]):
+            host = f"{label}.{self.domain}" + (f":{port}" if port else "")
+            out.append(ServiceAccount(sam, (cls, host), f"CN={sam},{ou}",
+                                      2 + _int31("svc-kvno", sam) % 8, admin_count=1 if index < admins else 0))
+        return tuple(out)
+
+    def spn_account(self, spn) -> str | None:
+        """sAMAccountName of the service account that owns ``spn``, or None."""
+        return self.spn_owner.get(tuple(spn))
+
+    def service_account(self, sam: str) -> ServiceAccount | None:
+        return next((s for s in self.service_accounts if s.sam == sam), None)
 
     # LDAP content
     def root_dse(self, message_id: int) -> tuple[bytes, bytes]:
@@ -299,10 +363,14 @@ class DomainController(Actor):
         if len(self.hosts) != 1:
             raise ScenarioError(f"{self.type} '{self.id}' runs on exactly one host")
         dc = self.hosts[0]
-        self.directory = Directory(self.plan_.topology, dc, self.rng.child("directory"), self.plan_.start_epoch)
+        population = self.param("directory")
+        self.directory = Directory(self.plan_.topology, dc, self.rng.child("directory"), self.plan_.start_epoch,
+                                   population=population)
         d = self.directory
         self.plan_.facts[self.id] = {"host": host_ref(dc.id), "domain": d.domain, "realm": d.realm,
-                                     "netbios_domain": d.netbios, "gpos": [g.name for g in d.gpos]}
+                                     "netbios_domain": d.netbios, "gpos": [g.name for g in d.gpos],
+                                     "service_accounts": [{"sam": s.sam, "spn": "/".join(s.spn), "dn": s.dn,
+                                                           "admin_count": s.admin_count} for s in d.service_accounts]}
 
     async def serve(self, rt) -> None:
         loop = asyncio.get_running_loop()
@@ -350,7 +418,7 @@ class DomainController(Actor):
             if holder is None or not krb.sealed_by(authenticator, holder.session):
                 raise RuntimeError("TGS-REQ with a ticket the KDC did not issue")
             spn = tuple(req["sname"][1])
-            tkt = d.ticket(holder.client, spn, self.rt.clock.t)
+            tkt = d.ticket(holder.client, spn, self.rt.clock.t, etype=krb.choose_etype(req["etypes"]))
             enc = krb.seal(f"tgs-rep\x1f{holder.client}\x1f{'/'.join(spn)}\x1f{now}",
                            krb.enc_kdc_rep_part_size(True, req["nonce"], d.realm, sname), holder.session)
             reply = krb.kdc_rep(krb.TGS_REP, None, d.realm, krb.principal(krb.NT_PRINCIPAL, holder.client), tkt,
@@ -408,10 +476,19 @@ class DomainController(Actor):
                 if op == ldap.SEARCH_REQUEST:
                     writer.write(d.root_dse(message_id)[1])
                 elif op == ldap.BIND_REQUEST:
+                    name = ldap.bind_simple_name(content)
+                    if name is not None and d.recon_dir is not None:   # unsealed LDAP reconnaissance
+                        writer.write(ldap.bind_response(message_id, None))
+                        await writer.drain()
+                        await d.recon_dir.serve_unsealed(reader, writer, message_id + 1)
+                        return
                     sasl = der.children(der.children(content)[2][1])
                     holder, token = self.accept(sasl[1][1], "ldap")
                     writer.write(ldap.bind_response(message_id, token))
-                    script = d.policy_searches(d.account(holder.client), message_id + 1)
+                    if d.recon_dir is not None and holder.client in d.recon_dir.sealed_accounts:
+                        script = d.recon_dir.sealed_script(message_id + 1)   # sealed reconnaissance
+                    else:
+                        script = d.policy_searches(d.account(holder.client), message_id + 1)
                     label = holder.label
                 await writer.drain()
             index = 0
@@ -587,7 +664,8 @@ class _Member:
         if not ok:
             raise RuntimeError(f"AS exchange of {client}: unexpected KDC reply (expected {expected})")
 
-    def tgs_exchange(self, client: str, tgt: bytes, spn: tuple[str, ...]) -> bytes:
+    def tgs_exchange(self, client: str, tgt: bytes, spn: tuple[str, ...],
+                     etypes: tuple[int, ...] | None = None) -> bytes:
         d = self.d
         now = self.now()
         session = d.issued[krb.ticket_cipher(tgt)].session
@@ -597,7 +675,7 @@ class _Member:
         pa = [krb.padata(krb.PA_TGS_REQ, krb.ap_req(0, tgt, authenticator)),
               krb.padata(krb.PA_PAC_OPTIONS, der.seq(der.ctx(0, der.flags32(krb.PAC_OPT_BRANCH_AWARE))))]
         body = krb.req_body(krb.KDC_OPT_TGS, d.realm, krb.principal(krb.NT_SRV_INST, *spn),
-                            _int31(client, "tgs", spn, now))
+                            _int31(client, "tgs", spn, now), etypes=etypes or krb.WINDOWS_ETYPES)
         reply = self._kdc(krb.kdc_req(krb.TGS_REQ, pa, body), tcp=True)
         if der.read(reply)[0] != 0x60 | krb.TGS_REP:
             raise RuntimeError(f"TGS exchange for {'/'.join(spn)} failed")

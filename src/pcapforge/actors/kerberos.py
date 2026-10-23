@@ -101,9 +101,9 @@ def netbios_address(name: str) -> bytes:
                            der.ctx(1, der.octets(name.upper()[:15].ljust(16).encode("ascii")))))
 
 
-def ticket(realm: str, sname: bytes, kvno: int, cipher: bytes) -> bytes:
+def ticket(realm: str, sname: bytes, kvno: int, cipher: bytes, etype: int = AES256) -> bytes:
     return der.app(1, der.seq(der.ctx(0, der.integer(PVNO)), der.ctx(1, der.gstring(realm)), der.ctx(2, sname),
-                              der.ctx(3, encrypted(AES256, cipher, kvno))))
+                              der.ctx(3, encrypted(etype, cipher, kvno))))
 
 
 # --- plaintext sizes ----------------------------------------------------------------
@@ -163,14 +163,14 @@ def enc_timestamp_size() -> int:
 # --- messages -----------------------------------------------------------------------
 
 def req_body(options: int, realm: str, sname: bytes, nonce: int, cname: bytes | None = None,
-             addresses: bytes | None = None, rtime: bool = True) -> bytes:
+             addresses: bytes | None = None, rtime: bool = True, etypes: tuple[int, ...] = WINDOWS_ETYPES) -> bytes:
     items = [der.ctx(0, der.flags32(options))]
     if cname is not None:
         items.append(der.ctx(1, cname))
     items += [der.ctx(2, der.gstring(realm)), der.ctx(3, sname), der.ctx(5, der.gtime(WINDOWS_TILL))]
     if rtime:
         items.append(der.ctx(6, der.gtime(WINDOWS_TILL)))
-    items += [der.ctx(7, der.integer(nonce)), der.ctx(8, der.seq(*(der.integer(e) for e in WINDOWS_ETYPES)))]
+    items += [der.ctx(7, der.integer(nonce)), der.ctx(8, der.seq(*(der.integer(e) for e in etypes)))]
     if addresses is not None:
         items.append(der.ctx(9, addresses))
     return der.seq(*items)
@@ -226,12 +226,25 @@ def parse_kdc_req(message: bytes) -> dict:
         pa[der.to_int(f[1])] = der.read(f[2])[1]
     req = der.fields(der.read(top[4])[1])
     return {"msg_type": tag & 0x1F, "padata": pa, "realm": der.to_str(req[2]),
-            "cname": names(req[1]) if 1 in req else None, "sname": names(req[3]), "nonce": der.to_int(req[7])}
+            "cname": names(req[1]) if 1 in req else None, "sname": names(req[3]), "nonce": der.to_int(req[7]),
+            "etypes": [int.from_bytes(v, "big", signed=True)
+                       for _, v in der.children(der.read(req[8])[1])] if 8 in req else []}
 
 
 def names(principal_tlv: bytes) -> tuple[int, list[str]]:
     f = der.fields(der.read(principal_tlv)[1])
     return der.to_int(f[0]), [v.decode("ascii") for _, v in der.children(der.read(f[1])[1])]
+
+
+def choose_etype(etypes: list[int] | tuple[int, ...]) -> int:
+    """The encryption type a KDC issues a service ticket in: the strongest the request offers (Windows
+    clients list AES first), falling back to RC4-HMAC when only RC4 is offered (Kerberoasting)."""
+    for etype in (AES256, AES128):
+        if etype in etypes:
+            return etype
+    if RC4_HMAC in etypes:
+        return RC4_HMAC
+    return etypes[0] if etypes else AES256
 
 
 def ticket_cipher(ticket_tlv: bytes) -> bytes:

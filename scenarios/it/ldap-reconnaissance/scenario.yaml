@@ -1,0 +1,430 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-ldap-reconnaissance
+title: Active Directory reconnaissance over LDAP on the office LAN
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, recon, ldap, active-directory, account-discovery, group-discovery, domain-trust, windows, kerberos]
+summary: >
+  The office-LAN baseline (DHCP, DNS, HTTPS to the intranet, WSUS, Active Directory) with a
+  directory-enumeration incident on top. A host that is not a normal client of the domain
+  controller binds to it over LDAP and walks the directory - all users, the accounts that carry a
+  service principal name, the protected (adminCount=1) accounts, the members of Domain Admins and
+  the domain's trusts - the observable pattern of AD reconnaissance tooling (BloodHound /
+  ldapsearch collectors), produced with a plain LDAP client and a synthetic directory the DC
+  serves. The baseline's own LDAP is Kerberos-sealed (GSS-SPNEGO), so a legitimate member's
+  searches are opaque on the wire; the easy and medium levels therefore model the common case of a
+  tool run with explicit credentials over an unsealed (simple-bind) LDAP session, where every
+  filter and returned entry is readable - on easy the queries come in a burst, on medium each is
+  pulled with the paged-results control and spread out over the capture. The hard level models the
+  tool binding with the account's Kerberos ticket exactly like a member (sealed), so the filters
+  are invisible and the only tell is volume and timing: one host opening round after round of LDAP
+  sessions to the DC, each pulling large sealed responses. Everything is a benign local simulation
+  on 127.77.0.0/16: the observable pattern of directory reconnaissance, no attack tooling and no
+  real credentials.
+
+briefing: |
+  You are in the SOC of {site_name} ({domain}). The attached capture comes from the SPAN port of
+  the office access switch ({sensor_subnet}). The normal office traffic is here - DHCP, name
+  resolution, intranet HTTPS, Windows Update and the domain's Kerberos/LDAP/SMB - but a monitoring
+  rule also fired on a burst of directory lookups against the domain controller. On this network a
+  workstation only reads the directory to apply Group Policy, over a Kerberos-sealed LDAP session;
+  it does not enumerate every user, every service account and the membership of Domain Admins.
+  Find the host behind the activity, determine which account it used to bind, and scope what it
+  asked the directory for.
+
+mitre:
+  - {framework: enterprise, id: T1087.002, name: "Account Discovery: Domain Account"}
+  - {framework: enterprise, id: T1069.002, name: "Permission Groups Discovery: Domain Groups"}
+  - {framework: enterprise, id: T1482, name: Domain Trust Discovery}
+  - {framework: enterprise, id: T1589, name: Gather Victim Identity Information, when: "not vars.sealed"}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, fin]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: office
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+  hosts:
+    - {id: firewall, device: fortigate, subnets: [office, servers], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    - {id: newpc, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", inventory: false}
+    # An unmanaged workstation on the office LAN, not in the asset inventory: it runs the directory
+    # enumeration against the domain controller.
+    - {id: scanner, device: windows-workstation, subnet: office, name: "WS-{CODE}-0931", role: workstation, inventory: false}
+
+actors:
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: ws
+    params: {server: dc}
+  - id: new_pc
+    type: dhcp.client
+    hosts: newpc
+    params: {server: dc, join: [0.3, 0.7]}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, newpc]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: time_sync
+    type: ntp.client
+    hosts: [pc, ws, newpc]
+    params: {server: dc}
+  - id: windows_chatter
+    type: windows.chatter
+    hosts: [pc, ws, newpc]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # Active Directory: the domain controller serves Kerberos / LDAP / SYSVOL and the members refresh
+  # Group Policy; an employee logs on at a PC that booted (a normal, Kerberos-sealed LDAP session).
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: domain_members
+    type: ad.member
+    hosts: [pc, ws, newpc]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, newpc]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, newpc]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+  # The incident: a host enumerates the directory over LDAP.
+  - id: recon
+    type: ldap.recon
+    hosts: scanner
+    incident: true
+    params:
+      dc: dc
+      sealed: "${vars.sealed}"
+      paged: "${vars.paged}"
+      rounds: "${vars.rounds}"
+      users: "${vars.recon_users}"
+      services: "${vars.recon_services}"
+      admins: "${vars.recon_admins}"
+      trusts: "${vars.recon_trusts}"
+      start: "${vars.recon_start}"
+      spread: "${vars.recon_spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: true
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      sealed: false
+      paged: false
+      rounds: 0
+      recon_users: 8
+      recon_services: 3
+      recon_admins: 3
+      recon_trusts: 1
+      recon_start: [0.2, 0.35]
+      recon_spread: 0.0
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 32, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      sealed: false
+      paged: true
+      rounds: 0
+      recon_users: 14
+      recon_services: 4
+      recon_admins: 3
+      recon_trusts: 2
+      recon_start: [0.2, 0.35]
+      recon_spread: 0.5
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 132, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      sealed: true
+      paged: false
+      rounds: 6
+      recon_users: 20
+      recon_services: 6
+      recon_admins: 4
+      recon_trusts: 2
+      recon_start: [0.15, 0.3]
+      recon_spread: 0.5
+
+questions:
+  - id: enumerating_host
+    text: Which host enumerated the directory over LDAP? Give its IP address.
+    answer: "${facts.recon.source.ip}"
+    type: ip
+    points: 15
+    hint: >-
+      One host on the office LAN opens LDAP sessions to the domain controller and issues searches a
+      workstation never does. Look for LDAP (TCP 389) from a host that is not a normal directory
+      client.
+    check:
+      filter: "ldap.messageID && ip.src == ${facts.recon.source.ip} && tcp.dstport == 389"
+      expect: {min: 1}
+    hunt:
+      dataset: ldap
+      spl: "index=* sourcetype=pcapforge:ldap | stats count BY src, dest"
+      kql: "dest_port : 389 and app : \"ldap\""
+      zeek: {log: ldap, count_by: [id.orig_h]}
+      look_for: The source address of the LDAP binds and searches against the domain controller.
+  - id: bound_account
+    when: "not vars.sealed"
+    text: Which account did that host bind to the directory as (the LDAP simple-bind name)?
+    answer: "${facts.recon.bind_name}"
+    accept: ["${facts.recon.bind_name}", "${facts.recon.account}"]
+    type: text
+    points: 10
+    hint: >-
+      An unsealed LDAP bind carries the bound name in cleartext (the bindRequest name field). It is
+      a user principal name (account@domain), not a computer account.
+    check:
+      filter: 'ldap.name == "${facts.recon.bind_name}"'
+      expect: {min: 1}
+    hunt:
+      dataset: ldap
+      spl: "index=* sourcetype=pcapforge:ldap operation=bind bind_name=* | stats count BY src, bind_name"
+      kql: "operation : \"bind\" and bind_name : *"
+      zeek: {log: ldap, where: {opcode: "bind simple"}, show: [id.orig_h, object]}
+      look_for: The bind name on the simple-bind request from the enumerating host.
+  - id: spn_filter
+    when: "not vars.sealed"
+    text: >-
+      Which LDAP search filter did the host use to find the accounts that carry a service principal
+      name (a Kerberoasting target list)? Give the filter string.
+    answer: "${facts.recon.spn_filter}"
+    accept: ["${facts.recon.spn_filter}", "servicePrincipalName=*", "servicePrincipalName"]
+    type: text
+    points: 15
+    hint: >-
+      Read the search filters on the cleartext LDAP requests. One asks for every object that has a
+      servicePrincipalName attribute present.
+    check:
+      filter: 'ldap.present == "servicePrincipalName" && ip.src == ${facts.recon.source.ip}'
+      expect: {min: 1}
+    hunt:
+      dataset: ldap
+      spl: "index=* sourcetype=pcapforge:ldap operation=search_request filter=* | stats count BY filter, src"
+      kql: "operation : \"search_request\" and filter : *"
+      zeek: {log: ldap_search, where: {filter: "(servicePrincipalName=*)"}, show: [id.orig_h, filter]}
+      look_for: The (servicePrincipalName=*) filter - the query that lists accounts with an SPN.
+  - id: entry_count
+    when: "not vars.sealed"
+    text: How many directory entries did the domain controller return to that host in total?
+    answer: "${facts.recon.entry_count}"
+    type: number
+    points: 10
+    hint: >-
+      Count the searchResultEntry messages (ldap.objectName) the domain controller sent back to the
+      enumerating host across all of its searches.
+    check:
+      filter: "ldap.objectName && ip.dst == ${facts.recon.source.ip}"
+      expect: {min: "${facts.recon.entry_count}"}
+    hunt:
+      dataset: ldap
+      spl: "index=* sourcetype=pcapforge:ldap operation=search_request src=${facts.recon.source.ip} | stats sum(entries) AS entries"
+      kql: "operation : \"search_request\" and src : \"${facts.recon.source.ip}\""
+      look_for: The total of result_count over the searches the DC answered back to that host.
+  - id: domain_admins
+    when: "not vars.sealed"
+    text: Which accounts did the enumeration reveal as members of Domain Admins?
+    answer: "${facts.recon.domain_admins}"
+    type: set
+    points: 15
+    hint: >-
+      The host runs a base search on the Domain Admins group object and reads its member attribute.
+      The members are given as distinguished names; read the CN of each.
+    check:
+      filter: 'ldap.objectName == "${facts.recon.domain_admins_dn}"'
+      expect: {min: 1}
+    hunt:
+      dataset: ldap
+      wireshark: 'ldap.objectName == "${facts.recon.domain_admins_dn}" && ip.dst == ${facts.recon.source.ip}'
+      look_for: >-
+        The searchResultEntry for the Domain Admins object returned to the enumerating host; read
+        its member attribute (one distinguished name per Domain Admin).
+  - id: first_query
+    when: "not vars.sealed"
+    text: At which frame number did the first directory search from that host appear?
+    answer: "${facts.recon.first_search.frame}"
+    type: number
+    points: 10
+    hint: The first LDAP searchRequest (ldap.filter) that the enumerating host sent after it bound.
+    check:
+      filter: "frame.number == ${facts.recon.first_search.frame} && ldap.filter"
+      expect: {count: 1}
+    hunt:
+      dataset: ldap
+      wireshark: "ldap.filter && ip.src == ${facts.recon.source.ip}"
+      look_for: The earliest searchRequest from the enumerating host.
+  - id: recon_account_sealed
+    when: "vars.sealed"
+    text: Which domain account did the enumerating host use to bind to the directory?
+    answer: "${facts.recon.account}"
+    accept: ["${facts.recon.account}"]
+    type: text
+    points: 15
+    hint: >-
+      The LDAP binds are Kerberos-sealed, so the filters are opaque. The account is visible in the
+      Kerberos the host does first: its AS-REQ (kerberos.msg_type == 10) names the client.
+    check:
+      filter: 'kerberos.msg_type == 10 && kerberos.CNameString == "${facts.recon.account}" && ip.src == ${facts.recon.source.ip}'
+      expect: {min: 1}
+    hunt:
+      dataset: kerberos
+      spl: "index=* sourcetype=pcapforge:kerberos request_type=AS src=${facts.recon.source.ip} | stats count BY client"
+      kql: "request_type : \"AS\" and src : \"${facts.recon.source.ip}\""
+      zeek: {log: kerberos, where: {request_type: AS, id.orig_h: "${facts.recon.source.ip}"}, count_by: [client]}
+      look_for: The client name on the AS exchange from the enumerating host.
+  - id: sealed_sessions
+    when: "vars.sealed"
+    text: >-
+      How many separate LDAP sessions did the enumerating host open to the domain controller (the
+      repeated enumeration rounds)?
+    answer: "${facts.recon.session_count}"
+    type: number
+    points: 15
+    hint: >-
+      With the filters sealed, the tell is volume and timing: count the TCP connections the host
+      opened to the DC's LDAP port (SYNs to port 389), one per enumeration round.
+    check:
+      filter: "tcp.flags.syn == 1 && tcp.flags.ack == 0 && ip.src == ${facts.recon.source.ip} && tcp.dstport == 389"
+      expect: {min: "${facts.recon.session_count}"}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows src=${facts.recon.source.ip} dest_port=389 transport=tcp | stats count AS sessions"
+      kql: "src : \"${facts.recon.source.ip}\" and dest_port : 389 and transport : \"tcp\""
+      zeek: {log: conn, where: {id.orig_h: "${facts.recon.source.ip}", id.resp_p: 389}, count_by: [id.orig_h]}
+      look_for: The number of LDAP connections the enumerating host opened to the DC.
+
+translations:
+  pl:
+    title: Rozpoznanie Active Directory przez LDAP w sieci biurowej
+    briefing: |
+      Jesteś w SOC organizacji {site_name} ({domain}). Załączone nagranie pochodzi z portu SPAN
+      przełącznika dostępowego sieci biurowej ({sensor_subnet}). Jest tu normalny ruch biurowy -
+      DHCP, rozwiązywanie nazw, HTTPS do intranetu, Windows Update oraz domenowy Kerberos/LDAP/SMB -
+      ale reguła monitorująca zareagowała też na serię odpytań katalogu kierowanych do kontrolera
+      domeny. W tej sieci stacja robocza czyta katalog tylko po to, by zastosować zasady grupy, przez
+      sesję LDAP zabezpieczoną Kerberosem; nie wylicza wszystkich użytkowników, wszystkich kont
+      usługowych ani składu grupy Domain Admins. Znajdź host odpowiedzialny za tę aktywność, ustal, na
+      jakie konto się uwierzytelnił, i określ, o co pytał katalog.
+    questions:
+      enumerating_host:
+        text: Który host wyliczał katalog przez LDAP? Podaj jego adres IP.
+        hint: Jeden host w sieci biurowej otwiera sesje LDAP do kontrolera domeny i wysyła zapytania, jakich stacja robocza nigdy nie wysyła. Szukaj ruchu LDAP (TCP 389) od hosta, który nie jest normalnym klientem katalogu.
+      bound_account:
+        text: Na jakie konto ten host uwierzytelnił się w katalogu (nazwa prostego uwierzytelnienia LDAP)?
+        hint: Niezabezpieczone uwierzytelnienie LDAP niesie nazwę wiązania jawnym tekstem (pole name żądania bindRequest). To nazwa UPN (konto@domena), a nie konto komputera.
+      spn_filter:
+        text: Którego filtra LDAP użył host, by znaleźć konta z nazwą główną usługi (lista celów do Kerberoastingu)? Podaj treść filtra.
+        hint: Odczytaj filtry wyszukiwania z jawnych żądań LDAP. Jeden pyta o każdy obiekt, który ma ustawiony atrybut servicePrincipalName.
+      entry_count:
+        text: Ile wpisów katalogu kontroler domeny zwrócił temu hostowi łącznie?
+        hint: Policz komunikaty searchResultEntry (ldap.objectName), które kontroler domeny odesłał do hosta wyliczającego we wszystkich jego wyszukiwaniach.
+      domain_admins:
+        text: Które konta rozpoznanie ujawniło jako członków grupy Domain Admins?
+        hint: Host wykonuje wyszukiwanie typu base na obiekcie grupy Domain Admins i odczytuje jej atrybut member. Członkowie są podani jako nazwy wyróżniające; odczytaj CN każdego z nich.
+      first_query:
+        text: Przy którym numerze ramki pojawiło się pierwsze wyszukiwanie katalogu z tego hosta?
+        hint: Pierwsze żądanie LDAP searchRequest (ldap.filter) wysłane przez host wyliczający po uwierzytelnieniu.
+      recon_account_sealed:
+        text: Którego konta domenowego użył host wyliczający do uwierzytelnienia w katalogu?
+        hint: "Wiązania LDAP są zabezpieczone Kerberosem, więc filtry są nieczytelne. Konto widać w Kerberosie, który host wykonuje najpierw: jego AS-REQ (kerberos.msg_type == 10) nazywa klienta."
+      sealed_sessions:
+        text: Ile odrębnych sesji LDAP host wyliczający otworzył do kontrolera domeny (powtarzane rundy rozpoznania)?
+        hint: "Gdy filtry są zabezpieczone, sygnałem jest ilość i czas: policz połączenia TCP, jakie host otworzył do portu LDAP kontrolera (pakiety SYN do portu 389), po jednym na rundę rozpoznania."
+  de:
+    title: Active-Directory-Erkundung über LDAP im Büronetz
+    briefing: |
+      Sie sind im SOC von {site_name} ({domain}). Der beigefügte Mitschnitt stammt vom SPAN-Port des
+      Büro-Access-Switches ({sensor_subnet}). Der normale Büroverkehr ist hier - DHCP, Namensauflösung,
+      Intranet-HTTPS, Windows Update sowie das Kerberos/LDAP/SMB der Domäne -, aber eine
+      Überwachungsregel hat auch auf eine Reihe von Verzeichnisabfragen am Domänencontroller
+      ausgelöst. In diesem Netz liest eine Arbeitsstation das Verzeichnis nur, um Gruppenrichtlinien
+      anzuwenden, über eine Kerberos-gesicherte LDAP-Sitzung; sie zählt nicht alle Benutzer, alle
+      Dienstkonten und die Mitgliedschaft von Domain Admins auf. Finden Sie den verantwortlichen
+      Host, stellen Sie fest, mit welchem Konto er sich gebunden hat, und grenzen Sie ein, was er vom
+      Verzeichnis erfragt hat.
+    questions:
+      enumerating_host:
+        text: Welcher Host hat das Verzeichnis über LDAP aufgezählt? Geben Sie seine IP-Adresse an.
+        hint: Ein Host im Büronetz öffnet LDAP-Sitzungen zum Domänencontroller und sendet Suchen, die eine Arbeitsstation nie sendet. Suchen Sie nach LDAP (TCP 389) von einem Host, der kein normaler Verzeichnisclient ist.
+      bound_account:
+        text: Mit welchem Konto hat sich dieser Host an das Verzeichnis gebunden (der LDAP-Simple-Bind-Name)?
+        hint: Ein ungesicherter LDAP-Bind trägt den Bindungsnamen im Klartext (das name-Feld des bindRequest). Es ist ein User-Principal-Name (Konto@Domäne), kein Computerkonto.
+      spn_filter:
+        text: Welchen LDAP-Suchfilter hat der Host verwendet, um die Konten mit einem Service Principal Name zu finden (eine Kerberoasting-Zielliste)? Geben Sie die Filterzeichenkette an.
+        hint: Lesen Sie die Suchfilter der Klartext-LDAP-Anfragen. Einer fragt nach jedem Objekt, das ein gesetztes servicePrincipalName-Attribut hat.
+      entry_count:
+        text: Wie viele Verzeichniseinträge hat der Domänencontroller diesem Host insgesamt zurückgegeben?
+        hint: Zählen Sie die searchResultEntry-Nachrichten (ldap.objectName), die der Domänencontroller über alle seine Suchen an den aufzählenden Host zurückgesendet hat.
+      domain_admins:
+        text: Welche Konten hat die Aufzählung als Mitglieder von Domain Admins offengelegt?
+        hint: Der Host führt eine Base-Suche auf dem Gruppenobjekt Domain Admins aus und liest dessen member-Attribut. Die Mitglieder werden als Distinguished Names angegeben; lesen Sie den CN jedes einzelnen.
+      first_query:
+        text: Bei welcher Framenummer erschien die erste Verzeichnissuche von diesem Host?
+        hint: Der erste LDAP-searchRequest (ldap.filter), den der aufzählende Host nach dem Binden gesendet hat.
+      recon_account_sealed:
+        text: Welches Domänenkonto hat der aufzählende Host für die Bindung an das Verzeichnis verwendet?
+        hint: "Die LDAP-Bindungen sind Kerberos-gesichert, die Filter also undurchsichtig. Das Konto ist im vorangehenden Kerberos sichtbar: sein AS-REQ (kerberos.msg_type == 10) nennt den Client."
+      sealed_sessions:
+        text: Wie viele separate LDAP-Sitzungen hat der aufzählende Host zum Domänencontroller geöffnet (die wiederholten Erkundungsrunden)?
+        hint: "Wenn die Filter gesichert sind, ist das Verräterische die Menge und das Timing: zählen Sie die TCP-Verbindungen, die der Host zum LDAP-Port des DC geöffnet hat (SYNs an Port 389), eine pro Erkundungsrunde."

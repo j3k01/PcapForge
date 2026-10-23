@@ -29,7 +29,7 @@ from pcapforge.zeek import hunt_command
 SID_BASE = 9100000          # local sid range reserved for pcapforge (9100000-9199999)
 SID_BAND_BASE = SID_BASE + 100
 SID_OT_BASE = SID_BASE + 1000   # IEC 104 +0.., DNP3 +10.., BACnet +20.., EtherNet/IP +30..
-SID_IT_BASE = SID_BASE + 2000   # IT line: DnsTunneling +0.., HttpsBeaconing +100.., ScanAuthFailures +200.., VolumetricFlood +300.., BulkUpload +400..
+SID_IT_BASE = SID_BASE + 2000   # IT line: DnsTunneling +0.., HttpsBeaconing +100.., ScanAuthFailures +200.., VolumetricFlood +300.., BulkUpload +400.., Kerberoasting +500.., SmbLateral +600.., LdapRecon +700.., RogueDhcp +800.., ItOtPivot +900..
 MODBUS_PORT = 502
 WRITER_TYPES = ("modbus.operator",)
 CLIENT_TYPES = ("modbus.poller", "modbus.operator")
@@ -82,7 +82,83 @@ def suricata_rules(answers: dict) -> list[Rule]:
     return (_modbus_rules(answers) + _ot_rules(answers) + _it_dns_tunnel_rules(answers)
             + _it_scan_auth_rules(answers) + _it_https_beacon_rules(answers)
             + _it_volumetric_flood_rules(answers)
-            + _it_bulk_upload_rules(answers))
+            + _it_bulk_upload_rules(answers) + _it_kerberoasting_rules(answers) + _it_smb_lateral_rules(answers) + _it_ldap_recon_rules(answers) + _it_rogue_dhcp_rules(answers) + _it_ot_pivot_rules(answers))
+
+def _it_smb_lateral_rules(answers: dict) -> list[Rule]:
+    """SMB tree connect to an ADMIN$ administrative share of the lateral-movement incident
+    (it-smb-lateral-movement). On this LAN a client's only SMB peer is the DC's SYSVOL share, so an
+    ADMIN$ tree connect never happens in the office baseline and the rule is inert on it."""
+    if not any(a["type"] == "smb.lateral" and a["incident"] for a in answers["actors"]):
+        return []
+    return [_rule(SID_IT_BASE + 600, "$HOME_NET any -> $HOME_NET 445",
+                  "PCAPFORGE IT SMB tree connect to an ADMIN$ administrative share - possible lateral movement",
+                  'flow:to_server,established; content:"|5c 00 41 00 44 00 4d 00 49 00 4e 00 24 00|"; fast_pattern;',
+                  "mitre_attack T1021.002, mitre_attack T1078.002", proto="tcp",
+                  purpose=("An SMB tree connect to a workstation's ADMIN$ share. On this LAN clients only "
+                           "mount the DC's SYSVOL, so any ADMIN$ connect is lateral movement with a reused "
+                           "credential; the office baseline never does it."))]
+
+
+def _it_rogue_dhcp_rules(answers: dict) -> list[Rule]:
+    """The rogue-DHCP incident (it-rogue-dhcp): a second, unauthorised DHCP server answering clients
+    on the office segment. Its Offers and ACKs (a BOOTREPLY, UDP source port 67) come from the rogue's
+    own address rather than the approved DHCP relay that forwards the legitimate server's replies. The
+    rule names that source address, so it is inert on the office baseline and on every other site."""
+    actor = next((a for a in answers["actors"] if a["type"] == "dhcp.server" and a["incident"]), None)
+    if not actor:
+        return []
+    facts = answers["facts"].get(actor["id"], {})
+    rogue_ip = (facts.get("hosts") or [{}])[0].get("ip")
+    if not rogue_ip:
+        return []
+    return [_rule(SID_IT_BASE + 800, f"{_addresses([rogue_ip])} 67 -> any any",
+                  "PCAPFORGE IT rogue DHCP server (BOOTREPLY from an unauthorised server on the LAN)",
+                  'content:"|02 01 06|"; depth:3;',
+                  "mitre_attack T1557, mitre_attack T1557.003", proto="udp",
+                  purpose=("A DHCP Offer/ACK (a BOOTREPLY, UDP source port 67) sourced by a host that is not "
+                           "the approved DHCP relay: a second, unauthorised DHCP server on the office segment "
+                           "(DHCP spoofing). The legitimate replies come from the relay; the office baseline "
+                           "has no other DHCP server."))]
+
+
+def _it_ot_pivot_host_subnets(answers: dict):
+    """(office source host id, office subnet cidr, control subnet cidr, control host IPs) of the
+    IT-to-OT pivot incident (it-ot-pivot): the office host running the incident Modbus scanner /
+    writer, and the control subnet its PLCs sit on. ``None`` when this is not that scenario (so the
+    rules stay out of every other scenario's export)."""
+    if answers["scenario"].get("line") != "it":
+        return None
+    servers = [a for a in answers["actors"] if a["type"] == "modbus.server"]
+    pivot = next((a["hosts"][0] for a in answers["actors"]
+                  if a["incident"] and a["type"] in ("modbus.scanner", "modbus.writer")), None)
+    if not servers or pivot is None:
+        return None
+    hosts = {h["id"]: h for h in answers["topology"]["hosts"]}
+    cidr = {s["id"]: s["cidr"] for s in answers["topology"]["subnets"]}
+    office_subnet = hosts[pivot]["interfaces"][0]["subnet"]
+    control_subnet = hosts[servers[0]["hosts"][0]]["interfaces"][0]["subnet"]
+    control_ips = sorted(h["interfaces"][0]["ip"] for h in hosts.values()
+                         if len(h["interfaces"]) == 1 and h["interfaces"][0]["subnet"] == control_subnet)
+    return pivot, cidr[office_subnet], cidr[control_subnet], control_ips
+
+
+def _it_ot_pivot_rules(answers: dict) -> list[Rule]:
+    """The cross-zone pivot of the IT-to-OT incident (it-ot-pivot): a TCP connection from the office
+    LAN into the OT control subnet, which the IT/OT firewall should not route. The rule names both
+    subnet CIDRs, so it is inert on every other site and on both baselines (the office baseline has no
+    control subnet; the OT baseline has no office subnet). The Modbus writes and the port-502 sweep are
+    caught by the Modbus rules already generated for the PLCs."""
+    found = _it_ot_pivot_host_subnets(answers)
+    if found is None:
+        return []
+    _, office_cidr, control_cidr, _ = found
+    return [_rule(
+        SID_IT_BASE + 900, f"{office_cidr} any -> {control_cidr} any",
+        "PCAPFORGE IT-to-OT pivot: TCP connection from the office LAN into the control network",
+        "flow:to_server;", "mitre_attack T1046, mitre_ics T0886",
+        "A TCP connection from an office-LAN host into the OT control subnet. Only the OT clients on "
+        "the control network should reach the PLCs; a connection routed in from the office LAN crosses "
+        "the IT/OT boundary and should never happen.", proto="tcp")]
 
 
 def _it_volumetric_flood_rules(answers: dict) -> list[Rule]:
@@ -156,6 +232,49 @@ def _it_scan_auth_rules(answers: dict) -> list[Rule]:
                   "krb5_err_code:24;", "mitre_attack T1110, mitre_attack T1110.003",
                   "A Kerberos AS-REQ failed pre-authentication (a wrong password). A burst of these from one "
                   "source is password guessing (one account) or spraying (many accounts).", proto="krb5")]
+
+
+def _it_kerberoasting_rules(answers: dict) -> list[Rule]:
+    """The Kerberoasting incident (it-kerberoasting): a Kerberos TGS-REQ offering RC4-HMAC (etype 23)
+    as its only encryption type. Windows clients always offer AES first, so the RC4-only etype list
+    of a roasting request never appears in the office baseline. The content matches the DER encoding
+    of a KDC-REQ-BODY etype field holding the single INTEGER 23 (|a8 05 30 03 02 01 17|)."""
+    if not any(a["type"] == "kerberos.roast" and a["incident"] for a in answers["actors"]):
+        return []
+    return [_rule(SID_IT_BASE + 500, "any any -> any 88",
+                  "PCAPFORGE IT Kerberoasting: TGS-REQ requesting RC4-HMAC (etype 23) only",
+                  'flow:to_server; content:"|a8 05 30 03 02 01 17|";',
+                  "mitre_attack T1558.003", proto="tcp",
+                  purpose=("A Kerberos TGS-REQ whose only offered encryption type is RC4-HMAC (etype 23). "
+                           "Windows clients request AES; a run of RC4-only service-ticket requests from one "
+                           "host is Kerberoasting (bulk service-ticket requests for offline cracking)."))]
+
+
+def _it_ldap_recon_rules(answers: dict) -> list[Rule]:
+    """The LDAP reconnaissance incident (it-ldap-reconnaissance): cleartext (unsealed) LDAP
+    searchRequests whose filter asks for the accounts with a service principal name or the protected
+    (adminCount=1) accounts - the tell-tale filters of AD reconnaissance tooling. The office
+    baseline's LDAP is Kerberos-sealed, so these attribute names never appear in clear on it and the
+    rules are inert; a sealed (hard) run shows the volume tell in the flow / LDAP-session counts
+    instead. The content matches the DER of a present filter ([87] length-prefixed attribute) and of
+    the (adminCount=1) equality (|04 0a|adminCount|04 01 31|)."""
+    if not any(a["type"] == "ldap.recon" and a["incident"] for a in answers["actors"]):
+        return []
+    return [
+        _rule(SID_IT_BASE + 700, "$HOME_NET any -> any 389",
+              "PCAPFORGE IT LDAP reconnaissance: servicePrincipalName enumeration over cleartext LDAP",
+              'flow:to_server,established; content:"|87 14|servicePrincipalName";',
+              "mitre_attack T1087.002, mitre_attack T1558.003", proto="tcp",
+              purpose=("An unsealed LDAP searchRequest with a present filter on servicePrincipalName: "
+                       "enumerating the accounts that carry an SPN (a Kerberoasting target list). A "
+                       "workstation reads the directory only over Kerberos-sealed LDAP.")),
+        _rule(SID_IT_BASE + 701, "$HOME_NET any -> any 389",
+              "PCAPFORGE IT LDAP reconnaissance: adminCount=1 enumeration over cleartext LDAP",
+              'flow:to_server,established; content:"|04 0a|adminCount|04 01 31|";',
+              "mitre_attack T1087.002, mitre_attack T1069.002", proto="tcp",
+              purpose=("An unsealed LDAP searchRequest for the protected (adminCount=1) accounts: "
+                       "enumerating the privileged principals of the domain.")),
+    ]
 
 
 def _it_bulk_upload_rules(answers: dict) -> list[Rule]:
@@ -251,6 +370,34 @@ def _it_scan_auth_sigma(answers: dict) -> list[dict]:
             timespan="10m", condition={"gte": 5}, field="dest_port", generate=False, tags=["attack.t1046"],
             falsepositives=["A vulnerability scan or asset inventory run by IT."]))
     return rules
+
+
+def _it_kerberoasting_sigma(answers: dict) -> list[dict]:
+    """Sigma for the Kerberoasting incident (it-kerberoasting): RC4-first service-ticket requests
+    correlated into a bulk roast from one host."""
+    if not any(a["type"] == "kerberos.roast" and a["incident"] for a in answers["actors"]):
+        return []
+    return [
+        _sigma(answers, key="kerberos-rc4-service-ticket",
+               title="Kerberos service ticket requested with RC4",
+               description="A Kerberos TGS-REQ whose preferred (first-listed) encryption type is RC4-HMAC "
+                           "(etype 23). Windows clients offer AES first; an RC4-first service-ticket request "
+                           "is the signature of a Kerberoasting tool. Base rule of the correlation.",
+               service="kerberos", level="medium",
+               detection={"selection": {"request_type": "TGS", "etype_first": 23}, "condition": "selection"},
+               tags=["attack.t1558.003", "attack.credential_access"],
+               falsepositives=["A legacy application or appliance that still requests RC4 service tickets."],
+               fields=None, name="pcapforge_kerberos_rc4_service_ticket"),
+        _correlation(answers, key="kerberoasting",
+                     title="Kerberoasting: many RC4 service tickets from one host",
+                     description="One host requested RC4-HMAC service tickets for at least five distinct "
+                                 "services (SPNs) within an hour: Kerberoasting. The office baseline requests "
+                                 "AES service tickets only.",
+                     level="high", kind="value_count", rules=["pcapforge_kerberos_rc4_service_ticket"],
+                     group_by=["src"], timespan="1h", condition={"gte": 5}, field="service", generate=False,
+                     tags=["attack.t1558.003", "attack.credential_access"],
+                     falsepositives=["A vulnerability scanner enumerating Kerberos service tickets."]),
+    ]
 
 
 def _modbus_rules(answers: dict) -> list[Rule]:
@@ -542,6 +689,29 @@ def _profile_points(answers: dict, servers: list[dict], table: str, predicate) -
     return sorted(names)
 
 
+def _it_ldap_recon_sigma(answers: dict) -> list[dict]:
+    """Sigma over the ldap dataset for the reconnaissance incident (it-ldap-reconnaissance): a
+    cleartext LDAP searchRequest whose filter targets service principal names, the protected
+    (adminCount=1) accounts or trusted domains - the tell-tale directory-enumeration queries. The
+    office baseline reads the directory only over sealed LDAP, so no such filter is ever visible."""
+    if not any(a["type"] == "ldap.recon" and a["incident"] for a in answers["actors"]):
+        return []
+    detection = {"selection": {"operation": "search_request",
+                               "filter|contains": ["servicePrincipalName", "adminCount", "trustedDomain"]},
+                 "condition": "selection"}
+    return [_sigma(answers, key="it-ldap-reconnaissance-filters",
+                   title="LDAP directory reconnaissance (SPN / adminCount / trust enumeration)",
+                   description=("A cleartext LDAP searchRequest whose filter enumerates accounts with a "
+                                "service principal name, the protected adminCount=1 accounts or the domain "
+                                "trusts: Active Directory reconnaissance. A workstation reads the directory "
+                                "only over Kerberos-sealed LDAP, so these filters never appear in clear."),
+                   service="ldap", level="high", detection=detection,
+                   tags=["attack.discovery", "attack.t1087.002", "attack.t1069.002", "attack.t1482"],
+                   falsepositives=["A directory administration or audit tool that enumerates the directory "
+                                   "over unsealed LDAP."],
+                   fields=["ts", "src", "dest", "base", "filter", "entries", "request_frame"])]
+
+
 def _it_https_beacon_sigma(answers: dict) -> list[dict]:
     """Sigma over the tls dataset for the beaconing incident (it-https-beaconing): TLS check-ins to
     the one fictional beacon domain from the beaconing host."""
@@ -624,7 +794,78 @@ def sigma_rules(answers: dict) -> list[dict]:
     return (_modbus_sigma_rules(answers) + _ot_sigma_rules(answers) + _it_dns_tunnel_sigma(answers)
             + _it_scan_auth_sigma(answers) + _it_https_beacon_sigma(answers)
             + _it_volumetric_flood_sigma(answers)
-            + _it_bulk_upload_sigma(answers))
+            + _it_bulk_upload_sigma(answers) + _it_kerberoasting_sigma(answers) + _it_smb_lateral_sigma(answers) + _it_ldap_recon_sigma(answers) + _it_rogue_dhcp_sigma(answers) + _it_ot_pivot_sigma(answers))
+
+
+def _it_smb_lateral_sigma(answers: dict) -> list[dict]:
+    """Sigma for the SMB lateral-movement incident (it-smb-lateral-movement): tree connects to the
+    ADMIN$ administrative share, correlated into one source reaching many workstations."""
+    if not any(a["type"] == "smb.lateral" and a["incident"] for a in answers["actors"]):
+        return []
+    rules = [_sigma(
+        answers, key="smb-admin-share-tree-connect", title="SMB tree connect to an ADMIN$ administrative share",
+        description="An SMB tree connect to a host's ADMIN$ administrative share. On this LAN clients only "
+                    "mount the DC's SYSVOL, so this is the base rule of the lateral-movement correlation.",
+        service="smb", level="medium",
+        detection={"selection": {"command": "tree_connect", "tree|endswith": "ADMIN$"}, "condition": "selection"},
+        tags=["attack.t1021.002", "attack.lateral_movement"],
+        falsepositives=["An administrator managing a workstation over its admin share."],
+        fields=None, name="pcapforge_smb_admin_share_tree_connect")]
+    rules.append(_correlation(
+        answers, key="smb-admin-share-fanout", title="One host reaching the admin shares of many workstations",
+        description="One source opened the ADMIN$ administrative share of at least three workstations within "
+                    "ten minutes: SMB lateral movement with a reused domain credential.",
+        level="high", kind="value_count", rules=["pcapforge_smb_admin_share_tree_connect"], group_by=["src"],
+        timespan="10m", condition={"gte": 3}, field="dest", generate=False,
+        tags=["attack.t1021.002", "attack.t1078.002", "attack.lateral_movement"],
+        falsepositives=["A management tool or script that touches many machines' admin shares."]))
+    return rules
+
+
+def _it_rogue_dhcp_sigma(answers: dict) -> list[dict]:
+    """Sigma over the dhcp dataset for the rogue-DHCP incident (it-rogue-dhcp): a DHCP Offer or ACK
+    whose server identifier (option 54) is not the approved DHCP server."""
+    if not any(a["type"] == "dhcp.server" and a["incident"] for a in answers["actors"]):
+        return []
+    legit = next((a for a in answers["actors"] if a["type"] == "dhcp.server" and not a["incident"]), None)
+    facts = answers["facts"].get(legit["id"], {}) if legit else {}
+    approved = (facts.get("hosts") or [{}])[0].get("ip")
+    if not approved:
+        return []
+    detection = {"selection": {"message": ["offer", "ack"]},
+                 "filter_approved": {"server_id": approved},
+                 "condition": "selection and not filter_approved"}
+    return [_sigma(answers, key="it-rogue-dhcp-server", title="Rogue DHCP server on the LAN",
+                   description=("A DHCP Offer or ACK whose server identifier (option 54) is not the approved "
+                                "DHCP server: a second, unauthorised DHCP server answering clients on the office "
+                                "segment (DHCP spoofing / adversary-in-the-middle)."),
+                   service="dhcp", level="high", detection=detection,
+                   tags=["attack.t1557", "attack.t1557.003"],
+                   falsepositives=["A newly deployed or misconfigured DHCP server IT has not yet documented."],
+                   fields=["ts", "src", "server_id", "eth_src", "assigned_addr", "router", "dns_servers", "frame"])]
+
+
+def _it_ot_pivot_sigma(answers: dict) -> list[dict]:
+    """Sigma over the flows dataset for the IT-to-OT pivot (it-ot-pivot): a TCP flow that reaches a
+    host on the OT control subnet from a source that is not itself on the control network (the office
+    host routed in through the IT/OT firewall). Control-internal polling is excluded by the source
+    filter, so the rule fires only on the cross-zone connections."""
+    found = _it_ot_pivot_host_subnets(answers)
+    if found is None:
+        return []
+    _, _, _, control_ips = found
+    detection = {"selection": {"dest": control_ips}, "internal": {"src": control_ips},
+                 "condition": "selection and not internal"}
+    return [_sigma(
+        answers, key="it-ot-pivot-crosszone",
+        title="Connection from the office LAN into the OT control network",
+        description="A TCP flow to a host on the OT control subnet from a source outside that subnet: an "
+                    "office-LAN host reaching the control network across the IT/OT firewall. Only the OT "
+                    "clients on the control network should talk to the PLCs.",
+        service="flows", level="high", detection=detection,
+        tags=["attack.t1046", "attack.t0886", "attack.t0859"],
+        falsepositives=["A new OT engineering or jump host that the firewall policy legitimately allows."],
+        fields=["ts", "src", "dest", "dest_port", "transport", "state"])]
 
 
 def _ot_sigma_rules(answers: dict) -> list[dict]:

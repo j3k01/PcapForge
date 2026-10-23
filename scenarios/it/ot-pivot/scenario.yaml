@@ -1,0 +1,530 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-ot-pivot
+title: An office workstation pivots through the firewall into the OT control network
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [it, ot, pivot, it-ot, modbus, ics, port-scan, firewall, network-segmentation, active-directory, windows]
+summary: >
+  The office-LAN baseline (DHCP, DNS, HTTPS to the intranet, WSUS, Active Directory) and a plant
+  control network (PLCs polled over Modbus/TCP by an HMI and a historian, setpoints changed only by
+  the engineering workstation) sit on either side of the IT/OT firewall. A misconfigured allow rule
+  lets one office workstation route into the control subnet: it sweeps it for Modbus/TCP (port 502),
+  reads the PLCs it finds and then writes a setpoint outside its normal operating band. This is the
+  first scenario that spans both lines. Everything is a benign local simulation on 127.77.0.0/16: the
+  observable pattern of a cross-zone pivot, no attack tooling. Easy and medium are captured on the
+  office switch; on hard the sensor is on the OT side and the office host's frames arrive routed,
+  carrying the firewall's MAC.
+
+briefing: |
+  You are in the SOC of {site_name} ({domain}). The site runs an office LAN and a plant control
+  network ({process_title}) separated by the IT/OT firewall. The attached capture comes from the
+  SPAN port of the {sensor_subnet} switch. On the control network only the HMI and the historian
+  poll the PLCs over Modbus/TCP, and only the engineering workstation changes setpoints; no office
+  host has any business reaching the control subnet. A process engineer reported a setpoint that
+  moved on its own. Find the host behind it, scope what it touched on the control network, and
+  determine which setpoint was changed and whether the value is safe.
+
+mitre:
+  - {framework: enterprise, id: T1046, name: Network Service Discovery}
+  - {framework: ics, id: T0886, name: Remote Services}
+  - {framework: ics, id: T0846, name: Remote System Discovery}
+  - {framework: ics, id: T0888, name: Remote System Information Discovery}
+  - {framework: ics, id: T0855, name: Unauthorized Command Message}
+  - {framework: ics, id: T0836, name: Modify Parameter}
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, adm, wtp]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: "${vars.sensor}"
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+  hosts:
+    # The firewall routes between the office LAN, the server subnet and the control network, and
+    # relays DHCP for the office. The scenario's point is that it should not route office -> control.
+    - {id: firewall, device: fortigate, subnets: [office, servers, control], name: "fw-{code}-01", router: true}
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    # Office PCs that boot during the capture, and the ones that were already running.
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    # The office workstation that pivots into the control network (an ordinary, inventoried PC).
+    - {id: pivot, device: windows-workstation, subnet: office, name: "WS-{CODE}-0419", role: workstation}
+    # The plant control network: PLCs, the SCADA HMI, the historian and the engineering workstation.
+    - {id: plc, count: "${vars.plc_count}", device: "${vars.plc_devices}", subnet: control, name: "plc-{code}-{index:02d}"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
+    - {id: historian, device: windows-server-vm, subnet: control, name: "HIST-{CODE}-01"}
+    - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
+
+actors:
+  # --- Office / server background (the IT baseline) -----------------------------------------
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: ws
+    params: {server: dc}
+  # The pivoting PC confirms the lease it held (INIT-REBOOT) when it comes online; its host name is
+  # in the broadcast request (option 12).
+  - id: pivot_boot
+    type: dhcp.client
+    hosts: pivot
+    params: {server: dc, join: [0.02, 0.15], reboot: true}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, pivot]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: office_time_sync
+    type: ntp.client
+    hosts: [pc, ws, pivot]
+    params: {server: dc}
+  - id: office_chatter
+    type: windows.chatter
+    hosts: [pc, ws, pivot]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: office_domain_members
+    type: ad.member
+    hosts: [pc, ws, pivot]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, pivot]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}"}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, pivot]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+
+  # --- Control-network background (normal OT operations) -----------------------------------
+  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
+  - id: scada_poll
+    type: modbus.poller
+    hosts: hmi
+    params: {targets: plc, interval: "${vars.hmi_interval}", jitter: 0.03}
+  - id: historian_poll
+    type: modbus.poller
+    hosts: historian
+    params: {targets: plc, interval: 10, jitter: 0.01, groups: [0, 1]}
+  # Always present so the site model names the approved writer (count may be 0).
+  - id: operator_changes
+    type: modbus.operator
+    hosts: ews
+    params: {targets: plc, count: "${vars.operator_writes}"}
+  - id: control_time_sync
+    type: ntp.client
+    hosts: [hmi, historian, ews, plc]
+    when: vars.ntp
+    params: {server: dc}
+  - id: control_chatter
+    type: windows.chatter
+    hosts: [hmi, historian, ews]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  - {id: control_domain_members, type: ad.member, hosts: [hmi, historian, ews], when: vars.domain, params: {dc: dc}}
+
+  # --- The incident: the office PC pivots into the control network -------------------------
+  # Reconnaissance: a Modbus/TCP sweep of the control subnet (loud on easy / hard, a targeted
+  # connect to the PLCs on medium), then device identification and register enumeration per PLC.
+  - id: scan
+    type: modbus.scanner
+    hosts: pivot
+    incident: true
+    params:
+      targets: plc
+      sweep: "${vars.sweep}"
+      start: "${vars.scan_start}"
+      spread: "${vars.scan_spread}"
+  # The out-of-band setpoint change from the same office host.
+  - id: change
+    type: modbus.writer
+    hosts: pivot
+    incident: true
+    params:
+      targets: plc
+      discovery: false
+      writes: "${vars.writes}"
+      deviation: "${vars.deviation}"
+      function: "${vars.write_function}"
+      start: "${vars.write_start}"
+      spread: "${vars.write_spread}"
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      sensor: office
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: false
+      ipv6: false
+      ntp: true
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      process: water_treatment
+      plc_devices: [schneider-m340, schneider-m340, siemens-s7-1200, rockwell-micro850]
+      plc_count: 2
+      hmi_interval: 2.0
+      operator_writes: 0
+      sweep: [plc, hmi, historian, ews]
+      scan_start: [0.2, 0.35]
+      scan_spread: 0
+      writes: [1, 2]
+      deviation: extreme
+      write_function: single
+      write_start: [0.45, 0.6]
+      write_spread: 90
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 40, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      sensor: office
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      ntp: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200]
+      plc_count: 2
+      hmi_interval: 1.0
+      operator_writes: 2
+      sweep: []
+      scan_start: [0.25, 0.4]
+      scan_spread: 0
+      writes: [1, 1]
+      deviation: moderate
+      write_function: mixed
+      write_start: [0.5, 0.65]
+      write_spread: 300
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 140, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      sensor: control
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      ntp: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      plc_count: {range: [3, 4]}
+      hmi_interval: 1.0
+      operator_writes: 4
+      sweep: [plc, hmi, historian, ews]
+      scan_start: [0.15, 0.35]
+      scan_spread: 1200
+      writes: [1, 1]
+      deviation: subtle
+      write_function: single
+      write_start: [0.5, 0.75]
+      write_spread: 300
+
+questions:
+  - id: source_ip
+    text: Which IP address reached from the office LAN into the control network and changed a setpoint?
+    answer: "${facts.change.source.ip}"
+    type: ip
+    points: 15
+    hint: >-
+      Normal Modbus writes come only from the engineering workstation on the control subnet. A writer
+      whose address is on the office LAN crossed the IT/OT boundary.
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && !modbus.request_frame"
+      expect: {min: "${facts.change.write_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true | stats count AS writes, values(dest) AS plcs BY src | sort - writes"
+      kql: "write : true"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.orig_h, id.resp_h]}
+      look_for: >-
+        Every host that writes to a PLC. Only the engineering workstation on the control subnet is
+        approved; the writer whose address belongs to the office LAN is the pivot.
+  - id: source_host
+    when: "vars.sensor == 'office'"
+    text: Which office host name is behind that address?
+    answer: "${facts.change.source.name}"
+    accept: ["${facts.change.source.name}", "${facts.change.source.ip}"]
+    type: text
+    points: 10
+    hint: The host announces its name in its DHCP request (Host Name option 12) when it comes online.
+    check:
+      filter: 'dhcp.option.dhcp == 3 && dhcp.hw.mac_addr == ${facts.change.source.mac} && dhcp.option.hostname == "${facts.change.source.name}"'
+      expect: {min: 1}
+    hunt:
+      dataset: dhcp
+      spl: "index=* sourcetype=pcapforge:dhcp message=request host_name=* | table ts client_mac host_name requested_addr"
+      kql: "message : \"request\" and host_name : *"
+      look_for: The DHCP request from the pivot's MAC carries its host name in option 12.
+  - id: first_contact
+    text: At what time (UTC) did the office host first reach into the control network (its first probe)?
+    answer: "${facts.scan.scan_start.time}"
+    type: timestamp
+    tolerance_s: 2
+    points: 10
+    hint: The sweep walks the control subnet; the first connection it opens is the start of the pivot.
+    check:
+      filter: "frame.number == ${facts.scan.scan_start.frame} && ip.src == ${facts.scan.source.ip}"
+      expect: {count: 1}
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} transport=tcp | sort 0 epoch | head 1 | table ts dest dest_port"
+      kql: "src : \"${facts.scan.source.ip}\" and transport : \"tcp\""
+      look_for: The earliest TCP connection from the office host into the control subnet.
+  - id: plcs_scanned
+    text: How many PLCs did the office host identify on the control network?
+    answer: "${facts.scan.plc_count}"
+    type: number
+    points: 10
+    hint: Read Device Identification (Modbus function 43) is sent once to each PLC the scanner finds.
+    check:
+      filter: "mbtcp && modbus.func_code == 43 && ip.src == ${facts.scan.source.ip} && !modbus.request_frame"
+      expect: {min: "${facts.scan.plc_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus function_code=43 src=${facts.scan.source.ip} | stats dc(dest) AS plcs"
+      kql: "function_code : 43 and src : \"${facts.scan.source.ip}\""
+      zeek: {log: modbus, where: {pdu_type: REQ, func: ENCAP_INTERFACE_TRANSPORT, id.orig_h: "${facts.scan.source.ip}"}, count_by: [id.resp_h]}
+      look_for: The distinct PLCs the office host read device identification from.
+  - id: target_plc
+    text: Which PLC (IP address) received the out-of-band setpoint change?
+    answer: "${facts.change.target.ip}"
+    type: ip
+    points: 10
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && ip.dst == ${facts.change.target.ip}"
+      expect: {min: "${facts.change.write_count}"}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | stats count AS writes, values(point) AS points BY dest"
+      kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.change.source.ip}", func: [WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.resp_h]}
+      look_for: The PLC that received the out-of-band write from the office host.
+  - id: registers_written
+    text: Which PLC point(s) (register-map names) did the office host change? List them.
+    answer: "${facts.change.point_names}"
+    type: set
+    points: 15
+    foreach: facts.change.writes
+    check:
+      filter: "mbtcp && ip.src == ${facts.change.source.ip} && ip.dst == ${facts.change.target.ip} && modbus.func_code == ${item.function} && (modbus.reference_num == ${item.address} || modbus.regnum16 == ${item.address}) && !modbus.request_frame"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | stats values(point) AS points BY dest"
+      kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      look_for: The point names come from the register map in the briefing (address + table).
+  - id: values_written
+    text: For every changed point, give the engineering value that was written.
+    answer: "${facts.change.values}"
+    type: map
+    points: 15
+    foreach: facts.change.register_writes
+    check:
+      filter: "mbtcp && ip.src == ${facts.change.source.ip} && modbus.regnum16 == ${item.address} && modbus.regval_uint16 == ${item.registers[0]} && !modbus.request_frame"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} in_normal_band=false | table ts dest point value unit values{}"
+      kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      look_for: >-
+        value is the engineering value decoded from the raw register with the register map (a UINT16
+        divided by its scale). Compare it with the normal band in the map.
+  - id: out_of_band
+    text: Was the value the office host wrote inside the PLC register map's normal operating band (yes/no)?
+    answer: "no"
+    accept: [no, "out of band", outside, unsafe]
+    type: text
+    points: 10
+    hint: >-
+      Compare the written engineering value with the point's normal band in the register map. The
+      approved operator changes, if any, stay inside the band; this one does not.
+    hunt:
+      dataset: modbus
+      wireshark: "mbtcp && ip.src == ${facts.change.source.ip} && modbus.func_code in {5, 6, 15, 16} && !modbus.request_frame"
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} | stats count BY point, value, in_normal_band"
+      kql: "write : true and src : \"${facts.change.source.ip}\" and in_normal_band : false"
+      look_for: >-
+        in_normal_band is false for the pivot's write: the value falls outside the point's normal band
+        annotated from the register map. There is no display filter for the band; read it from the map.
+  - id: functions_used
+    text: Which Modbus function codes did the office host use to write?
+    answer: "${facts.change.function_codes}"
+    type: set
+    points: 5
+    hunt:
+      dataset: modbus
+      wireshark: "mbtcp && ip.src == ${facts.change.source.ip} && modbus.func_code in {5, 6, 15, 16} && !modbus.request_frame"
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} | stats count BY function_code, function"
+      kql: "write : true and src : \"${facts.change.source.ip}\""
+      zeek: {log: modbus, where: {pdu_type: REQ, id.orig_h: "${facts.change.source.ip}", func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [func]}
+      look_for: 6 = Write Single Register, 16 = Write Multiple Registers (5 / 15 are the coil equivalents).
+  - id: firewall_mac
+    when: "vars.sensor == 'control'"
+    text: Which MAC address did the PLC see on the frames carrying the cross-zone write requests?
+    answer: "${facts.change.source.observed_mac}"
+    type: mac
+    points: 10
+    hint: >-
+      The office host is not on the control subnet, so its frames arrive routed. A routed frame carries
+      the MAC of the last hop - the firewall's control-side interface - not of the originating host.
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.change.source.ip} && eth.src == ${facts.change.source.observed_mac}"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true src=${facts.change.source.ip} | stats count BY src, src_mac"
+      kql: "write : true and src : \"${facts.change.source.ip}\""
+      zeek: {log: conn, where: {id.orig_h: "${facts.change.source.ip}", id.resp_p: 502}, count_by: [id.orig_h, orig_l2_addr]}
+      look_for: >-
+        src_mac is the MAC the sensor (and the PLC) saw. A source off the control subnet arrives with
+        the MAC of the firewall that routed it, not of the originating host.
+  - id: technique
+    text: Which MITRE ATT&CK for ICS technique best describes reaching the control network from the office LAN?
+    answer: T0886
+    accept: [T0886, "Remote Services", T1046, "Network Service Discovery", T0846, "Remote System Discovery"]
+    type: text
+    points: 5
+    hunt:
+      dataset: flows
+      spl: "index=* sourcetype=pcapforge:flows src=${facts.scan.source.ip} dest_port=502 | stats dc(dest) AS plcs BY src"
+      kql: "src : \"${facts.scan.source.ip}\" and dest_port : 502"
+      look_for: >-
+        An office host opening Modbus (502) across the IT/OT firewall is Remote Services (T0886) used
+        for Network Service Discovery (T1046) / Remote System Discovery (T0846) of the control network.
+
+translations:
+  pl:
+    title: Stacja biurowa przechodzi przez zaporę do sieci sterowania OT
+    briefing: |
+      Jesteś w SOC zakładu {site_name} ({domain}). Zakład ma sieć biurową i sieć sterowania procesem
+      ({process_title}) rozdzielone zaporą IT/OT. Załączone nagranie pochodzi z portu SPAN przełącznika
+      w sieci {sensor_subnet}. W sieci sterowania tylko HMI i historian odpytują PLC przez Modbus/TCP,
+      a nastawy zmienia wyłącznie stacja inżynierska; żaden host biurowy nie ma powodu łączyć się z
+      siecią sterowania. Inżynier procesu zgłosił nastawę, która zmieniła się sama. Znajdź host za tym
+      stojący, ustal zasięg jego działań w sieci sterowania oraz którą nastawę zmieniono i czy wartość
+      jest bezpieczna.
+    questions:
+      source_ip:
+        text: Z jakiego adresu IP sięgnięto z sieci biurowej do sieci sterowania i zmieniono nastawę?
+        hint: >-
+          Normalne zapisy Modbus pochodzą tylko ze stacji inżynierskiej w sieci sterowania. Zapisujący,
+          którego adres należy do sieci biurowej, przekroczył granicę IT/OT.
+      source_host:
+        text: Jaka nazwa hosta biurowego kryje się za tym adresem?
+        hint: Host podaje swoją nazwę w żądaniu DHCP (opcja 12 Host Name), gdy wchodzi do sieci.
+      first_contact:
+        text: O której godzinie (UTC) host biurowy po raz pierwszy sięgnął do sieci sterowania (pierwsza próba)?
+        hint: Omiatanie przechodzi przez podsieć sterowania; pierwsze otwarte połączenie to początek przejścia.
+      plcs_scanned:
+        text: Ile PLC host biurowy zidentyfikował w sieci sterowania?
+        hint: Odczyt identyfikacji urządzenia (funkcja Modbus 43) jest wysyłany raz do każdego znalezionego PLC.
+      target_plc:
+        text: Który PLC (adres IP) otrzymał zmianę nastawy poza pasmem?
+      registers_written:
+        text: Które punkty PLC (nazwy z mapy rejestrów) zmienił host biurowy? Wymień je.
+      values_written:
+        text: Dla każdego zmienionego punktu podaj zapisaną wartość inżynierską.
+      out_of_band:
+        text: Czy wartość zapisana przez host biurowy mieściła się w normalnym paśmie pracy z mapy rejestrów PLC (tak/nie)?
+        hint: >-
+          Porównaj zapisaną wartość inżynierską z normalnym pasmem punktu w mapie rejestrów. Legalne zmiany
+          operatora, jeśli były, pozostają w paśmie; ta nie.
+      functions_used:
+        text: Jakich kodów funkcji Modbus użył host biurowy do zapisu?
+      firewall_mac:
+        text: Jaki adres MAC widział PLC w ramkach niosących żądania zapisu między strefami?
+        hint: >-
+          Host biurowy nie jest w sieci sterowania, więc jego ramki docierają routowane. Ramka routowana
+          niesie adres MAC ostatniego przeskoku - interfejsu zapory po stronie sterowania - a nie hosta źródłowego.
+      technique:
+        text: Która technika MITRE ATT&CK for ICS najlepiej opisuje dotarcie do sieci sterowania z sieci biurowej?
+  de:
+    title: Eine Büro-Workstation pivotiert durch die Firewall in das OT-Steuernetz
+    briefing: |
+      Sie sind im SOC von {site_name} ({domain}). Der Standort betreibt ein Büro-LAN und ein
+      Prozessleitnetz ({process_title}), getrennt durch die IT/OT-Firewall. Der beigefügte Mitschnitt
+      stammt vom SPAN-Port des Switches im Netz {sensor_subnet}. Im Steuernetz fragen nur das HMI und
+      der Historian die SPS per Modbus/TCP ab, und Sollwerte ändert ausschließlich die
+      Engineering-Station; kein Bürohost hat dort etwas zu suchen. Ein Prozessingenieur meldete einen
+      Sollwert, der sich von selbst verstellte. Finden Sie den verantwortlichen Host, erfassen Sie, was
+      er im Steuernetz berührt hat, und stellen Sie fest, welcher Sollwert geändert wurde und ob der
+      Wert sicher ist.
+    questions:
+      source_ip:
+        text: Von welcher IP-Adresse wurde aus dem Büro-LAN in das Steuernetz gegriffen und ein Sollwert geändert?
+        hint: >-
+          Normale Modbus-Schreibzugriffe kommen nur von der Engineering-Station im Steuernetz. Ein Schreiber,
+          dessen Adresse zum Büro-LAN gehört, hat die IT/OT-Grenze überschritten.
+      source_host:
+        text: Welcher Büro-Hostname steckt hinter dieser Adresse?
+        hint: Der Host nennt seinen Namen in seiner DHCP-Anfrage (Host-Name-Option 12), wenn er online geht.
+      first_contact:
+        text: Um welche Uhrzeit (UTC) griff der Bürohost erstmals in das Steuernetz (seine erste Probe)?
+        hint: Der Sweep läuft durch das Steuer-Subnetz; die erste geöffnete Verbindung ist der Beginn des Pivots.
+      plcs_scanned:
+        text: Wie viele SPS hat der Bürohost im Steuernetz identifiziert?
+        hint: Read Device Identification (Modbus-Funktion 43) wird einmal an jede gefundene SPS gesendet.
+      target_plc:
+        text: Welche SPS (IP-Adresse) erhielt die Sollwertänderung außerhalb des Bandes?
+      registers_written:
+        text: Welche SPS-Datenpunkte (Namen aus der Registertabelle) hat der Bürohost geändert? Zählen Sie sie auf.
+      values_written:
+        text: Geben Sie für jeden geänderten Datenpunkt den geschriebenen physikalischen Wert an.
+      out_of_band:
+        text: Lag der vom Bürohost geschriebene Wert innerhalb des normalen Betriebsbandes der Registertabelle (ja/nein)?
+        hint: >-
+          Vergleichen Sie den geschriebenen physikalischen Wert mit dem normalen Band des Datenpunkts in der
+          Registertabelle. Legitime Bedieneränderungen bleiben im Band; diese nicht.
+      functions_used:
+        text: Welche Modbus-Funktionscodes hat der Bürohost zum Schreiben verwendet?
+      firewall_mac:
+        text: Welche MAC-Adresse sah die SPS in den Frames mit den zonenübergreifenden Schreibanfragen?
+        hint: >-
+          Der Bürohost ist nicht im Steuernetz, daher kommen seine Frames geroutet an. Ein gerouteter Frame
+          trägt die MAC des letzten Hops - der steuerungsseitigen Firewall-Schnittstelle - nicht die des Quellhosts.
+      technique:
+        text: Welche Technik aus MITRE ATT&CK for ICS beschreibt das Erreichen des Steuernetzes aus dem Büro-LAN am besten?

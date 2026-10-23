@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,9 @@ SPLUNK_URL = os.environ.get("PCAPFORGE_SPLUNK_URL", "").rstrip("/")
 ELASTIC_URL = os.environ.get("PCAPFORGE_ELASTIC_URL", "").rstrip("/")
 SEED = "siem-queries"
 DURATION = 600.0  # 10 minutes hold every incident on every level
-
+# Splunk removes a deleted index asynchronously: re-creating the same name right away races with the
+# removal and the oneshot events never land. Every session uses fresh index names instead.
+SESSION = time.strftime("%Y%m%d%H%M%S")
 RUNS = [(sid, level) for sid, sc in sorted(discover().items())
         if any(q.get("hunt", {}).get("spl") or q.get("hunt", {}).get("kql") for q in sc.doc.get("questions", []))
         for level in ("easy", "medium", "hard")]
@@ -89,6 +92,24 @@ def grounded(answer, events):
     return words & present
 
 
+def missing_from(question, expected, values):
+    """The ``expected`` answer parts not among the returned ``values``. A timestamp answer with a
+    ``tolerance_s`` counts as returned when a returned timestamp is that close, as grading accepts it."""
+    missing = expected - values
+    if question.get("type") != "timestamp" or "tolerance_s" not in question:
+        return missing
+    times = [t for t in (parse_ts(v) for v in values) if t is not None]
+    return {m for m in missing
+            if parse_ts(m) is None or not any(abs(parse_ts(m) - t) <= question["tolerance_s"] for t in times)}
+
+
+def parse_ts(value):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def request(url, body=None, *, method=None, headers=None, auth=None, context=None, timeout=120):
     data = body.encode("utf-8") if isinstance(body, str) else body
     req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
@@ -131,8 +152,7 @@ class Splunk:
         self.sourcetypes.add(name)
 
     def load(self, index, siem):
-        """Index every siem/*.jsonl file into a fresh ``index`` with oneshot inputs (Add Data > Upload)."""
-        self.call(f"/services/data/indexes/{index}", method="DELETE")
+        """Index every siem/*.jsonl file into a new ``index`` with oneshot inputs (Add Data > Upload)."""
         status, body = self.call("/services/data/indexes", {"name": index})
         assert status == 201, f"create index {index}: HTTP {status} {body}"
         expected = 0
@@ -194,8 +214,11 @@ class Elastic:
             if not raw.strip():
                 continue
             index = f"pcapforge-{path.stem}"
+            # find_structure needs two lines to sample; a one-record file is sampled twice and still
+            # bulk-loaded once.
+            sample = raw if len(raw.strip().splitlines()) > 1 else raw.strip() + "\n" + raw.strip() + "\n"
             status, structure = self.call("/_text_structure/find_structure?format=ndjson&timestamp_field=ts",
-                                          raw, content_type="application/x-ndjson")
+                                          sample, content_type="application/x-ndjson")
             assert status == 200, f"find_structure {path.name}: HTTP {status} {structure}"
             mappings = structure["mappings"]
             # Hunt queries never search the nested detail arrays (objects, controls, ...). Store them
@@ -252,8 +275,16 @@ def run_label(scenario_id, level):
 @pytest.mark.parametrize("scenario_id,level", RUNS, ids=[run_label(*r) for r in RUNS])
 def test_spl_queries_run_and_return_the_answer(runs, splunk, scenario_id, level):
     directory, answers = runs(scenario_id, level)
-    index = f"pcapforge_{RUNS.index((scenario_id, level))}"
+    index = f"pcapforge_{SESSION}_{RUNS.index((scenario_id, level))}"
     splunk.load(index, directory / "siem")
+    try:
+        failures = splunk_failures(splunk, index, directory, answers)
+    finally:
+        splunk.call(f"/services/data/indexes/{index}", method="DELETE")
+    assert not failures, "\n".join(failures)
+
+
+def splunk_failures(splunk, index, directory, answers):
     failures = []
     for question in hunted(answers):
         hunt = question["hunt"]
@@ -267,11 +298,11 @@ def test_spl_queries_run_and_return_the_answer(runs, splunk, scenario_id, level)
         matched = int(rows[0]["count"]) if rows and not errors else 0
         rows, errors = splunk.search(spl)
         events = read_jsonl(directory / "siem" / f"{hunt.get('dataset', 'modbus')}.jsonl")
-        missing = grounded(question["answer"], events) - set().union(*(flatten(r) for r in rows))
+        missing = missing_from(question, grounded(question["answer"], events), set().union(*(flatten(r) for r in rows)))
         if errors or not matched or not rows or missing:
             failures.append(f"{question['id']}: {hunt['spl']}\n  errors={errors} matched={matched} "
                             f"rows={len(rows)} missing={sorted(missing)}")
-    assert not failures, "\n".join(failures)
+    return failures
 
 
 @pytest.mark.skipif(not ELASTIC_URL, reason="set PCAPFORGE_ELASTIC_URL to run the KQL queries against Elasticsearch")
@@ -289,7 +320,8 @@ def test_kql_queries_run_and_match_the_answer(runs, elastic, scenario_id, level)
         missing = set()
         if total <= len(hits):  # every match fetched: the answer must be among them
             events = read_jsonl(directory / "siem" / f"{dataset}.jsonl")
-            missing = grounded(question["answer"], events) - set().union(set(), *(flatten(h) for h in hits))
+            missing = missing_from(question, grounded(question["answer"], events),
+                                   set().union(set(), *(flatten(h) for h in hits)))
         if errors or not total or missing:
             failures.append(f"{question['id']}: {hunt['kql']}\n  errors={errors} hits={total} "
                             f"missing={sorted(missing)}")

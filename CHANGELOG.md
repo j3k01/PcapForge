@@ -1,5 +1,90 @@
 # Changelog
 
+## Unreleased
+
+### Scenarios
+- `it-ldap-reconnaissance`: Active Directory reconnaissance over LDAP (MITRE ATT&CK T1087.002,
+  T1069.002, T1482) on the office-LAN baseline. A host that is not a normal directory client binds to
+  the domain controller over LDAP and enumerates the directory — all users, the accounts with a
+  service principal name (`(servicePrincipalName=*)`), the protected (`(adminCount=1)`) accounts, the
+  members of Domain Admins and the domain's trusts (`(objectClass=trustedDomain)`). New `ldap.recon`
+  actor and an additive `ReconDirectory` the DC serves (opt-in `Directory.recon_dir`; the office
+  baseline is unchanged). The baseline's LDAP is Kerberos-sealed, so easy and medium model a tool run
+  with explicit credentials over an unsealed (simple-bind) LDAP session where every filter and
+  returned entry is readable — easy in a burst, medium with the MS-ADTS paged-results control and
+  spread out over the capture; hard binds with the account's Kerberos ticket (GSS-SPNEGO, sealed) like
+  a member, so the filters are opaque and the tell is volume and timing — round after round of LDAP
+  sessions to the DC, each pulling large sealed responses. New `ldap` SIEM dataset (one record per
+  bind and per search request/response, with base, scope, reconstructed filter and entry count), Zeek
+  `ldap` / `ldap_search` hunts, Suricata content rules on the cleartext SPN and adminCount filters and
+  a Sigma rule over the ldap dataset.
+- `it-smb-lateral-movement`: SMB lateral movement across the office workstations (MITRE ATT&CK
+  T1021.002, T1078.002, T1083) on the office-LAN baseline. One source host authenticates once with a
+  single domain account (a Kerberos AS exchange) and then, host after host, asks the KDC for a
+  `cifs/<workstation>` service ticket and opens an SMB 3.1.1 session to the administrative shares
+  (ADMIN$, IPC$, C$), listing the share and logging off — the benign equivalent of admin-share access
+  with a reused credential (no service install, no remote execution). New `smb.server` actor gives the
+  workstations an SMB server role for this scenario only (reusing the DC's Kerberos directory and the
+  `smb2` codecs, so `it-baseline-operations` is unchanged) and new `smb.lateral` source actor; `smb2`
+  gained QUERY_DIRECTORY, a directory CREATE and an SMB2 ERROR response (STATUS_ACCESS_DENIED). easy:
+  every workstation in about a minute from an uninventoried host; medium: a subset buried in the normal
+  SYSVOL Group Policy traffic; hard: a handful of targets over two hours from a legitimate admin
+  workstation, one of which refuses the ADMIN$ connection. Questions on the source host, the account,
+  the number of targets, the first target and time, the share name and (hard) which target denied
+  access; a Suricata rule on any ADMIN$ tree connect and a Sigma value_count correlation (one source
+  reaching the admin shares of many workstations) over the smb dataset.
+- `it-ot-pivot`: an IT-to-OT pivot (MITRE ATT&CK T1046; ATT&CK for ICS T0886, T0846, T0888, T0855, T0836)
+  on the office-LAN baseline joined to a plant control network across the IT/OT firewall — the first
+  scenario that spans both lines. One office workstation routes into the control subnet, sweeps it for
+  Modbus/TCP, reads device identification from the PLCs it finds and writes a setpoint outside its normal
+  band, reusing the `modbus.scanner` and `modbus.writer` actors and the water/wastewater/HVAC/substation
+  process models. easy is a loud sweep of the whole control subnet then a write, captured on the office
+  switch; medium a targeted connect to the PLCs (read then write); hard puts the sensor on the OT side,
+  with a low-and-slow sweep (new optional `spread` on `modbus.scanner`) and one subtle out-of-band write
+  whose frames arrive routed carrying the firewall's MAC. The scenario's `topology.sensor` is drawn per
+  level through `${vars.sensor}` (the engine now resolves variable references in the sensor subnet).
+  Questions on the IT source host (IP and, on the office switch, name), the PLCs scanned, the register and
+  value written, whether the value is out of band, the first cross-zone frame and the firewall MAC the PLC
+  sees. The incident is detected by the existing Modbus Suricata/Sigma/Zeek rules (unapproved writer,
+  out-of-band write, device identification, port-502 sweep) plus a new IT→OT cross-zone rule over flows
+  (Suricata and Sigma): a TCP connection from the office LAN into the control subnet.
+- `it-rogue-dhcp`: a rogue DHCP server (MITRE ATT&CK T1557, T1557.003) on the office-LAN baseline. A
+  Raspberry Pi running dnsmasq, plugged into the office segment, answers clients' Discovers and Requests
+  before the firewall-relayed Windows Server Offer arrives, so hosts that join during the capture take its
+  lease and come up with the rogue's own default gateway and DNS resolver — a benign local simulation of
+  DHCP spoofing (no interception of real traffic). `dhcp.server` gained a `rogue` flag (a second server on
+  a subnet that already has one, leaving its pool alone), `router`/`mask` option overrides and a `dnsmasq`
+  reply format; the affected hosts resolve a few names at the rogue's own `dns.server` on medium/hard.
+  easy: an obvious rogue (a Raspberry Pi OUI and a wrong subnet mask) with several new PCs; medium: only
+  the router and DNS differ, with a few lookups at the rogue resolver; hard: it appears late, affects a
+  single host and hands out a very short lease. Questions on the rogue's IP, MAC and vendor, the router and
+  DNS it offers, the subnet mask (easy), the clients that accepted its lease, its first Offer and the
+  legitimate server identifier for contrast; a Suricata rule on the rogue's port-67 replies (a BOOTREPLY
+  from an unauthorised server) and a Sigma rule over the dhcp dataset on the unapproved server identifier.
+- `it-kerberoasting`: Kerberoasting (MITRE ATT&CK T1558.003) on the office-LAN baseline. A signed-in
+  domain user on a managed workstation logs on (a Kerberos AS exchange) and then, in a burst, requests
+  service tickets (TGS-REQ) for many service accounts' SPNs asking for RC4-HMAC (etype 23) where a
+  Windows client offers AES first, so the KDC answers with RC4-encrypted service tickets (Zeek cipher
+  `rc4-hmac`) an attacker would crack offline — benign: correct Kerberos on the loopback, opaque ticket
+  bytes, nothing cracked. The synthetic directory (`actors/ad.py`) gained opt-in service accounts with
+  SPNs (the `ad.dc` `directory: {service_accounts: N}` param; `it-baseline-operations` unchanged) and the
+  KDC issues the service ticket in the requested etype; a new `kerberos.roast` actor drives the run. The
+  Kerberos SIEM export gained `etype`/`etype_first` (the requested encryption types). easy: many SPNs in
+  seconds, RC4 only, from one host; medium: fewer, interleaved with legitimate AES service tickets; hard:
+  the requests spread low-and-slow across the two-hour capture with the user also doing normal domain
+  work. Questions on the requesting host, the signed-in account, the number of SPNs, the requested etype,
+  the first request and one targeted service; a Suricata rule on a TGS-REQ offering RC4 only and a Sigma
+  value_count correlation (one host requesting RC4 service tickets for many distinct SPNs) over the
+  kerberos dataset.
+
+### Detection engineering
+- SIEM export: new `siem/ldap.jsonl` (binds and searches: base, scope, filter when unsealed, entries);
+  `kerberos.jsonl` gains `etype` / `etype_first` (the encryption types a request offers).
+- `tests/test_siem_queries.py`: fresh Splunk index names per session (re-creating a just-deleted index
+  raced with Splunk's asynchronous removal and left it empty), one-record files sampled twice for
+  Elasticsearch's find-structure API (it needs two lines), and timestamp answers match within the
+  question's `tolerance_s`, as grading does.
+
 ## 0.4.0 - 2026-10-22
 
 Seeds are not stable across versions: the plans of the existing scenarios (actions, timing, answers) are

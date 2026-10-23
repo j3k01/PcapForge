@@ -8,6 +8,7 @@ from __future__ import annotations
 import struct
 
 NEGOTIATE, SESSION_SETUP, LOGOFF, TREE_CONNECT, TREE_DISCONNECT, CREATE, CLOSE, READ, IOCTL = 0, 1, 2, 3, 4, 5, 6, 8, 11
+QUERY_DIRECTORY = 14
 FLAGS_RESPONSE, FLAGS_SIGNED = 0x00000001, 0x00000008
 STATUS_SUCCESS = 0
 HEADER_SIZE = 64
@@ -29,6 +30,11 @@ DFS_TARGET_SET_BOUNDARY = 0x0004  # ReferralEntryFlags of the first target of a 
 FILE_READ = 0x00120089            # READ_DATA | READ_EA | READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
 NON_DIRECTORY_SYNC = 0x00000060   # FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT
 ATTRIBUTE_ARCHIVE = 0x20
+ATTRIBUTE_DIRECTORY = 0x10
+STATUS_ACCESS_DENIED = 0xC0000022
+FILE_BOTH_DIR_INFO = 3
+DIR_ACCESS = 0x00120081           # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
+DIRECTORY_SYNC = 0x00000021       # FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT
 FILETIME_EPOCH = 116444736000000000
 NO_FILE = b"\xff" * 16
 
@@ -226,3 +232,65 @@ def file_id_of(body: bytes, command: int) -> bytes:
 def create_name(body: bytes) -> str:
     offset, size = struct.unpack_from("<HH", body, 44)
     return body[offset - HEADER_SIZE:offset - HEADER_SIZE + size].decode("utf-16-le")
+
+
+# --- CREATE (directory) / QUERY_DIRECTORY / ERROR ---------------------------------------
+# A benign admin-share access opens the share root as a directory and lists it (an enumeration,
+# no file is read or written); a target that refuses the tree connect answers with an SMB2 ERROR
+# response carrying STATUS_ACCESS_DENIED in the header.
+
+def create_dir_request(name: str) -> bytes:
+    path = utf16(name)
+    name_offset = HEADER_SIZE + 56
+    contexts_at = name_offset + len(path) + (-(name_offset + len(path)) % 8)
+    contexts = (_create_context(b"MxAc", b"", last=False) + _create_context(b"QFid", b"", last=True))
+    body = struct.pack("<HBBIQQIIIIIHHII", 57, 0, 0, 2, 0, 0, DIR_ACCESS, 0, 0x00000007, 1, DIRECTORY_SYNC,
+                       name_offset, len(path), contexts_at, len(contexts)) + path
+    return body + bytes(contexts_at - HEADER_SIZE - len(body)) + contexts
+
+
+def create_dir_response(file_id: bytes, times: tuple[float, float, float, float], access: int,
+                        disk_id: bytes) -> bytes:
+    created, accessed, written, changed = (filetime(t) for t in times)
+    contexts = (_create_context(b"MxAc", struct.pack("<II", STATUS_SUCCESS, access), last=False)
+                + _create_context(b"QFid", disk_id + bytes(32 - len(disk_id)), last=True))
+    contexts_at = HEADER_SIZE + 88
+    return struct.pack("<HBBIQQQQQQII16sII", 89, 0, 0, 1, created, accessed, written, changed, 4096, 0,
+                       ATTRIBUTE_DIRECTORY, 0, file_id, contexts_at, len(contexts)) + contexts
+
+
+def query_directory_request(file_id: bytes, pattern: str = "*", info_class: int = FILE_BOTH_DIR_INFO,
+                            flags: int = 0, output_length: int = 65536) -> bytes:
+    name = utf16(pattern)
+    name_offset = HEADER_SIZE + 32
+    return struct.pack("<HBBI16sHHI", 33, info_class, flags, 0, file_id, name_offset, len(name),
+                       output_length) + name
+
+
+def query_directory_response(entries: bytes) -> bytes:
+    return struct.pack("<HHI", 9, HEADER_SIZE + 8, len(entries)) + entries
+
+
+def dir_entries(items: list[tuple[str, tuple[float, float, float, float], int, int]]) -> bytes:
+    """FILE_BOTH_DIR_INFORMATION buffer: one entry per (name, (created, accessed, written, changed),
+    size, attributes); the last entry's NextEntryOffset is 0, the others 8-aligned."""
+    blobs = []
+    for name, times, size, attrs in items:
+        fname = utf16(name)
+        created, accessed, written, changed = (filetime(t) for t in times)
+        head = struct.pack("<IIQQQQQQIIIBB24s", 0, 0, created, accessed, written, changed, size,
+                           (size + 4095) // 4096 * 4096, attrs, len(fname), 0, 0, 0, bytes(24))
+        blobs.append(head + fname)
+    out = bytearray()
+    for index, blob in enumerate(blobs):
+        if index < len(blobs) - 1:
+            padded = pad8(blob)
+            out += struct.pack("<I", len(padded)) + padded[4:]
+        else:
+            out += blob
+    return bytes(out)
+
+
+def error_response() -> bytes:
+    """SMB2 ERROR Response body (MS-SMB2 2.2.2); the status code is carried in the header."""
+    return struct.pack("<HBBI", 9, 0, 0, 0)

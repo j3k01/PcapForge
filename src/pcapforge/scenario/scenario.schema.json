@@ -523,6 +523,7 @@
                   "bacnet",
                   "enip",
                   "kerberos",
+                  "ldap",
                   "smb",
                   "tls",
                   "http"
