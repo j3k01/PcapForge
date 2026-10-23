@@ -1,9 +1,18 @@
 """Windows Server Update Services: the Windows Update Agent of each workstation scans against the site's WSUS
 server over plain HTTP on port 8530 ([MS-WUSP]), and downloads approved update content with BITS.
 
+Before each detection the agent probes the server's self-update tree with a conditional
+GET /selfupdate/wuident.cab (WinHTTP, the Windows-Update-Agent user agent): the server answers
+304 Not Modified while the cached agent is current, 200 OK with the wuident.cab on a client's first
+contact ([MS-WUSP] 3.2.4; "Automatic Updates Must Be Updated", the WSUS Selfupdate virtual directory).
+
 Scan (one keep-alive connection, SOAP 1.1 over HTTP/1.1): GetConfig and GetCookie on
 /ClientWebService/client.asmx, GetAuthorizationCookie on /SimpleAuthWebService/SimpleAuth.asmx,
-SyncUpdates, and GetExtendedUpdateInfo when an approved update applies; the client sends protocol
+RegisterComputer on a first contact (GetConfig returns IsRegistrationRequired; [MS-WUSP] 2.2.2.2.3,
+the computer's OS / BIOS / hardware ComputerInfo), SyncUpdates, then a second SyncUpdates with
+SkipSoftwareSync=true and the CachedDriverIDs / SystemSpec when the server synchronizes drivers
+(DriverSyncNotNeeded=false; off by default, like a default WSUS), and GetExtendedUpdateInfo when an
+approved update applies; the client sends protocol
 version 2.4 (Windows 10 20H2 and later, [MS-WUSP] product behavior note 11). On those two services
 the client asks for xpress compression (``Accept-Encoding: xpress``) and the server sends its
 replies Xpress-compressed (``Content-Encoding: xpress``, ``xpress.py``, section 2.1.1). After a
@@ -18,8 +27,9 @@ IIS closes the idle connections after its connectionTimeout of 120 s.
 
 Workstations that boot during the capture scan ``scan_after`` seconds after their address is
 configured; ones that were running scan with the probability of their 22-hour detection interval
-falling into the capture. Not modelled: the Windows Update Agent self-update check,
-RegisterComputer and driver synchronization.
+falling into the capture. A client's first contact (a new PC, or one whose cached registration or
+agent version changed) both self-updates (200) and registers; whether the server synchronizes the
+driver classification is the ``drivers`` server param (a default WSUS does not, so most scans do not).
 """
 
 from __future__ import annotations
@@ -51,6 +61,10 @@ CLIENT_PATH, AUTH_PATH = "/ClientWebService/client.asmx", "/SimpleAuthWebService
 REPORTING_PATH = "/ReportingWebService/ReportingWebService.asmx"
 PROTOCOL_VERSION = "2.4"
 DETECTION_STARTED, DETECTION_FINISHED, DOWNLOAD_SUCCEEDED = 141, 147, 162
+SELFUPDATE_PATH = "/selfupdate/wuident.cab"   # the WSUS Selfupdate virtual directory the WUA probes
+REGISTER_FRACTION = 0.1   # a client whose cached registration / computer info changed re-registers
+CLIENT_VERSION = (10, 0, 10011, 16384)   # the four-part WUA version string in USER_AGENT
+OS_BUILD = 19045          # Windows 10 22H2, as the ReportEventBatch OSVersion
 NO_UPDATE = "00000000-0000-0000-0000-000000000000"
 ENVELOPE = ('<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" '
             'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema"'
@@ -93,7 +107,9 @@ def response(body: str, epoch: float, compressed: bool = True) -> bytes:
 @register
 class WsusServer(Actor):
     """WSUS on IIS (port 8530). Params: ``update`` (an approved Microsoft Defender Antivirus security
-    intelligence update clients download: true / false, default false), ``update_size`` ([lo, hi] bytes)."""
+    intelligence update clients download: true / false, default false), ``update_size`` ([lo, hi] bytes),
+    ``drivers`` (the server also synchronizes the driver classification, so clients run a driver
+    SyncUpdates: true / false, default false — a default WSUS does not synchronize drivers)."""
 
     type = "wsus.server"
     is_server = True
@@ -124,8 +140,13 @@ class WsusServer(Actor):
                 "update_id": str(uuid.UUID(bytes=label_bytes(f"wsus-update\x1f{rng.key}", 16), version=4)),
                 "modified": plan.start_epoch - rng.uniform(3600.0, 20 * 3600.0),
             }
+        # The /selfupdate tree WSUS Setup creates under the web site; the WUA probes wuident.cab before
+        # a scan ([MS-WUSP] 3.2.4). The agent package is weeks old, so current clients get a 304.
+        self.drivers = bool(self.param("drivers", False))
+        self.selfupdate = {"path": SELFUPDATE_PATH, "size": rng.randint(40_000, 90_000),
+                           "modified": plan.start_epoch - rng.uniform(10 * 86400.0, 60 * 86400.0)}
         plan.facts[self.id] = {"hosts": [host_ref(host.id)], "fqdn": self.fqdn, "port": PORT,
-                               "url": f"http://{self.fqdn}:{PORT}", "update": self.update}
+                               "url": f"http://{self.fqdn}:{PORT}", "update": self.update, "drivers": self.drivers}
 
     async def serve(self, rt) -> None:
         await self.server.start(rt, self.hosts[0].loopback, ports.WSUS)
@@ -148,7 +169,7 @@ class WsusClient(Actor):
         self.wsus = server
         resolver = topo.select(self.param("dns"))[0].id
         scan_after = self.span(self.param("scan_after", [300, 900]))
-        scans, downloads = [], []
+        scans, downloads, registered = [], [], []
         for host in self.hosts:
             rng = self.rng.child(host.id)
             begin, end = self.connected(host)
@@ -159,11 +180,21 @@ class WsusClient(Actor):
                 at = begin + rng.uniform(0.0, end - begin) if rng.random() < chance else None
             if at is None or at >= end:
                 continue
+            # First contact with this WSUS server: a new PC (not in the inventory), or a client whose
+            # cached registration / computer info changed. It both self-updates (200) and registers.
+            first_contact = (not host.listed) or rng.random() < REGISTER_FRACTION
+            if first_contact:
+                registered.append(host_ref(host.id))
             client_id = str(uuid.UUID(bytes=label_bytes(f"wsus-client\x1f{self.rng.key}\x1f{host.id}", 16), version=4))
-            common = {"wsus": server_host.id, "client_id": client_id, "fqdn": f"{host.name.lower()}.{topo.domain}"}
+            common = {"wsus": server_host.id, "client_id": client_id, "fqdn": f"{host.name.lower()}.{topo.domain}",
+                      "first_contact": first_contact}
             plan.add(at, self.id, host.id, "wsus.resolve", name=server.fqdn, server=resolver,
                      txid=rng.randrange(1, 65536), txid6=rng.randrange(1, 65536))
-            scan = plan.add(at + rng.uniform(0.005, 0.03), self.id, host.id, "wsus.scan", **common)
+            # The WUA probes /selfupdate/wuident.cab (its own WinHTTP session) before the SOAP scan.
+            selfupdate = plan.add(at + rng.uniform(0.003, 0.012), self.id, host.id, "wsus.selfupdate",
+                                  wsus=server_host.id, first_contact=first_contact)
+            self._close(host.id, "selfupdate", selfupdate.t + IDLE_TIMEOUT)
+            scan = plan.add(selfupdate.t + rng.uniform(0.01, 0.05), self.id, host.id, "wsus.scan", **common)
             found = 1 if server.update is not None else 0
             started, finished = at + 0.01, at + rng.uniform(0.3, 1.2)
             reported = at + rng.uniform(5.0, 30.0)  # the client batches its events after a short delay
@@ -186,10 +217,12 @@ class WsusClient(Actor):
                                  events=[[DOWNLOAD_SUCCEEDED, when + 1.0, server.update["update_id"], None]])
                         self._close(host.id, "report", done + IDLE_TIMEOUT)
                     downloads.append({"host": host_ref(host.id), "download": action_ref(download)})
+        soap_actions = (["GetConfig", "GetAuthorizationCookie", "GetCookie"]
+                        + (["RegisterComputer"] if registered else [])
+                        + ["SyncUpdates"] + (["GetExtendedUpdateInfo"] if server.update else []))
         plan.facts[self.id] = {"server": host_ref(server_host.id), "scans": scans, "downloads": downloads,
-                               "scanned": [s["host"] for s in scans],
-                               "soap_actions": ["GetConfig", "GetAuthorizationCookie", "GetCookie", "SyncUpdates"]
-                               + (["GetExtendedUpdateInfo"] if server.update else []),
+                               "scanned": [s["host"] for s in scans], "registered": registered,
+                               "soap_actions": soap_actions,
                                "reported_events": [DETECTION_STARTED, DETECTION_FINISHED]
                                + ([DOWNLOAD_SUCCEEDED] if downloads else [])}
 
@@ -206,7 +239,8 @@ class WsusClient(Actor):
             query_server(rt, action.host, a["server"], a["name"], "A", a["txid"])
             query_server(rt, action.host, a["server"], a["name"], "AAAA", a["txid6"])
             return
-        key = (self.id, action.host, a.get("conn", "scan" if action.op == "wsus.scan" else "download"))
+        key = (self.id, action.host,
+               a.get("conn", {"wsus.scan": "scan", "wsus.selfupdate": "selfupdate"}.get(action.op, "download")))
         if action.op == "wsus.timeout":
             rt.clients.pop(key).server_close()
             return
@@ -217,8 +251,10 @@ class WsusClient(Actor):
                                                         rt.loopback(a["wsus"]), ports.WSUS)
         now = rt.plan.start_epoch + rt.clock.t
         if action.op == "wsus.scan":
-            for path, soap_action, body, reply in self._scan(a, now):
+            for path, soap_action, body, reply in self._scan(a, now, rt.plan.topology.by_id[action.host]):
                 conn.exchange(request(path, self.wsus.fqdn, soap_action, body), response(reply, now))
+        elif action.op == "wsus.selfupdate":
+            self._selfupdate(conn, a, now)
         elif action.op == "wsus.report":
             body = self._report(a, rt.plan.start_epoch, now, rt.plan.topology.by_id[action.host])
             reply = ENVELOPE.format(extra="", body=f'<ReportEventBatchResponse xmlns="{NS_REPORTING}">'
@@ -259,7 +295,7 @@ class WsusClient(Actor):
             f'<eventBatch xmlns:q1="{NS_REPORTING}" soapenc:arrayType="q1:ReportingEvent[{len(events)}]">'
             + "".join(events) + "</eventBatch></ReportEventBatch>"))
 
-    def _scan(self, a: dict, now: float) -> list[tuple[str, str, str, str]]:
+    def _scan(self, a: dict, now: float, host) -> list[tuple[str, str, str, str]]:
         """(path, SOAPAction, request body, response body) of one detection."""
         label = f"{self.rng.key}\x1f{a['client_id']}"
         update = self.wsus.update
@@ -298,6 +334,31 @@ class WsusClient(Actor):
              reply(f'<GetCookieResponse xmlns="{NS_CLIENT}"><GetCookieResult><Expiration>{expire}</Expiration>'
                    f"<EncryptedData>{cookie}</EncryptedData></GetCookieResult></GetCookieResponse>")),
         ]
+        if a["first_contact"]:
+            # Registration follows GetCookie because GetConfig returned IsRegistrationRequired; the
+            # ComputerInfo carries the OS / BIOS / hardware in the [MS-WUSP] 2.2.2.2.3 element order.
+            dev = host.device
+            model = dev.identity.get("ComputerModel") or dev.name
+            maj, minr, build, qfe = CLIENT_VERSION
+            info = (f"<DnsName>{a['fqdn']}</DnsName><OSMajorVersion>10</OSMajorVersion>"
+                    f"<OSMinorVersion>0</OSMinorVersion><OSBuildNumber>{OS_BUILD}</OSBuildNumber>"
+                    "<OSServicePackMajorNumber>0</OSServicePackMajorNumber>"
+                    "<OSServicePackMinorNumber>0</OSServicePackMinorNumber><OSLocale>en-US</OSLocale>"
+                    f"<ComputerManufacturer>{dev.vendor}</ComputerManufacturer><ComputerModel>{model}</ComputerModel>"
+                    f"<BiosVersion>{dev.vendor} 1.20.0</BiosVersion><BiosName>Default System BIOS</BiosName>"
+                    f"<BiosReleaseDate>{_iso(now - 420 * 86400.0, 0)}</BiosReleaseDate>"
+                    "<ProcessorArchitecture>AMD64</ProcessorArchitecture><SuiteMask>272</SuiteMask>"
+                    "<OldProductType>1</OldProductType><NewProductType>1</NewProductType>"
+                    "<SystemMetrics>0</SystemMetrics>"
+                    f"<ClientVersionMajorNumber>{maj}</ClientVersionMajorNumber>"
+                    f"<ClientVersionMinorNumber>{minr}</ClientVersionMinorNumber>"
+                    f"<ClientVersionBuildNumber>{build}</ClientVersionBuildNumber>"
+                    f"<ClientVersionQfeNumber>{qfe}</ClientVersionQfeNumber>"
+                    "<OSDescription>Windows 10 Pro</OSDescription>")
+            calls.append((CLIENT_PATH, f"{NS_CLIENT}/RegisterComputer", envelope(
+                f'<RegisterComputer xmlns="{NS_CLIENT}"><cookie><Expiration>{expire}</Expiration>'
+                f"<EncryptedData>{cookie}</EncryptedData></cookie><computerInfo>{info}</computerInfo>"
+                "</RegisterComputer>"), reply(f'<RegisterComputerResponse xmlns="{NS_CLIENT}" />')))
         sync_request = envelope(
             f'<SyncUpdates xmlns="{NS_CLIENT}"><cookie><Expiration>{expire}</Expiration>'
             f"<EncryptedData>{cookie}</EncryptedData></cookie><parameters><ExpressQuery>false</ExpressQuery>"
@@ -315,8 +376,31 @@ class WsusClient(Actor):
         calls.append((CLIENT_PATH, f"{NS_CLIENT}/SyncUpdates", sync_request, reply(
             f'<SyncUpdatesResponse xmlns="{NS_CLIENT}"><SyncUpdatesResult><NewUpdates>{new_updates}</NewUpdates>'
             f"<Truncated>false</Truncated><NewCookie><Expiration>{expire}</Expiration><EncryptedData>{cookie}"
-            "</EncryptedData></NewCookie><DriverSyncNotNeeded>true</DriverSyncNotNeeded></SyncUpdatesResult>"
+            "</EncryptedData></NewCookie>"
+            f"<DriverSyncNotNeeded>{'false' if self.wsus.drivers else 'true'}</DriverSyncNotNeeded>"
+            "</SyncUpdatesResult>"
             "</SyncUpdatesResponse>")))
+        if self.wsus.drivers:
+            # The server synchronizes drivers, so the agent runs a driver-metadata SyncUpdates:
+            # SkipSoftwareSync=true with the cached driver revisions and the device's SystemSpec
+            # ([MS-WUSP] 2.2.2.2.4). The server answers DriverSyncNotNeeded=true to end it.
+            driver_cookie = _b64(f"wsus-driver\x1f{label}", 168)
+            driver_ids = [int.from_bytes(label_bytes(f"wsus-driver-id\x1f{label}\x1f{i}", 4), "big") % 89_999_999
+                          + 10_000_000 for i in range(3)]
+            cached = "".join(f"<int>{i}</int>" for i in driver_ids)
+            spec = ("<Device><HardwareIDs>"
+                    "<string>PCI\\VEN_8086&amp;DEV_1916&amp;SUBSYS_00000000&amp;REV_07</string></HardwareIDs>"
+                    "<CompatibleIDs><string>PCI\\VEN_8086&amp;DEV_1916</string></CompatibleIDs></Device>")
+            calls.append((CLIENT_PATH, f"{NS_CLIENT}/SyncUpdates", envelope(
+                f'<SyncUpdates xmlns="{NS_CLIENT}"><cookie><Expiration>{expire}</Expiration>'
+                f"<EncryptedData>{cookie}</EncryptedData></cookie><parameters><ExpressQuery>false</ExpressQuery>"
+                '<InstalledNonLeafUpdateIDs xsi:nil="true" /><OtherCachedUpdateIDs xsi:nil="true" />'
+                f"<SystemSpec>{spec}</SystemSpec><CachedDriverIDs>{cached}</CachedDriverIDs>"
+                "<SkipSoftwareSync>true</SkipSoftwareSync></parameters></SyncUpdates>"), reply(
+                f'<SyncUpdatesResponse xmlns="{NS_CLIENT}"><SyncUpdatesResult><NewUpdates />'
+                f"<Truncated>false</Truncated><NewCookie><Expiration>{expire}</Expiration>"
+                f"<EncryptedData>{driver_cookie}</EncryptedData></NewCookie>"
+                "<DriverSyncNotNeeded>true</DriverSyncNotNeeded></SyncUpdatesResult></SyncUpdatesResponse>")))
         if update is not None:
             digest = base64.b64encode(bytes.fromhex(update["sha1"])).decode()
             files = (f"&lt;Files&gt;&lt;File Digest=\"{digest}\" DigestAlgorithm=\"SHA1\" FileName=\"{update['file']}\" "
@@ -337,6 +421,27 @@ class WsusClient(Actor):
                 f"<Url>http://{self.wsus.fqdn}:{PORT}{update['path']}</Url></FileLocation></FileLocations>"
                 "</GetExtendedUpdateInfoResult></GetExtendedUpdateInfoResponse>")))
         return calls
+
+    def _selfupdate(self, conn: ScriptedConnection, a: dict, now: float) -> None:
+        """The WUA probes /selfupdate/wuident.cab (WinHTTP conditional GET): 304 Not Modified while the
+        cached agent is current, 200 with the wuident.cab on a client's first contact ([MS-WUSP] 3.2.4)."""
+        info = self.wsus.selfupdate
+        last_mod = _http_date(info["modified"])
+        digest = hashlib.sha1(label_bytes(f"wsus-selfupdate\x1f{self.wsus.fqdn}", 32)).hexdigest()
+        etag = f'"{digest[:16]}:0"'
+        head = f"Accept: */*\r\nUser-Agent: {USER_AGENT}\r\nHost: {self.wsus.fqdn}:{PORT}\r\n"
+        server = (f"Last-Modified: {last_mod}\r\nAccept-Ranges: bytes\r\nETag: {etag}\r\n"
+                  f"Server: Microsoft-IIS/10.0\r\nX-Powered-By: ASP.NET\r\nDate: {_http_date(now)}\r\n")
+        if a["first_contact"]:
+            get = f"GET {info['path']} HTTP/1.1\r\nConnection: Keep-Alive\r\n{head}\r\n".encode()
+            body = label_bytes(f"wsus-wuident\x1f{self.wsus.fqdn}", info["size"])
+            reply = (f"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.ms-cab-compressed\r\n"
+                     f"Content-Length: {info['size']}\r\n{server}\r\n").encode() + body
+        else:
+            get = (f"GET {info['path']} HTTP/1.1\r\nConnection: Keep-Alive\r\n"
+                   f"If-Modified-Since: {last_mod}\r\n{head}\r\n").encode()
+            reply = f"HTTP/1.1 304 Not Modified\r\n{server}\r\n".encode()
+        conn.exchange(get, reply)
 
     def _download(self, conn: ScriptedConnection, now: float) -> None:
         """BITS: a HEAD for the size, then a GET for the whole file."""

@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-ldap-reconnaissance
 title: Active Directory reconnaissance over LDAP on the office LAN
 line: it
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [it, recon, ldap, active-directory, account-discovery, group-discovery, domain-trust, windows, kerberos]

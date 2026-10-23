@@ -24,7 +24,7 @@ def tshark(pcap, display_filter, *fields):
 @pytest.fixture(scope="module")
 def run(tmp_path_factory):
     result = generate(find("it-baseline-operations"), "medium", "pytest-web", tmp_path_factory.mktemp("web"),
-                      duration=900.0)
+                      duration=1800.0)
     assert result.report.ok, [c for c in result.report.checks if not c["ok"]]
     return result, json.loads(result.answers.read_text(encoding="utf-8"))
 
@@ -55,6 +55,17 @@ def test_edge_negotiates_tls_1_2_with_iis_and_the_chain_comes_from_the_domain_ca
 
 
 @pytest.mark.skipif(not capture_tools, reason="requires tshark >= 4.4 and dumpcap/tcpdump with loopback capture rights")
+def test_iis_resumes_with_its_session_id_cache_and_issues_no_session_tickets(run):
+    result, _ = run
+    # Schannel/IIS keeps a session-ID cache and never sends a NewSessionTicket (handshake type 4)...
+    assert not tshark(result.pcap, "tls.handshake.type == 4", "frame.number")
+    # ...and no intranet ClientHello carries a non-empty session ticket, so resumption is by session ID.
+    tickets = [t for (t,) in tshark(result.pcap, "tls.handshake.type == 1",
+                                    "tls.handshake.extensions.session_ticket") if t and t != "<MISSING>"]
+    assert not tickets
+
+
+@pytest.mark.skipif(not capture_tools, reason="requires tshark >= 4.4 and dumpcap/tcpdump with loopback capture rights")
 def test_windows_update_scans_over_soap_and_bits_fetches_the_approved_file(run):
     result, answers = run
     update = answers["facts"]["update_service"]["update"]
@@ -62,8 +73,10 @@ def test_windows_update_scans_over_soap_and_bits_fetches_the_approved_file(run):
     actions = [line.split('SOAPAction: "', 1)[1].split('"', 1)[0].rsplit("/", 1)[1]
                for _, lines in posts for line in lines.split(",") if line.startswith("SOAPAction")]
     assert posts and all(agent.startswith("Windows-Update-Agent/") for agent, _ in posts)
-    scan = ["GetConfig", "GetAuthorizationCookie", "GetCookie", "SyncUpdates", "GetExtendedUpdateInfo"]
-    assert actions[:5] == scan and set(actions) == set(scan) | {"ReportEventBatch"}
+    # Software scan calls, RegisterComputer on a first contact (the new PC), and the reporting call;
+    # the driver sync reuses the SyncUpdates action name.
+    assert set(actions) == {"GetConfig", "GetAuthorizationCookie", "GetCookie", "SyncUpdates",
+                            "GetExtendedUpdateInfo", "RegisterComputer", "ReportEventBatch"}
     # The client and authorization services answer Xpress-compressed; Wireshark's own decoder unpacks them.
     bodies = tshark(result.pcap, 'http.content_encoding == "xpress"', "http.file_data")
     assert bodies and all(bytes.fromhex(data).startswith(b"<soap:Envelope") for (data,) in bodies)
@@ -72,7 +85,40 @@ def test_windows_update_scans_over_soap_and_bits_fetches_the_approved_file(run):
     assert reports and all(f"<EventID>{e}</EventID>".encode() in events for e in (141, 147, 162))
     gets = tshark(result.pcap, 'http.request.method in {"HEAD", "GET"}', "http.request.method", "http.request.uri",
                   "http.user_agent")
-    assert gets and {(method, uri) for method, uri, _ in gets} == {("HEAD", update["path"]), ("GET", update["path"])}
-    assert all(agent.startswith("Microsoft BITS/") for _, _, agent in gets)
+    content = {(method, uri) for method, uri, agent in gets if agent.startswith("Microsoft BITS/")}
+    assert content == {("HEAD", update["path"]), ("GET", update["path"])}
     sizes = tshark(result.pcap, "http.response.code == 206", "http.content_length_header")
     assert sizes and {int(s) for (s,) in sizes} == {update["size"]}
+
+
+@pytest.mark.skipif(not capture_tools, reason="requires tshark >= 4.4 and dumpcap/tcpdump with loopback capture rights")
+def test_wsus_self_update_precedes_scan_register_is_planned_and_drivers_sync(run):
+    result, answers = run
+    server_ip = answers["facts"]["update_service"]["hosts"][0]["ip"]
+    registered = {h["ip"] for h in answers["facts"]["windows_update"]["registered"]}
+    assert registered  # the new PC's first contact is planned at this duration
+    reqs = tshark(result.pcap, f"http.request && ip.dst == {server_ip}",
+                  "frame.number", "ip.src", "http.request.uri", "http.request.line")
+    self_update, get_config, register = {}, {}, set()
+    for frame, src, uri, line in reqs:
+        if uri == "/selfupdate/wuident.cab":
+            self_update.setdefault(src, int(frame))
+        if "/ClientWebService/GetConfig" in line:
+            get_config.setdefault(src, int(frame))
+        if "/ClientWebService/RegisterComputer" in line:
+            register.add(src)
+    # Every scanner probes /selfupdate/wuident.cab before its scan's GetConfig on the same server.
+    assert get_config and all(src in self_update and self_update[src] < frame
+                              for src, frame in get_config.items())
+    # RegisterComputer appears only for the planned first-contact hosts.
+    assert register == registered
+    # A current agent gets 304 Not Modified; a first contact downloads the cab (200).
+    codes = tshark(result.pcap, f'http.response.code in {{200, 304}} && ip.src == {server_ip} '
+                   '&& http.request.uri == "/selfupdate/wuident.cab"', "http.response.code")
+    seen = {int(c) for (c,) in codes}
+    assert 304 in seen and 200 in seen
+    # The driver sync is a second SyncUpdates with SkipSoftwareSync=true (request bodies are uncompressed).
+    sync_bodies = tshark(result.pcap, 'http.request.uri contains "/ClientWebService/client.asmx"', "http.file_data")
+    decoded = [bytes.fromhex(d) for (d,) in sync_bodies if d]
+    assert any(b"<SkipSoftwareSync>true</SkipSoftwareSync>" in b for b in decoded)
+    assert any(b"<SkipSoftwareSync>false</SkipSoftwareSync>" in b for b in decoded)

@@ -16,17 +16,30 @@ right size, as with the Kerberos ciphertext of the domain traffic.
   ServerKeyExchange on x25519 (first in the default curve order) signed with
   rsa_pss_rsae_sha256, ServerHelloDone, all in one record.
 * Client: ClientKeyExchange, ChangeCipherSpec, Finished, and with False Start its first
-  application data in the same flight; server ChangeCipherSpec and Finished.
-* Resumption: Schannel keeps server sessions in its session ID cache (no session tickets by
-  default), so a browser that already has a session with the site offers that session ID in its
-  ClientHello (``session``); the server answers with the same ID and goes straight to
-  ChangeCipherSpec and Finished (RFC 5246 abbreviated handshake, ``server_resume``), and the client
-  answers with its ChangeCipherSpec and Finished (``client_resume_finish``).
+  application data in the same flight; a ticket-issuing server first sends NewSessionTicket
+  (see below), then its ChangeCipherSpec and Finished.
+* Resumption has two forms, chosen by the server's ``tickets`` flag:
+  - Session ID (Schannel/IIS default, ``tickets=False``): Schannel keeps server sessions in its
+    session ID cache (no session tickets), so a browser that already has a session with the site
+    offers that session ID in its ClientHello (``session``); the server answers with the same ID
+    and goes straight to ChangeCipherSpec and Finished (RFC 5246 abbreviated handshake).
+  - Session ticket (RFC 5077, what the non-Schannel servers nginx/OpenSSL do by default,
+    ``tickets=True``): on a full handshake the server echoes an empty ``session_ticket`` extension
+    (35) in its ServerHello and, after the client's Finished, sends a NewSessionTicket
+    (``new_session_ticket``: a 32-bit lifetime hint and an opaque ticket) before its
+    ChangeCipherSpec. To resume, the client sends the stored ticket in its ClientHello
+    ``session_ticket`` extension plus a fresh random legacy session ID (``client_session``); the
+    server echoes that session ID and runs the abbreviated handshake (``server_resume``), issuing
+    no new ticket. Either way the client answers with its own ChangeCipherSpec and Finished
+    (``client_resume_finish``).
+  The opaque ticket stands in for OpenSSL's key_name + IV + encrypted session state + HMAC
+  (RFC 5077 §4); its lifetime hint is OpenSSL's default TLS 1.2 session timeout of 7200 s.
 * Application data: AES-GCM records, 8-byte explicit nonce + ciphertext + 16-byte tag, at most
   16384 bytes of plaintext each.
 
-Not taken from a capture: the order of the ServerHello extensions and the ServerKeyExchange
-signature scheme.
+Not taken from a capture: the order of the ServerHello extensions (including where the empty
+session_ticket extension sits), the NewSessionTicket lifetime and ticket length, and the
+ServerKeyExchange signature scheme.
 """
 
 from __future__ import annotations
@@ -41,6 +54,10 @@ CLIENT_HELLO, SERVER_HELLO, CERTIFICATE, SERVER_KEY_EXCHANGE, SERVER_HELLO_DONE,
     1, 2, 11, 12, 14, 16, 20)
 MAX_PLAINTEXT = 16384
 GCM_OVERHEAD = 8 + 16
+NEW_SESSION_TICKET = 4
+SESSION_TICKET_EXT = 35
+TICKET_LIFETIME = 7200   # OpenSSL default TLS 1.2 session timeout, sent as the NewSessionTicket hint
+TICKET_LEN = 192         # opaque ticket: key_name + IV + encrypted session state + HMAC (RFC 5077 §4)
 GREASE = tuple(0x0A0A + 0x1010 * i for i in range(16))
 CHROMIUM_SUITES = (0x1301, 0x1302, 0x1303, 0xC02B, 0xC02F, 0xC02C, 0xC030, 0xCCA9, 0xCCA8, 0xC013, 0xC014,
                    0x009C, 0x009D, 0x002F, 0x0035)
@@ -80,9 +97,11 @@ def _extension(kind: int, body: bytes = b"") -> bytes:
     return _u16(kind) + _vec16(body)
 
 
-def client_hello(server_name: str, label: str, order, session: bytes | None = None) -> bytes:
+def client_hello(server_name: str, label: str, order, session: bytes | None = None,
+                 ticket: bytes | None = None) -> bytes:
     """Chromium's ClientHello record for ``server_name``; ``order(n)`` permutes the n inner extensions,
-    ``session`` is the TLS 1.2 session ID to resume (else a random 32-byte legacy session ID)."""
+    ``session`` is the TLS 1.2 session ID to resume (else a random 32-byte legacy session ID) and
+    ``ticket``, if given, is the RFC 5077 session ticket offered in the ``session_ticket`` extension."""
     rnd = label_bytes(f"tls-client\x1f{label}", 64)
     if session is not None:
         rnd = rnd[:32] + session
@@ -104,7 +123,7 @@ def client_hello(server_name: str, label: str, order, session: bytes | None = No
         _extension(0xFF01, b"\x00"),                                             # renegotiation_info
         _extension(10, _vec16(b"".join(_u16(g) for g in groups))),               # supported_groups
         _extension(11, _vec8(b"\x00")),                                          # ec_point_formats
-        _extension(35),                                                          # session_ticket
+        _extension(SESSION_TICKET_EXT, ticket or b""),                           # session_ticket (RFC 5077)
         _extension(16, _vec16(_vec8(b"h2") + _vec8(b"http/1.1"))),               # ALPN
         _extension(5, b"\x01\x00\x00\x00\x00"),                                  # status_request
         _extension(13, _vec16(b"".join(_u16(s) for s in CHROMIUM_SIGNATURES))),  # signature_algorithms
@@ -124,9 +143,11 @@ def client_hello(server_name: str, label: str, order, session: bytes | None = No
     return record(HANDSHAKE, handshake(CLIENT_HELLO, body), TLS10)
 
 
-def _server_hello(label: str, session: bytes, alpn: bytes) -> bytes:
+def _server_hello(label: str, session: bytes, alpn: bytes, ticket_ext: bool = False) -> bytes:
     rnd = label_bytes(f"tls-server\x1f{label}", 32)
     extensions = _extension(0xFF01, b"\x00") + _extension(23) + _extension(16, _vec16(_vec8(alpn)))
+    if ticket_ext:  # RFC 5077 §3.2: an empty session_ticket extension signals a NewSessionTicket follows
+        extensions += _extension(SESSION_TICKET_EXT)
     return handshake(SERVER_HELLO, _u16(TLS12) + rnd + _vec8(session) + _u16(SCHANNEL_SUITE) + b"\x00"
                      + _vec16(extensions))
 
@@ -136,9 +157,29 @@ def session_id(label: str) -> bytes:
     return label_bytes(f"tls-session\x1f{label}", 32)
 
 
-def server_flight(label: str, chain: list[bytes], alpn: bytes = b"h2") -> bytes:
-    """Schannel's ServerHello ... ServerHelloDone of a full handshake."""
-    hello = _server_hello(label, session_id(label), alpn)
+def client_session(label: str) -> bytes:
+    """The fresh random legacy session ID a client puts in a ticket-resumed ClientHello (RFC 5077:
+    not the old session ID); the server echoes it in the abbreviated handshake."""
+    return label_bytes(f"tls-client\x1f{label}", 64)[32:]
+
+
+def session_ticket(label: str) -> bytes:
+    """The opaque RFC 5077 session ticket a non-Schannel (OpenSSL/nginx) server issues for the full
+    handshake ``label`` (key name + IV + encrypted session state + HMAC, here seed-derived bytes)."""
+    return label_bytes(f"tls-ticket\x1f{label}", TICKET_LEN)
+
+
+def new_session_ticket(label: str, lifetime: int = TICKET_LIFETIME) -> bytes:
+    """Server's NewSessionTicket record (RFC 5077 §3.3): a 32-bit lifetime hint and the opaque
+    ticket, sent in the clear after the client's Finished and before the server's ChangeCipherSpec."""
+    body = struct.pack("!I", lifetime) + _vec16(session_ticket(label))
+    return record(HANDSHAKE, handshake(NEW_SESSION_TICKET, body))
+
+
+def server_flight(label: str, chain: list[bytes], alpn: bytes = b"h2", tickets: bool = False) -> bytes:
+    """ServerHello ... ServerHelloDone of a full handshake; with ``tickets`` the ServerHello carries
+    the empty session_ticket extension (RFC 5077) a NewSessionTicket-issuing server sends."""
+    hello = _server_hello(label, session_id(label), alpn, ticket_ext=tickets)
     certificate = handshake(CERTIFICATE, _vec24(b"".join(_vec24(c) for c in chain)))
     params = b"\x03" + _u16(X25519) + _vec8(label_bytes(f"tls-ske\x1f{label}", 32))
     signature = _u16(RSA_PSS_RSAE_SHA256) + _vec16(label_bytes(f"tls-ske-signature\x1f{label}", 256))
@@ -166,8 +207,11 @@ def client_finish(label: str) -> bytes:
             + record(HANDSHAKE, label_bytes(f"tls-client-finished\x1f{label}", 16 + GCM_OVERHEAD)))
 
 
-def server_finish(label: str) -> bytes:
-    return record(CHANGE_CIPHER_SPEC, b"\x01") + record(
+def server_finish(label: str, ticket: bool = False) -> bytes:
+    """The server's ChangeCipherSpec and Finished, preceded on a ticket-issuing full handshake by its
+    NewSessionTicket (RFC 5077)."""
+    prefix = new_session_ticket(label) if ticket else b""
+    return prefix + record(CHANGE_CIPHER_SPEC, b"\x01") + record(
         HANDSHAKE, label_bytes(f"tls-server-finished\x1f{label}", 16 + GCM_OVERHEAD))
 
 

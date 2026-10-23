@@ -37,7 +37,8 @@ class BeaconServer(Actor):
     static page for a fictional domain. The domain is drawn per seed from the ``domains`` param (or a
     dotted DNS alias already on the host) and registered as a full external FQDN the site DNS
     resolves to this host. Its certificate comes from a fictional public CA, not the domain's AD CS
-    root, so the chain is itself a tell. Params: ``domains`` (candidate FQDNs), ``issuer`` (CA CN)."""
+    root, so the chain is itself a tell. Params: ``domains`` (candidate FQDNs), ``issuer`` (CA CN),
+    ``tickets`` (issue RFC 5077 session tickets; default true, as nginx/OpenSSL do)."""
 
     type = "tls.beacon_server"
     is_server = True
@@ -65,6 +66,7 @@ class BeaconServer(Actor):
         cert = x509.web_server(ca, issuer, host.name, registrable, [self.fqdn],
                                round(start - rng.uniform(30.0, 300.0) * DAY))
         self.chain = [cert.der, ca.der]
+        self.tickets = bool(self.param("tickets", True))
         self.server = ScriptedServer()
         plan.facts[self.id] = {
             "hosts": [host_ref(host.id)],
@@ -73,6 +75,7 @@ class BeaconServer(Actor):
             "port": ports.WELL_KNOWN[ports.HTTPS],
             "tls_version": "TLS 1.2",
             "cipher_suite": tls.SUITE_NAMES[tls.SCHANNEL_SUITE],
+            "session_tickets": self.tickets,
             "certificate": {"subject": cert.subject, "issuer": cert.issuer, "serial": cert.serial,
                             "dns_names": [self.fqdn], "not_before": cert.not_before,
                             "not_after": cert.not_after},
@@ -177,9 +180,18 @@ class BeaconClient(Actor):
         order = a["order"]
         if a["resume"] is None:
             conn.exchange(tls.client_hello(server.fqdn, label, lambda n: order[:n]),
-                          tls.server_flight(label, server.chain))
+                          tls.server_flight(label, server.chain, tickets=server.tickets))
             conn.exchange(tls.client_finish(label) + tls.application_data(f"{label}\x1freq", a["request"]),
-                          tls.server_finish(label) + tls.application_data(f"{label}\x1fresp", a["response"]))
+                          tls.server_finish(label, ticket=server.tickets)
+                          + tls.application_data(f"{label}\x1fresp", a["response"]))
+        elif server.tickets:
+            # RFC 5077 resumption: offer the stored ticket plus a fresh random session ID the server echoes.
+            ticket = tls.session_ticket(self._label(action.host, a["resume"]))
+            session = tls.client_session(label)
+            conn.exchange(tls.client_hello(server.fqdn, label, lambda n: order[:n], ticket=ticket),
+                          tls.server_resume(label, session))
+            conn.exchange(tls.client_resume_finish(label) + tls.application_data(f"{label}\x1freq", a["request"]),
+                          tls.application_data(f"{label}\x1fresp", a["response"]))
         else:
             session = tls.session_id(self._label(action.host, a["resume"]))
             conn.exchange(tls.client_hello(server.fqdn, label, lambda n: order[:n], session),

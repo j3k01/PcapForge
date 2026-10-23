@@ -59,7 +59,8 @@ def _split(total: int, count: int, rng) -> list[int]:
 class UploadSink(Actor):
     """Benign external file host that accepts the uploads over plain HTTP (port 80) and HTTPS
     (port 443). The host needs at least one dotted DNS alias (a full external FQDN) the site DNS
-    resolves to it; those are the destination names the uploads carry."""
+    resolves to it; those are the destination names the uploads carry. Param: ``tickets`` (issue
+    RFC 5077 session tickets on the HTTPS uploads; default true, as the nginx front end does)."""
 
     type = "http.sink"
     is_server = True
@@ -81,8 +82,10 @@ class UploadSink(Actor):
         self.certificate = x509.web_server(self.ca, ca_name, host.name, "cloud-ca.example", self.domains,
                                            round(start - rng.uniform(30, 300) * DAY))
         self.chain = [self.certificate.der, self.ca.der]
+        self.tickets = bool(self.param("tickets", True))
         self.server = ScriptedServer()
-        plan.facts[self.id] = {"hosts": [host_ref(host.id)], "domains": self.domains}
+        plan.facts[self.id] = {"hosts": [host_ref(host.id)], "domains": self.domains,
+                               "session_tickets": self.tickets}
 
     async def serve(self, rt) -> None:
         await self.server.start(rt, self.hosts[0].loopback, ports.HTTP)
@@ -193,10 +196,11 @@ class HttpUploader(Actor):
         order = a["order"]
         conn = ScriptedConnection(rt, self._sink.server, src, dst, ports.HTTPS)
         conn.exchange(tls.client_hello(a["name"], label, lambda n: order[:n]),
-                      tls.server_flight(label, self._sink.chain))
+                      tls.server_flight(label, self._sink.chain, tickets=self._sink.tickets))
         # False Start: the upload's request headers ride with the client's Finished.
         conn.exchange(tls.client_finish(label) + tls.application_data(f"{label}\x1fhdr", a["headers"]),
-                      tls.server_finish(label) + tls.application_data(f"{label}\x1frhdr", a["resp_hdr"]))
+                      tls.server_finish(label, ticket=self._sink.tickets)
+                      + tls.application_data(f"{label}\x1frhdr", a["resp_hdr"]))
         # The upload body, then the server's 200 OK.
         conn.exchange(tls.application_data(f"{label}\x1fbody", a["size"]),
                       tls.application_data(f"{label}\x1fresp", a["resp"]))

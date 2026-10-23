@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-volumetric-flood
 title: Volumetric UDP flood against a local sink service on the office LAN
 line: it
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [it, dos, flood, udp, volumetric, network-denial-of-service, windows, office]

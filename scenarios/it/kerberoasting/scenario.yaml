@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-kerberoasting
 title: Kerberoasting on the office domain
 line: it
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [it, kerberos, kerberoasting, active-directory, windows, credential-access, service-accounts, rc4]

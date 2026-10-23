@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-ot-pivot
 title: An office workstation pivots through the firewall into the OT control network
 line: it
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [it, ot, pivot, it-ot, modbus, ics, port-scan, firewall, network-segmentation, active-directory, windows]

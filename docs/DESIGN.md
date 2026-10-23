@@ -110,8 +110,10 @@ Done and committed (verify with `git log --oneline`):
   needs after the broadcast it answers, see `compose/link.py`),
   `https.server|client` and `wsus.server|client` (TCP conversations the client scripts: it hands the
   server each request's size and the reply bytes before sending, `actors/scripted.py`; TLS 1.2 records
-  and AD CS certificates without real cryptography, `actors/tls.py`, `actors/x509.py`; WSUS replies
-  Xpress-compressed, `xpress.py`),
+  and AD CS certificates without real cryptography, with session-ID resumption on IIS and RFC 5077
+  session tickets on the non-Schannel servers, `actors/tls.py`, `actors/x509.py`; WSUS replies
+  Xpress-compressed, with the WUA self-update check, RegisterComputer on a first contact and a driver
+  SyncUpdates when the server syncs drivers, `xpress.py`),
   `windows.chatter` (LLMNR, NBNS, mDNS, SSDP M-SEARCH, browser host announcements; timing,
   ports and payloads checked against a Windows 10 capture). Lookups only use names the site
   DNS zone does not resolve; hosts with a `dns.client` first query the site server for

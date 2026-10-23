@@ -77,6 +77,28 @@
   value_count correlation (one host requesting RC4 service tickets for many distinct SPNs) over the
   kerberos dataset.
 
+### Traffic realism
+- TLS session tickets (RFC 5077) on the non-Schannel servers of the IT line: the external-looking
+  `tls.beacon_server` (`it-https-beaconing`) and the `http.sink` (`it-bulk-upload`), nginx/OpenSSL-style,
+  now echo an empty `session_ticket` extension in their ServerHello and send a NewSessionTicket (a
+  lifetime hint and an opaque ticket) on every full TLS 1.2 handshake; a resumed connection offers the
+  ticket in its ClientHello `session_ticket` extension with a fresh session ID the server echoes for
+  the abbreviated handshake. The hard level of `it-https-beaconing` now resumes with a ticket rather
+  than a session ID. Intranet IIS keeps Schannel's session-ID cache (new `tickets` param on the TLS
+  server roles, default by server software), so `it-baseline-operations` IIS traffic is unchanged; the
+  IT-scenario captures change where the beacon or upload servers appear. `siem/tls.jsonl` gains
+  `resumed` and `resumption` (`session_id` or `ticket`).
+- Windows Update Agent background behaviour, modelled by default on the IT line (`wsus.*`, [MS-WUSP]):
+  before each scan the agent probes the WSUS self-update tree with a conditional
+  GET /selfupdate/wuident.cab — 304 Not Modified while the cached agent is current, 200 with the
+  wuident.cab on a client's first contact. A first contact (a new PC, or one whose cached registration
+  or computer info changed) also calls RegisterComputer with its OS / BIOS / hardware ComputerInfo
+  after GetCookie. A WSUS server configured to synchronize drivers (new `drivers` param on
+  `wsus.server`, default false as on a default WSUS; on in `it-baseline-operations`) makes each scan run
+  a second SyncUpdates for driver metadata (SkipSoftwareSync=true, CachedDriverIDs and SystemSpec). The
+  `windows_update` facts gain `registered`; `soap_actions` lists RegisterComputer when it occurs. The IT
+  captures change (the self-update GET, and RegisterComputer / driver sync where planned).
+
 ### Detection engineering
 - SIEM export: new `siem/ldap.jsonl` (binds and searches: base, scope, filter when unsealed, entries);
   `kerberos.jsonl` gains `etype` / `etype_first` (the encryption types a request offers).

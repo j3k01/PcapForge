@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-scan-auth-failures
 title: Port scan and Kerberos authentication failures on the office LAN
 line: it
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [it, recon, port-scan, kerberos, brute-force, password-spray, active-directory, windows, authentication]

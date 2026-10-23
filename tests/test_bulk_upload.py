@@ -94,6 +94,9 @@ def test_medium_uploads_over_https_show_only_as_tls_sessions_and_an_outbound_rat
                     "tls.handshake.extensions_server_name")
     assert len(hellos) == up["upload_count"] >= 3 and {sni for (sni,) in hellos} == {domain}
     assert not tshark(result.pcap, f'http.request.method == "POST" && ip.dst == {dst}', "ip.src")
+    # The nginx-style sink issues an RFC 5077 session ticket: a NewSessionTicket (type 4) per handshake.
+    assert answers["facts"]["upload_service"]["session_tickets"] is True
+    assert len(tshark(result.pcap, f"tls.handshake.type == 4 && ip.src == {dst}", "frame.number")) == up["upload_count"]
 
     # The tell: to the sink the host sends far more than it receives; browsing/WSUS are the opposite.
     flows = [f for f in jsonl(result.exports["siem/flows.jsonl"]) if f["transport"] == "tcp"]

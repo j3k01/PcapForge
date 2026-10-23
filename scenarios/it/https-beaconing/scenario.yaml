@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-https-beaconing
 title: Periodic HTTPS beaconing from an office PC to an external service
 line: it
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [it, beaconing, c2, tls, https, dns, windows, active-directory, wsus]

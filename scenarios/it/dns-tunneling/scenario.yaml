@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-dns-tunneling
 title: DNS-based data transfer to a local resolver on an office LAN
 line: it
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [it, dns, tunneling, exfiltration, windows, active-directory, dhcp, https, wsus]

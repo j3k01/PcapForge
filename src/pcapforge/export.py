@@ -104,7 +104,8 @@ FIELDS = [
     "smb2.share_type", "smb2.filename", "smb2.flags.signature", "smb2.dialect", "smb2.eof", "smb2.read_length",
     # TLS handshakes (a server flight carries ServerHello, Certificate, ... in one frame) and HTTP.
     "tls.handshake.type", "tls.handshake.version", "tls.handshake.ciphersuite", "tls.handshake.extensions_server_name",
-    "tls.handshake.extensions_alpn_str", "tls.handshake.ja4", "x509sat.uTF8String", "x509ce.dNSName",
+    "tls.handshake.extensions_alpn_str", "tls.handshake.ja4", "tls.handshake.extensions.session_ticket",
+    "x509sat.uTF8String", "x509ce.dNSName",
     "http.host", "http.user_agent", "http.content_type", "http.content_length_header", "http.content_encoding",
     # LDAP (TCP 389): bind name, search request (base / scope / filter parts) and the result entries / code.
     "ldap.messageID", "ldap.name", "ldap.baseObject", "ldap.scope", "ldap.present", "ldap.attributeDesc",
@@ -503,6 +504,7 @@ class _Exporter:
         self.smb_pending: dict[tuple, deque[dict]] = defaultdict(deque)
         self.tls = self.datasets["tls"]
         self.tls_pending: dict[tuple, dict] = {}
+        self.tls_ticket: dict[tuple, bool] = {}  # did the ClientHello offer a non-empty session ticket?
         self.http = self.datasets["http"]
         self.http_pending: dict[tuple, deque[dict]] = defaultdict(deque)
         self.ldap = self.datasets["ldap"]
@@ -613,8 +615,9 @@ class _Exporter:
 
     # -- tls ---------------------------------------------------------------------------
     def _tls(self, row, key, number, epoch, conn) -> None:
-        """One record per TLS handshake: the ClientHello (SNI, ALPN offer, JA4), then what the server
-        flight negotiated (version, cipher suite, ALPN) and its certificate (subject / issuer CN, SAN)."""
+        """One record per TLS handshake: the ClientHello (SNI, ALPN offer, JA4, any session ticket),
+        then what the server flight negotiated (version, cipher suite, ALPN), whether it resumed the
+        session and how (session ID or ticket), and its certificate (subject / issuer CN, SAN)."""
         types = {_int(t) for t in _all(row, "tls.handshake.type")}
         if 1 in types:
             record = {
@@ -622,10 +625,14 @@ class _Exporter:
                 "server_name": _first(row, "tls.handshake.extensions_server_name") or None,
                 "ja4": _first(row, "tls.handshake.ja4") or None, "version": None, "cipher": None, "alpn": None,
                 "cert_subject": None, "cert_issuer": None, "cert_san": [], "established": False,
+                "resumed": False, "resumption": None,
                 "client_hello_frame": number, "server_hello_frame": None,
             }
             self.tls.append(record)
             self.tls_pending[key] = record
+            # tshark prints "<MISSING>" for the empty session_ticket extension of a full handshake.
+            ticket = _first(row, "tls.handshake.extensions.session_ticket")
+            self.tls_ticket[key] = bool(ticket) and ticket != "<MISSING>"
             return
         record = self.tls_pending.get(key)
         if record is None:
@@ -638,6 +645,9 @@ class _Exporter:
             record["alpn"] = _first(row, "tls.handshake.extensions_alpn_str") or None
             record["server_hello_frame"] = number
             record["established"] = True
+            if 11 not in types:  # abbreviated handshake (no Certificate): the server resumed the session
+                record["resumed"] = True
+                record["resumption"] = "ticket" if self.tls_ticket.get(key) else "session_id"
         if 11 in types:
             names = _all(row, "x509sat.uTF8String")  # issuer CN, then subject CN, of each certificate
             if len(names) >= 2:

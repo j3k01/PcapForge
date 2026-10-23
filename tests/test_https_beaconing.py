@@ -106,3 +106,35 @@ def test_the_beacon_domain_is_absent_from_the_office_baseline(tmp_path_factory):
     assert snis  # the baseline does open intranet HTTPS
     # The office baseline only talks to the intranet names under the site domain; no external beacon.
     assert all(name.endswith(".local") for name in snis), snis
+
+
+@pytest.fixture(scope="module")
+def resumed_run(tmp_path_factory):
+    # Hard enables TLS resumption; the beacon server is nginx/OpenSSL-like, so it resumes with tickets.
+    result = generate(find("it-https-beaconing"), "hard", "pytest-beacon-tkt",
+                      tmp_path_factory.mktemp("beacon-tkt"), duration=2700.0, siem=True)
+    assert result.report.ok, [c for c in result.report.checks if not c["ok"]]
+    return result, json.loads(result.answers.read_text(encoding="utf-8"))
+
+
+@pytest.mark.skipif(not capture_tools, reason="requires tshark >= 4.4 and dumpcap/tcpdump with loopback capture rights")
+def test_the_hard_beacon_resumes_with_an_rfc5077_session_ticket(resumed_run):
+    result, answers = resumed_run
+    beacon, service = answers["facts"]["beacon"], answers["facts"]["beacon_service"]
+    domain, dst = beacon["domain"], beacon["destination"]["ip"]
+    assert service["session_tickets"] is True
+    # A full handshake to the ticket-issuing beacon server carries a NewSessionTicket (handshake type 4).
+    assert tshark(result.pcap, f"tls.handshake.type == 4 && ip.src == {dst}", "frame.number")
+    # At least one resumed check-in offers that ticket back in its ClientHello session_ticket extension.
+    offered = [t for (t,) in tshark(
+        result.pcap, f'tls.handshake.type == 1 && tls.handshake.extensions_server_name == "{domain}"',
+        "tls.handshake.extensions.session_ticket") if t and t != "<MISSING>"]
+    assert offered
+    # The abbreviated handshake sends no Certificate: fewer cert-bearing than total ServerHellos.
+    servers = tshark(result.pcap, f"tls.handshake.type == 2 && ip.src == {dst}", "frame.number")
+    certs = tshark(result.pcap, f"tls.handshake.type == 11 && ip.src == {dst}", "frame.number")
+    assert certs and len(certs) < len(servers)
+    # The SIEM export records the resumption as ticket-based for the beacon, never by session ID.
+    tls_rows = [json.loads(line) for line in result.exports["siem/tls.jsonl"].read_text("utf-8").splitlines()]
+    kinds = {(r["resumed"], r["resumption"]) for r in tls_rows if r.get("server_name") == domain}
+    assert (True, "ticket") in kinds and (True, "session_id") not in kinds

@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-baseline-operations
 title: Baseline of an office LAN at the start of the working day (no incident)
 line: it
-version: 3
+version: 4
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [baseline, it, dhcp, dhcp-relay, dns, ntp, https, tls, wsus, windows-update, windows, active-directory, kerberos, ldap, smb]
@@ -105,10 +105,11 @@ actors:
     hosts: [pc, ws, newpc]
     params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
   # Windows Update against WSUS; on medium/hard a Defender security intelligence update is approved.
+  # The site's WSUS also synchronizes drivers, so each scan runs a driver SyncUpdates as well.
   - id: update_service
     type: wsus.server
     hosts: wsus
-    params: {update: "${vars.wsus_update}"}
+    params: {update: "${vars.wsus_update}", drivers: true}
   - id: windows_update
     type: wsus.client
     hosts: [pc, ws, newpc]
@@ -395,7 +396,9 @@ questions:
       zeek: {log: http, where: {method: POST}, count_by: [id.orig_h, uri]}
       look_for: >-
         GetConfig, GetAuthorizationCookie (on the SimpleAuth service), GetCookie and SyncUpdates, then
-        GetExtendedUpdateInfo when an approved update applies.
+        GetExtendedUpdateInfo when an approved update applies. A first-contact host (the new PC) also calls
+        RegisterComputer, and because this WSUS syncs drivers each scan runs a second SyncUpdates
+        (SkipSoftwareSync=true). The agent first probes /selfupdate/wuident.cab (a GET, 304 or 200).
   - id: update_file
     when: vars.wsus_update
     text: An approved update was downloaded from the update server. Which file did the workstations fetch? (file name)

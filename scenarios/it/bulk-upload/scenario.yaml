@@ -3,7 +3,7 @@ schema: pcapforge/scenario@1
 id: it-bulk-upload
 title: Bulk data upload from an office PC to an external file host
 line: it
-version: 1
+version: 2
 license: CC-BY-4.0
 authors: [pcapforge contributors]
 tags: [it, exfiltration, http, https, tls, upload, dlp, windows, data-transfer]

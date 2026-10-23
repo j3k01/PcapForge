@@ -54,7 +54,9 @@ def _data(size: int) -> int:
 class HttpsServer(Actor):
     """IIS web sites on the host's DNS aliases, with a server certificate from the site's AD CS
     enterprise root CA. Params: ``ca`` (host the CA runs on, e.g. the DC), ``sites``
-    ({alias: profile}, profiles ``portal`` / ``helpdesk``; default every alias as a portal)."""
+    ({alias: profile}, profiles ``portal`` / ``helpdesk``; default every alias as a portal),
+    ``tickets`` (issue RFC 5077 session tickets; default false, as Schannel/IIS uses its session-ID
+    cache)."""
 
     type = "https.server"
     is_server = True
@@ -82,6 +84,7 @@ class HttpsServer(Actor):
         self.certificate = x509.web_server(self.ca, self.ca_name, ca_host.name, topo.domain, names,
                                            round(start - rng.uniform(30, 600) * DAY))
         self.chain = [self.certificate.der, self.ca.der]
+        self.tickets = bool(self.param("tickets", False))
         self.server = ScriptedServer()
         cert = self.certificate
         plan.facts[self.id] = {
@@ -232,9 +235,17 @@ class HttpsClient(Actor):
                       + browser.data(FRAME + a["headers"][0] + _data(a["html"])))
             if a["resume"] is None:
                 conn.exchange(tls.client_hello(a["site"], label, lambda n: order[:n]),
-                              tls.server_flight(label, server.chain))
+                              tls.server_flight(label, server.chain, tickets=server.tickets))
                 # False Start: the first request goes with the client's Finished.
-                conn.exchange(tls.client_finish(label) + browser.data(first), tls.server_finish(label) + answer)
+                conn.exchange(tls.client_finish(label) + browser.data(first),
+                              tls.server_finish(label, ticket=server.tickets) + answer)
+            elif server.tickets:
+                # RFC 5077 resumption: the stored ticket plus a fresh session ID the server echoes.
+                ticket = tls.session_ticket(self._label(action.host, a["site"], a["resume"]))
+                session = tls.client_session(label)
+                conn.exchange(tls.client_hello(a["site"], label, lambda n: order[:n], ticket=ticket),
+                              tls.server_resume(label, session))
+                conn.exchange(tls.client_resume_finish(label) + browser.data(first), answer)
             else:
                 session = tls.session_id(self._label(action.host, a["site"], a["resume"]))
                 conn.exchange(tls.client_hello(a["site"], label, lambda n: order[:n], session),
