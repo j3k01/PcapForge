@@ -29,12 +29,12 @@ from pcapforge.zeek import hunt_command
 SID_BASE = 9100000          # local sid range reserved for pcapforge (9100000-9199999)
 SID_BAND_BASE = SID_BASE + 100
 SID_OT_BASE = SID_BASE + 1000   # IEC 104 +0.., DNP3 +10.., BACnet +20.., EtherNet/IP +30..
-SID_IT_BASE = SID_BASE + 2000   # IT line: DnsTunneling +0.., HttpsBeaconing +100.., ScanAuthFailures +200.., VolumetricFlood +300.., BulkUpload +400.., Kerberoasting +500.., SmbLateral +600.., LdapRecon +700.., RogueDhcp +800.., ItOtPivot +900..
+SID_IT_BASE = SID_BASE + 2000   # IT line: DnsTunneling +0.., HttpsBeaconing +100.., ScanAuthFailures +200.., VolumetricFlood +300.., BulkUpload +400.., Kerberoasting +500.., SmbLateral +600.., LdapRecon +700.., RogueDhcp +800.., ItOtPivot +900.., ItOtZonePolicy +1000..
 MODBUS_PORT = 502
 WRITER_TYPES = ("modbus.operator",)
 CLIENT_TYPES = ("modbus.poller", "modbus.operator")
 DATASETS = ("flows", "modbus", "dns", "ntp", "name_resolution", "arp", "dhcp", "iec104", "dnp3", "bacnet", "enip",
-            "kerberos", "smb", "tls", "http")
+            "kerberos", "smb", "tls", "http", "rdp")
 
 IEC104_PORT, DNP3_PORT, BACNET_PORT, ENIP_PORT = 2404, 20000, 47808, 44818
 IEC104_MASTER_TYPES, IEC104_SERVER_TYPES = ("iec104.client",), ("iec104.server",)
@@ -82,7 +82,7 @@ def suricata_rules(answers: dict) -> list[Rule]:
     return (_modbus_rules(answers) + _ot_rules(answers) + _it_dns_tunnel_rules(answers)
             + _it_scan_auth_rules(answers) + _it_https_beacon_rules(answers)
             + _it_volumetric_flood_rules(answers)
-            + _it_bulk_upload_rules(answers) + _it_kerberoasting_rules(answers) + _it_smb_lateral_rules(answers) + _it_ldap_recon_rules(answers) + _it_rogue_dhcp_rules(answers) + _it_ot_pivot_rules(answers))
+            + _it_bulk_upload_rules(answers) + _it_kerberoasting_rules(answers) + _it_smb_lateral_rules(answers) + _it_ldap_recon_rules(answers) + _it_rogue_dhcp_rules(answers) + _it_ot_pivot_rules(answers) + _it_ot_zone_rules(answers))
 
 def _it_smb_lateral_rules(answers: dict) -> list[Rule]:
     """SMB tree connect to an ADMIN$ administrative share of the lateral-movement incident
@@ -159,6 +159,59 @@ def _it_ot_pivot_rules(answers: dict) -> list[Rule]:
         "A TCP connection from an office-LAN host into the OT control subnet. Only the OT clients on "
         "the control network should reach the PLCs; a connection routed in from the office LAN crosses "
         "the IT/OT boundary and should never happen.", proto="tcp")]
+
+
+def _it_ot_zone(answers: dict):
+    """Zone model of a combined IT+OT site built on the it-ot-baseline-operations baseline: an office
+    LAN, an industrial DMZ and a plant control network (subnets ``office`` / ``dmz`` / ``control``),
+    with RDP jump host(s) in the DMZ. Returns (office cidr, dmz cidr, control cidr, jump-host IPs, DMZ
+    host IPs, control host IPs), or ``None`` for every scenario without that DMZ zone model, so the
+    rules stay out of the OT baseline, the office baseline and it-ot-pivot (which has no DMZ)."""
+    if answers["scenario"].get("line") != "it":
+        return None
+    cidr = {s["id"]: s.get("cidr") for s in answers["topology"]["subnets"]}
+    if not {"office", "dmz", "control"} <= set(cidr):
+        return None
+    hosts = answers["topology"]["hosts"]
+    by_id = {h["id"]: h for h in hosts}
+
+    def ip_on(host: dict, subnet: str):
+        return next((i["ip"] for i in host["interfaces"] if i["subnet"] == subnet), None)
+
+    def endpoint_ips(subnet: str) -> list[str]:
+        return sorted(h["interfaces"][0]["ip"] for h in hosts
+                      if len(h["interfaces"]) == 1 and h["interfaces"][0]["subnet"] == subnet)
+
+    rdp_hosts = {h for a in answers["actors"] if a["type"] == "rdp.server" for h in a["hosts"]}
+    jump_ips = sorted(ip for hid in rdp_hosts if hid in by_id and (ip := ip_on(by_id[hid], "dmz")))
+    return cidr["office"], cidr["dmz"], cidr["control"], jump_ips, endpoint_ips("dmz"), endpoint_ips("control")
+
+
+def _it_ot_zone_rules(answers: dict) -> list[Rule]:
+    """Zone-segmentation policy of the combined IT+OT baseline (it-ot-baseline-operations), reusable by
+    any incident layered on it: no office host reaches the control network directly, and RDP into the
+    control network comes only from the DMZ jump host. Both are inert on this baseline (0 alerts) and
+    on every scenario without the DMZ zone model."""
+    found = _it_ot_zone(answers)
+    if found is None:
+        return []
+    office_cidr, _dmz_cidr, control_cidr, jump_ips, _dmz_ips, _control_ips = found
+    rules = [_rule(
+        SID_IT_BASE + 1000, f"{office_cidr} any -> {control_cidr} any",
+        "PCAPFORGE IT/OT zone policy: direct connection from the office LAN into the control network",
+        "flow:to_server;", "mitre_attack T1046, mitre_ics T0886",
+        "A TCP connection straight from the office LAN into the OT control network. The two zones are "
+        "separated by the industrial DMZ, so office hosts reach the plant only through the DMZ jump host, "
+        "never directly; this baseline never does it.", proto="tcp")]
+    source = f"![{','.join(jump_ips)}]" if jump_ips else "any"
+    rules.append(_rule(
+        SID_IT_BASE + 1001, f"{source} any -> {control_cidr} 3389",
+        "PCAPFORGE IT/OT zone policy: RDP into the control network from a host other than the DMZ jump host",
+        "flow:to_server;", "mitre_attack T1021.001, mitre_ics T0886",
+        "A Remote Desktop (TCP 3389) connection into the OT control network from a source that is not the "
+        "DMZ jump host. Only the jump host opens RDP sessions to the engineering workstation; any other "
+        "source is out of policy. The baseline's only inbound RDP comes from the jump host.", proto="tcp"))
+    return rules
 
 
 def _it_volumetric_flood_rules(answers: dict) -> list[Rule]:
@@ -794,7 +847,7 @@ def sigma_rules(answers: dict) -> list[dict]:
     return (_modbus_sigma_rules(answers) + _ot_sigma_rules(answers) + _it_dns_tunnel_sigma(answers)
             + _it_scan_auth_sigma(answers) + _it_https_beacon_sigma(answers)
             + _it_volumetric_flood_sigma(answers)
-            + _it_bulk_upload_sigma(answers) + _it_kerberoasting_sigma(answers) + _it_smb_lateral_sigma(answers) + _it_ldap_recon_sigma(answers) + _it_rogue_dhcp_sigma(answers) + _it_ot_pivot_sigma(answers))
+            + _it_bulk_upload_sigma(answers) + _it_kerberoasting_sigma(answers) + _it_smb_lateral_sigma(answers) + _it_ldap_recon_sigma(answers) + _it_rogue_dhcp_sigma(answers) + _it_ot_pivot_sigma(answers) + _it_ot_zone_sigma(answers))
 
 
 def _it_smb_lateral_sigma(answers: dict) -> list[dict]:
@@ -866,6 +919,40 @@ def _it_ot_pivot_sigma(answers: dict) -> list[dict]:
         tags=["attack.t1046", "attack.t0886", "attack.t0859"],
         falsepositives=["A new OT engineering or jump host that the firewall policy legitimately allows."],
         fields=["ts", "src", "dest", "dest_port", "transport", "state"])]
+
+
+def _it_ot_zone_sigma(answers: dict) -> list[dict]:
+    """Sigma over the flows dataset for the combined IT+OT baseline's zone policy (reusable by any
+    incident layered on it-ot-baseline-operations): a flow into the control network from a source that
+    is neither on the control network nor in the DMZ, and an RDP flow into the control network from
+    anything but the DMZ jump host. Both are inert on this baseline."""
+    found = _it_ot_zone(answers)
+    if found is None:
+        return []
+    _office_cidr, _dmz_cidr, _control_cidr, jump_ips, dmz_ips, control_ips = found
+    into_control = {"selection": {"dest": control_ips}, "internal": {"src": control_ips + dmz_ips},
+                    "condition": "selection and not internal"}
+    rdp_into_control = {"selection": {"dest": control_ips, "dest_port": 3389},
+                        "approved": {"src": jump_ips}, "condition": "selection and not approved"}
+    return [
+        _sigma(answers, key="it-ot-zone-into-control",
+               title="Connection into the OT control network from outside the control zone and DMZ",
+               description="A flow to a host on the OT control network from a source that is neither on the "
+                           "control network nor in the industrial DMZ: an IT / office host reaching the plant "
+                           "directly. Only DMZ hosts (the jump host, the historian replica) bridge into control.",
+               service="flows", level="high", detection=into_control,
+               tags=["attack.t1046", "attack.t0886", "attack.t0859"],
+               falsepositives=["A new DMZ relay or management host the segmentation policy legitimately allows."],
+               fields=["ts", "src", "dest", "dest_port", "transport", "state"]),
+        _sigma(answers, key="it-ot-zone-rdp-into-control",
+               title="RDP into the OT control network from a host other than the DMZ jump host",
+               description="A Remote Desktop flow (destination port 3389) into the OT control network from a "
+                           "source other than the DMZ jump host. The jump host is the only approved RDP origin "
+                           "for the engineering workstation; any other source is out of policy.",
+               service="flows", level="high", detection=rdp_into_control,
+               tags=["attack.t1021.001", "attack.t0886"],
+               falsepositives=["A second, newly authorised jump host or a maintenance laptop in the DMZ."],
+               fields=["ts", "src", "dest", "dest_port", "transport", "state"])]
 
 
 def _ot_sigma_rules(answers: dict) -> list[dict]:

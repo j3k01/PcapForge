@@ -1,7 +1,7 @@
 """The run's Zeek detection script (detections.zeek_script, loaded by --zeek): on every incident scenario and
 level notice.log flags the attacker and only the attacker, Modbus setpoints written out of band are named,
-and normal operations (ot-baseline-operations) raise nothing. A scenario whose protocol needs an ICSNPP
-package or pcapforge's IEC 104 analyzer is skipped when Zeek lacks it."""
+and normal operations (ot-baseline-operations, it-ot-baseline-operations) raise nothing. A scenario whose
+protocol needs an ICSNPP package or pcapforge's IEC 104 analyzer is skipped when Zeek lacks it."""
 
 import json
 import subprocess
@@ -28,7 +28,9 @@ def loadable(script: str) -> bool:
     return proc.stdout.strip() == "T"
 
 
-RUNS = [(sid, level) for sid in sorted(discover()) if sid.startswith("ot-") for level in ("easy", "medium", "hard")]
+# The OT line plus the combined IT/OT baseline (Modbus on the control network, approved writer included).
+RUNS = [(sid, level) for sid in sorted(discover()) if sid.startswith("ot-") or sid == "it-ot-baseline-operations"
+        for level in ("easy", "medium", "hard")]
 
 
 @pytest.mark.skipif(not capture_tools or not find_zeek(), reason="requires tshark >= 4.4, loopback capture and zeek")

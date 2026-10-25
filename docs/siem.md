@@ -36,6 +36,7 @@ out/ot-modbus-write-manipulation_easy_42/siem/ntp.jsonl  (33 records)
 | `smb.jsonl` | SMB 2/3 request/response | `command` (`negotiate`, `session_setup`, `tree_connect`, `create`, `read`, `close`, `ioctl`, `logoff`, ...), `message_id`, `session_id`, `signed`, `tree` (`\\server\share`), `share_type` (`disk`, `pipe`), `filename` (relative to the share), `dialect`, `file_size` (create), `read_length`, `status` (NTSTATUS), `success`, `response_time_ms` |
 | `tls.jsonl` | TLS handshake (ClientHello and the server's answer) | `server_name` (SNI), `ja4`, `version`, `cipher`, `alpn`, `cert_subject` / `cert_issuer` (common names), `cert_san`, `established`, `client_hello_frame`, `server_hello_frame` |
 | `http.jsonl` | HTTP/1.1 request and its response | `method`, `uri`, `host`, `user_agent`, `soap_action`, `range`, `request_bytes`, `status`, `content_type`, `content_encoding`, `response_bytes`, `request_frame`, `response_frame` |
+| `rdp.jsonl` | RDP connection request (X.224 Connection Request on TCP 3389) | `cookie` (the cleartext `Cookie: mstshash=<user>`), `cookie_user` (the account it names), `requested_protocols` (`SSL`, `CredSSP`, `HYBRID_EX`), `requested_protocols_raw`, `src_mac`, `frame`; everything after the TLS handshake is opaque |
 
 Every record has `ts` (ISO-8601 UTC, microseconds, `Z`) for Splunk `_time` / Elastic `@timestamp`
 and `epoch`; field names follow the Splunk CIM (`src`, `dest`, `src_port`, `dest_port`, `transport`, `app`).

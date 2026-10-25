@@ -125,5 +125,24 @@ def web_server(ca: Certificate, ca_common_name: str, ca_host: str, domain: str, 
                        not_before + years * 365.25 * 86400, key_id)
 
 
+def self_signed(fqdn: str, not_before: float, years: int = 1) -> Certificate:
+    """A self-signed server certificate ``CN=<fqdn>`` (SAN the same name, serverAuth EKU, not a CA):
+    the auto-generated RDP certificate Windows Remote Desktop presents, and the default appliance
+    certificate a historian REST endpoint ships with. Subject and issuer are the one host."""
+    spki, key_id = _key(f"self\x1f{fqdn}")
+    subject = cn_only(fqdn)
+    extensions = [
+        _extension(KEY_USAGE, _bits(b"\xa0", 5), critical=True),
+        _extension(EXT_KEY_USAGE, der.seq(der.oid(SERVER_AUTH))),
+        _extension(SUBJECT_KEY_ID, der.octets(key_id)),
+        _extension(AUTHORITY_KEY_ID, der.seq(der.ctx_prim(0, key_id))),
+        _extension(SUBJECT_ALT_NAME, der.seq(der.ctx_prim(2, fqdn.encode()))),
+    ]
+    data, serial = _certificate(f"self\x1f{fqdn}", subject, subject, not_before,
+                                not_before + years * 365.25 * 86400, extensions, spki)
+    return Certificate(data, f"CN={fqdn}", f"CN={fqdn}", serial, not_before,
+                       not_before + years * 365.25 * 86400, key_id)
+
+
 def _text(common_name: str, domain: str) -> str:
     return ",".join([f"CN={common_name}"] + [f"DC={label}" for label in domain.split(".")])

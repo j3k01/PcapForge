@@ -6,9 +6,11 @@ Current state:
   (`ot-modbus-command-replay`), coil manipulation (`ot-modbus-coil-manipulation`), alarm masking
   (`ot-modbus-alarm-masking`), and command injection over IEC 104, DNP3, BACnet and EtherNet/IP;
   the process, PLC count and device pool are drawn per seed;
-- IT scenarios: an office-LAN baseline (`it-baseline-operations`, sensor on the office switch: Windows
-  Server DHCP behind the firewall's relay, booting PCs, a new PC, Active Directory, intranet HTTPS, WSUS)
-  plus ten incident scenarios — HTTPS beaconing (`it-https-beaconing`), DNS tunnelling
+- IT scenarios: two baselines — an office LAN (`it-baseline-operations`, sensor on the office switch: Windows
+  Server DHCP behind the firewall's relay, booting PCs, a new PC, Active Directory, intranet HTTPS, WSUS) and a
+  combined IT/OT site with an industrial DMZ (`it-ot-baseline-operations`: historian replication to the DMZ,
+  RDP through a DMZ jump host into the control network) — plus ten incident scenarios — HTTPS beaconing
+  (`it-https-beaconing`), DNS tunnelling
   (`it-dns-tunneling`), port scan and Kerberos authentication failures (`it-scan-auth-failures`),
   volumetric flood (`it-volumetric-flood`), bulk upload (`it-bulk-upload`), Kerberoasting
   (`it-kerberoasting`), SMB lateral movement (`it-smb-lateral-movement`), LDAP reconnaissance
@@ -95,6 +97,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
   - [x] LDAP directory reconnaissance (T1087.002, T1069.002, T1482): `it-ldap-reconnaissance` (`ldap.recon` actor + an additive `ReconDirectory` the DC serves — a host that is not a normal directory client binds over LDAP and enumerates all users, the accounts with a service principal name (`(servicePrincipalName=*)`), the protected `(adminCount=1)` accounts, the Domain Admins membership and the domain trusts; easy binds unsealed in a burst with readable filters, medium pages the results (MS-ADTS paged-results control) and spreads them out, hard binds with Kerberos (GSS-SPNEGO, sealed) like a member so the tell is volume and timing — round after round of LDAP sessions pulling large sealed responses; new `ldap` SIEM dataset, Zeek `ldap`/`ldap_search` hunts, Suricata content rules on the cleartext SPN/adminCount filters and a Sigma rule);
   - [x] rogue DHCP server (T1557.003): `it-rogue-dhcp` (`dhcp.server` with `rogue: true` running the dnsmasq reply format on a Raspberry Pi — it answers Discovers/Requests on the office segment before the firewall-relayed Windows Server Offer arrives, so hosts that join take its lease and adopt its own router and DNS; easy a wrong subnet mask and a Raspberry Pi OUI with several new PCs, medium only router/DNS differ with a few lookups at the rogue resolver, hard late with a single host and a very short lease; a Suricata rule on the rogue's port-67 replies and a Sigma rule over the dhcp dataset on the unapproved server identifier);
   - [x] IT-to-OT pivot (T1046; ICS T0886, T0846, T0855, T0836): `it-ot-pivot` (office LAN and control network on either side of the IT/OT firewall; an office workstation sweeps the control subnet for Modbus, identifies the PLCs and writes a setpoint out of band; sensor on the office switch on easy/medium and on the OT side on hard, where the frames carry the firewall's MAC; reuses the Modbus rules plus an office-to-control flow rule).
+  - [x] combined IT/OT baseline with an industrial DMZ (no incident): `it-ot-baseline-operations` (office LAN, DMZ and control network on one FortiGate; `historian.replica` / `historian.replication` — the plant historian pushes to a DMZ replica over HTTPS every 60 s — and `rdp.server` / `rdp.client` — office engineer → DMZ jump host → engineering workstation, cleartext mstshash cookie then TLS; control network syncs time from the DMZ; sensor on the DMZ switch on easy/medium, on the control switch on hard; new `rdp` SIEM dataset and zone-policy Suricata/Sigma rules, inert on the baseline, for incidents built on it).
 
 ## 4. Training workflow
 

@@ -110,6 +110,9 @@ FIELDS = [
     # LDAP (TCP 389): bind name, search request (base / scope / filter parts) and the result entries / code.
     "ldap.messageID", "ldap.name", "ldap.baseObject", "ldap.scope", "ldap.present", "ldap.attributeDesc",
     "ldap.assertionValue", "ldap.objectName", "ldap.resultCode",
+    # RDP (TCP 3389): the cleartext X.224 Connection Request cookie (mstshash=<user>) and the
+    # requested security protocols of the RDP negotiation.
+    "rdp.rt_cookie", "rdp.negReq.requestedProtocols",
 ]
 F = {name: index for index, name in enumerate(FIELDS)}
 
@@ -121,7 +124,7 @@ APPS = {
     "kerberos": "kerberos", "ldap": "ldap", "cldap": "ldap",
     "icmp": "icmp", "icmpv6": "icmpv6", "snmp": "snmp", "syslog": "syslog", "opcua": "opcua", "s7comm": "s7comm",
     "iec60870_104": "iec104", "iec60870_asdu": "iec104", "dnp3": "dnp3", "bvlc": "bacnet", "bacnet": "bacnet",
-    "bacapp": "bacnet", "enip": "enip", "cip": "enip", "cipcm": "enip", "cipcls": "enip",
+    "bacapp": "bacnet", "enip": "enip", "cip": "enip", "cipcm": "enip", "cipcls": "enip", "rdp": "rdp",
 }
 NAME_RESOLUTION = ("llmnr", "nbns", "mdns", "ssdp", "browser")
 TRANSPORTS = {"1": "icmp", "6": "tcp", "17": "udp", "58": "icmpv6"}
@@ -168,6 +171,7 @@ TLS_VERSIONS = {0x0301: "TLS 1.0", 0x0302: "TLS 1.1", 0x0303: "TLS 1.2", 0x0304:
 TLS_SUITES = {0xC030: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", 0xC02F: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
               0xC02C: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", 0xC02B: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
               0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA384", 0x1303: "TLS_CHACHA20_POLY1305_SHA256"}
+RDP_PROTOCOLS = {0x01: "SSL", 0x02: "CredSSP", 0x08: "HYBRID_EX"}   # RDP negotiation requestedProtocols bits
 SMB2_COMMANDS = {0: "negotiate", 1: "session_setup", 2: "logoff", 3: "tree_connect", 4: "tree_disconnect",
                  5: "create", 6: "close", 7: "flush", 8: "read", 9: "write", 10: "lock", 11: "ioctl", 12: "cancel",
                  13: "echo", 14: "query_directory", 15: "change_notify", 16: "query_info", 17: "set_info",
@@ -423,7 +427,7 @@ def _is_service_port(port: int | None) -> bool:
 
 # JSON-lines files written as the capture streams by (flows.jsonl is written at the end).
 DATASETS = ("modbus", "dns", "ntp", "name_resolution", "arp", "dhcp", "iec104", "dnp3", "bacnet", "enip",
-            "kerberos", "ldap", "smb", "tls", "http")
+            "kerberos", "ldap", "smb", "tls", "http", "rdp")
 
 
 class ExportError(RuntimeError):
@@ -509,6 +513,7 @@ class _Exporter:
         self.http_pending: dict[tuple, deque[dict]] = defaultdict(deque)
         self.ldap = self.datasets["ldap"]
         self.ldap_pending: dict[tuple, dict] = {}
+        self.rdp = self.datasets["rdp"]
 
     # -- per frame -------------------------------------------------------------------
     def frame(self, row: list[str]) -> None:
@@ -569,10 +574,26 @@ class _Exporter:
             self._smb(row, key, number, epoch, conn)
         elif app == "ldap" and transport == "tcp" and row[F["ldap.messageID"]]:
             self._ldap(row, key, number, epoch, conn)
+        elif row[F["rdp.rt_cookie"]] and transport == "tcp":
+            self._rdp(row, number, epoch, conn)
         elif row[F["tls.handshake.type"]] and transport == "tcp":
             self._tls(row, key, number, epoch, conn)
         elif app == "http" and (row[F["http.request.method"]] or row[F["http.response.code"]]):
             self._http(row, key, number, epoch, conn)
+
+    # -- rdp ---------------------------------------------------------------------------
+    def _rdp(self, row, number, epoch, conn) -> None:
+        """One record per RDP connection request (TCP 3389): the cleartext X.224 cookie names the
+        account (``mstshash=<user>``) and the RDP negotiation lists the requested security protocols.
+        Everything after the TLS handshake is opaque, so this is the field worth hunting on."""
+        cookie = _first(row, "rdp.rt_cookie")
+        user = cookie.split("mstshash=", 1)[1].strip() if "mstshash=" in cookie else None
+        requested = _int(_first(row, "rdp.negReq.requestedProtocols"))
+        protocols = [name for bit, name in RDP_PROTOCOLS.items() if requested and requested & bit] or None
+        self.rdp.append({
+            **_stamp(epoch), **conn, "src_mac": _first(row, "eth.src"), "transport": "tcp", "app": "rdp",
+            "cookie": cookie or None, "cookie_user": user, "requested_protocols": protocols,
+            "requested_protocols_raw": requested, "frame": number})
 
     # -- ldap --------------------------------------------------------------------------
     def _ldap(self, row, key, number, epoch, conn) -> None:

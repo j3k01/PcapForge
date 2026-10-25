@@ -180,8 +180,18 @@ class Splunk:
                 break
             assert time.monotonic() < deadline, f"index {index}: {count} of {expected} events after 10 min"
             time.sleep(2)
-        rows, _ = self.search(f"index={index} | where abs(_time - epoch) > 0.001 | stats count")
-        assert rows and rows[0]["count"] == "0", f"index {index}: {rows[0]['count']} events off their ts"
+        # tstats counts an event as soon as it is indexed, but a search can still miss the fields of the
+        # earliest events of a fresh index for up to a minute (seen on Splunk 10.6 with it-ot-baseline-operations):
+        # wait until every event is searchable with its fields, then check each lies on its ts.
+        while True:
+            rows, _ = self.search(f"index={index} | eval on_ts=if(abs(_time - epoch) <= 0.001, 1, 0) "
+                                  "| stats count(epoch) AS searchable, sum(on_ts) AS on_ts")
+            searchable = int(rows[0]["searchable"]) if rows else 0
+            if searchable >= expected:
+                break
+            assert time.monotonic() < deadline, f"index {index}: {searchable} of {expected} events searchable after 10 min"
+            time.sleep(2)
+        assert rows[0]["on_ts"] == str(expected), f"index {index}: {expected - int(rows[0]['on_ts'])} events off their ts"
 
     def search(self, spl):
         """Rows of an all-time search (capture dates can lie ahead) and its error messages."""

@@ -48,6 +48,29 @@
   sees. The incident is detected by the existing Modbus Suricata/Sigma/Zeek rules (unapproved writer,
   out-of-band write, device identification, port-502 sweep) plus a new IT→OT cross-zone rule over flows
   (Suricata and Sigma): a TCP connection from the office LAN into the control subnet.
+- `it-ot-baseline-operations`: a benign baseline (no incident) of a combined IT and OT site — an office
+  LAN, an industrial DMZ (Purdue level 3.5) and a plant control network, each on its own interface of one
+  FortiGate. On top of the office baseline (DHCP, DNS, intranet HTTPS, WSUS, Active Directory) and the
+  plant (PLCs polled over Modbus/TCP by an HMI and a historian, the engineering workstation the approved
+  writer), the capture carries the legitimate cross-zone traffic a real plant has: the plant historian
+  replicates its points to a DMZ replica historian over HTTPS on a fixed schedule; an office engineer
+  reaches the DMZ jump host over RDP and, inside that session, the jump host reaches the engineering
+  workstation in the control network over RDP (new `via` param on `rdp.client` chains a hop: the onward
+  session opens 15–60 s after the inbound one and closes before it); the control network takes its time
+  from a DMZ NTP service. No office host touches the control network directly. New `rdp.server` /
+  `rdp.client` actors (MS-RDPBCGR: a TPKT/X.224 Connection Request with the cleartext
+  `Cookie: mstshash=<user>` and an RDP Negotiation Request for TLS + CredSSP,
+  the Connection Confirm selecting CredSSP, a TLS 1.2 handshake with the self-signed certificate Remote
+  Desktop generates for its host name, then opaque interactive records — small input records up, larger
+  screen updates down) and `historian.replica` / `historian.replication` actors (one TLS session to a REST
+  endpoint with a self-signed appliance certificate, a periodic POST sized by the tags in the batch and a
+  small JSON acknowledgement); `x509` gained a `self_signed` helper. RDP is TCP 3389 on output
+  (`ports.RDP`, which also replaces the scan sweep's closed-port probe `SCAN_RDP`). easy (15 min) and
+  medium (45 min) are captured on the DMZ switch; hard (2 h) on the control-network switch, where the jump
+  host's RDP arrives routed. Questions on the jump host, the RDP account in the cookie, the
+  control-network RDP target, the replica and source historians and the replication interval, plus (hard)
+  the approved Modbus writer and the PLC count. The baseline triggers no alert; new zone-policy rules
+  (below) give incidents layered on it something to fire.
 - `it-rogue-dhcp`: a rogue DHCP server (MITRE ATT&CK T1557, T1557.003) on the office-LAN baseline. A
   Raspberry Pi running dnsmasq, plugged into the office segment, answers clients' Discovers and Requests
   before the firewall-relayed Windows Server Offer arrives, so hosts that join during the capture take its
@@ -102,6 +125,16 @@
 ### Detection engineering
 - SIEM export: new `siem/ldap.jsonl` (binds and searches: base, scope, filter when unsealed, entries);
   `kerberos.jsonl` gains `etype` / `etype_first` (the encryption types a request offers).
+- SIEM export: new `siem/rdp.jsonl` — one record per RDP connection request (TCP 3389): `cookie`
+  (the cleartext X.224 `Cookie: mstshash=<user>`), `cookie_user` (the account it names),
+  `requested_protocols` (`SSL`, `CredSSP`, `HYBRID_EX`) and `requested_protocols_raw`, plus the flow
+  fields, `src_mac` and `frame`; `rdp` is a dataset in the scenario schema for question `hunt` blocks.
+- IT/OT zone-policy rules for scenarios with the `office` / `dmz` / `control` zone model
+  (`it-ot-baseline-operations` and incidents built on it; not `it-ot-pivot`, which has no DMZ): Suricata
+  sids 9103000 (a TCP connection from the office LAN straight into the control network) and 9103001 (RDP
+  into the control network from any host other than the DMZ jump host(s), i.e. the `rdp.server` hosts in
+  the DMZ), and matching Sigma rules over flows (a flow into control from outside the control zone and the
+  DMZ; RDP into control not from the jump host). All are inert on the baseline (0 alerts).
 - `tests/test_siem_queries.py`: fresh Splunk index names per session (re-creating a just-deleted index
   raced with Splunk's asynchronous removal and left it empty), one-record files sampled twice for
   Elasticsearch's find-structure API (it needs two lines), and timestamp answers match within the

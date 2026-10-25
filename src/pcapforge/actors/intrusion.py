@@ -65,7 +65,7 @@ class TcpScanner(Actor):
         "ad.dc": (ports.KERBEROS, ports.LDAP, ports.SMB),
     }
     # Ports the sweep also probes but no service of the site serves (closed / filtered on the wire).
-    CLOSED_PORTS = (ports.SCAN_SSH, ports.SCAN_RPC, ports.SCAN_NETBIOS, ports.SCAN_RDP)
+    CLOSED_PORTS = (ports.SCAN_SSH, ports.SCAN_RPC, ports.SCAN_NETBIOS, ports.RDP)
 
     def plan(self) -> None:
         plan, rng = self.plan_, self.rng

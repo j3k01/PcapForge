@@ -1,0 +1,551 @@
+# yaml-language-server: $schema=../../../src/pcapforge/scenario/scenario.schema.json
+schema: pcapforge/scenario@1
+id: it-ot-baseline-operations
+title: Baseline of a combined IT and OT site with an industrial DMZ (no incident)
+line: it
+version: 1
+license: CC-BY-4.0
+authors: [pcapforge contributors]
+tags: [baseline, it, ot, it-ot, purdue, dmz, network-segmentation, rdp, jump-host, historian, replication, active-directory, windows, modbus, ics, tls]
+summary: >
+  One site, three zones, no incident. An office LAN (DHCP, DNS, HTTPS to the intranet, WSUS, Active
+  Directory) and a plant control network (PLCs polled over Modbus/TCP by an HMI and a historian, the
+  engineering workstation the approved writer) sit either side of an industrial DMZ (Purdue level 3.5)
+  on a single next-generation firewall that gives each zone its own interface. The capture shows the
+  legitimate cross-zone traffic a real plant has: the plant historian replicates its points to the DMZ
+  replica historian over HTTPS on a fixed schedule; an office engineer reaches the DMZ jump host over
+  RDP and the jump host reaches the engineering workstation in the control network over RDP (X.224 with
+  the cleartext mstshash cookie, then TLS, then opaque interactive records); and the control network
+  takes its time from a DMZ time service. No office host ever touches the control network directly.
+  Everything is a benign local simulation on 127.77.0.0/16. Easy and medium are captured on the DMZ
+  switch; hard is captured on the control-network switch, where the jump host's RDP arrives routed.
+
+briefing: |
+  You are joining the SOC of {site_name} ({domain}). The site is one firewall with three security
+  zones: the office LAN, an industrial DMZ and the plant control network ({process_title}). The
+  attached capture comes from the SPAN port of the {sensor_subnet} switch. By policy the office LAN
+  and the control network never talk to each other directly; the DMZ is the only bridge. The plant
+  historian replicates to a replica historian in the DMZ, engineers reach the plant through a DMZ jump
+  host, and the control network only accepts remote access from that jump host. There is no incident.
+  Document the legitimate cross-zone traffic: which host replicates to which, over what, how often;
+  which hosts bridge into the control network and from where; and what normal looks like on the plant
+  network, so you can baseline the segmentation before you hunt.
+
+mitre: []
+
+site:
+  names: [Brzozowa, Lipowa Dolina, Zielony Gaj, Kamienny Most, Dębowa Wola, Sosnowy Bór, Wierzbno, Jodłowice, Modrzewie, Olszynka, Bystrzyca Górna, Krzemienna, Słoneczne Pole, Łąkowo, Riverbend, Oak Hollow, Millbrook, Cedar Falls, Stonebridge, Willow Creek, Ashford Valley, Granite Ridge, Maple Crossing, Harbor Point, Pine Hollow, Silverlake]
+  codes: [hq, ofc, wtp, zuw]
+  start_hours: [7, 8]
+  weekdays: [0, 1, 2, 3, 4]
+  year_range: [2025, 2026]
+
+topology:
+  sensor: "${vars.sensor}"
+  subnets:
+    - {id: office, pool: 172.16.0.0/12, prefix: 24}
+    - {id: servers, pool: 10.0.0.0/8, prefix: 24}
+    - {id: dmz, cidr: 192.168.50.0/24}
+    - {id: control, pool: 10.0.0.0/8, prefix: 24}
+  hosts:
+    # One next-generation firewall with a separate interface (zone) per subnet; it routes between the
+    # zones and relays DHCP for the office. The IT/OT separation is a firewall policy: office <-> control
+    # is never permitted, and the control network accepts remote access only from the DMZ jump host.
+    - {id: fw, device: fortigate, subnets: [office, servers, dmz, control], name: "fw-{code}-01", router: true}
+    # --- IT: the server subnet (Active Directory, intranet, WSUS) ---
+    - {id: dc, device: windows-server-vm, subnet: servers, name: "DC-{CODE}-01"}
+    - {id: web, device: windows-server-vm, subnet: servers, name: "WEB-{CODE}-01", aliases: [intranet, helpdesk]}
+    - {id: wsus, device: windows-server-vm, subnet: servers, name: "WSUS-{CODE}-01"}
+    # --- IT: the office LAN ---
+    - {id: pc, count: "${vars.pc_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-1{index:02d}", role: workstation}
+    - {id: ws, count: "${vars.ws_count}", device: [windows-workstation, hp-workstation], subnet: office, name: "WS-{CODE}-2{index:02d}", role: workstation}
+    # The process engineer's workstation, which reaches the plant through the DMZ jump host.
+    - {id: eng, device: windows-workstation, subnet: office, name: "WS-{CODE}-0417", role: workstation}
+    # --- The industrial DMZ (Purdue level 3.5) ---
+    # The jump host for remote access into the plant, and the replica historian the plant replicates to.
+    - {id: jump, device: windows-server-vm, subnet: dmz, name: "JMP-{CODE}-01"}
+    - {id: dmz_hist, device: windows-server-vm, subnet: dmz, name: "HISTDMZ-{CODE}"}
+    # --- The plant control network ---
+    - {id: plc, count: "${vars.plc_count}", device: "${vars.plc_devices}", subnet: control, name: "plc-{code}-{index:02d}"}
+    - {id: hmi, device: windows-workstation, subnet: control, name: "HMI-{CODE}-01"}
+    - {id: ot_hist, device: windows-server-vm, subnet: control, name: "HISTOT-{CODE}"}
+    - {id: ews, device: hp-workstation, subnet: control, name: "EWS-{CODE}-01"}
+
+actors:
+  # --- IT baseline: office / server subnet -------------------------------------------------
+  - id: dhcp_service
+    type: dhcp.server
+    hosts: dc
+    params: {subnet: office, pool: [100, 199], style: windows, dns: dc}
+  - {id: dns_service, type: dns.server, hosts: dc}
+  - {id: ntp_service, type: ntp.server, hosts: dc}
+  - id: morning_boot
+    type: dhcp.client
+    hosts: pc
+    params: {server: dc, join: [0.02, 0.6], reboot: true}
+  - id: running_pcs
+    type: dhcp.client
+    hosts: [ws, eng]
+    params: {server: dc}
+  - id: name_lookups
+    type: dns.client
+    hosts: [pc, ws, eng]
+    when: vars.dns
+    params: {server: dc, per_hour: [10, 40]}
+  - id: office_time_sync
+    type: ntp.client
+    hosts: [pc, ws, eng]
+    params: {server: dc}
+  - id: office_chatter
+    type: windows.chatter
+    hosts: [pc, ws, eng]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  - {id: domain_service, type: ad.dc, hosts: dc, when: vars.domain}
+  - id: office_domain_members
+    type: ad.member
+    hosts: [pc, ws, eng]
+    when: vars.domain
+    params: {dc: dc, logon: {host: pc1, at: [0.1, 0.5]}}
+  - id: web_service
+    type: https.server
+    hosts: web
+    params: {ca: dc, sites: {intranet: portal, helpdesk: helpdesk}}
+  - id: browsing
+    type: https.client
+    hosts: [pc, ws, eng]
+    params: {servers: web, dns: dc, visits_per_hour: "${vars.visits_per_hour}"}
+  - id: update_service
+    type: wsus.server
+    hosts: wsus
+    params: {update: "${vars.wsus_update}", drivers: true}
+  - id: windows_update
+    type: wsus.client
+    hosts: [pc, ws, eng]
+    params: {server: wsus, dns: dc, scan_after: [60, 300]}
+
+  # --- The industrial DMZ (level 3.5) ------------------------------------------------------
+  # The jump host is a managed, domain-joined server; the replica historian is a workgroup appliance.
+  - {id: jump_domain_member, type: ad.member, hosts: jump, when: vars.domain, params: {dc: dc}}
+  - {id: jump_time_sync, type: ntp.client, hosts: jump, params: {server: dc}}
+  - id: jump_chatter
+    type: windows.chatter
+    hosts: jump
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: "${vars.ipv6}"}
+  # The DMZ time service the control network syncs to (local clock, like the DC).
+  - {id: ot_time_service, type: ntp.server, hosts: dmz_hist}
+  # The replica historian: an HTTPS/REST endpoint the plant historian replicates into.
+  - {id: replica_service, type: historian.replica, hosts: dmz_hist}
+  # RDP servers: the jump host (reached from the office) and the engineering workstation (reached from
+  # the jump host). Reusable building blocks for any remote-access scenario on this baseline.
+  - {id: jump_rdp_service, type: rdp.server, hosts: jump}
+  - {id: ews_rdp_service, type: rdp.server, hosts: ews}
+
+  # --- Legitimate cross-zone flows ---------------------------------------------------------
+  # 1. Historian replication: the plant historian pushes its points to the DMZ replica on a schedule.
+  - id: ot_historian_replication
+    type: historian.replication
+    hosts: ot_hist
+    params:
+      server: dmz_hist
+      interval: "${vars.replication_interval}"
+      tags: "${vars.replication_tags}"
+      start: [0.02, 0.08]
+  # 2a. An office engineer reaches the DMZ jump host over RDP during the working day.
+  - id: office_remote_access
+    type: rdp.client
+    hosts: eng
+    params:
+      target: jump
+      account: "${vars.engineer_account}"
+      start: "${vars.rdp_start}"
+      duration: "${vars.rdp_duration}"
+      interval: "${vars.rdp_interval}"
+  # 2b. From inside the engineer's session, the jump host reaches the engineering workstation in the
+  # control network over RDP (opened after the inbound logon, closed before it ends).
+  - id: jump_remote_access
+    type: rdp.client
+    hosts: jump
+    params:
+      target: ews
+      account: "${vars.ot_admin_account}"
+      via: office_remote_access
+      duration: "${vars.rdp_duration}"
+      interval: "${vars.rdp_interval}"
+
+  # --- OT baseline: plant control network --------------------------------------------------
+  - {id: plc_service, type: modbus.server, hosts: plc, params: {process: "${vars.process}"}}
+  - id: scada_poll
+    type: modbus.poller
+    hosts: hmi
+    params: {targets: plc, interval: "${vars.hmi_interval}", jitter: 0.03}
+  - id: historian_poll
+    type: modbus.poller
+    hosts: ot_hist
+    params: {targets: plc, interval: 10, jitter: 0.01, groups: [0, 1]}
+  # The engineering workstation is the only approved setpoint writer (count may be 0; kept present so
+  # the site model and the Modbus detections know the approved writer).
+  - id: operator_changes
+    type: modbus.operator
+    hosts: ews
+    params: {targets: plc, count: "${vars.operator_writes}"}
+  - id: control_time_sync
+    type: ntp.client
+    hosts: [hmi, ot_hist, ews, plc]
+    params: {server: dmz_hist}
+  - id: control_chatter
+    type: windows.chatter
+    hosts: [hmi, ot_hist, ews]
+    when: vars.chatter
+    params: {rate: "${vars.chatter_rate}", ipv6: false}
+
+difficulty:
+  easy:
+    duration: 15m
+    impairments: {retransmit_rate: 0.0, mid_session: false}
+    vars:
+      sensor: dmz
+      pc_count: 3
+      ws_count: 2
+      dns: true
+      chatter: false
+      domain: false
+      ipv6: false
+      visits_per_hour: [3, 8]
+      wsus_update: false
+      process: water_treatment
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500]
+      plc_count: 2
+      hmi_interval: 2.0
+      operator_writes: 1
+      replication_interval: 60
+      replication_tags: [200, 320]
+      engineer_account: r.lewandowski
+      ot_admin_account: ot-admin
+      rdp_start: [0.12, 0.25]
+      rdp_duration: [360, 600]
+      rdp_interval: 4
+  medium:
+    duration: 45m
+    impairments: {retransmit_rate: 0.0005, mid_session: true, span_duplicates: 0.002, sensor_drop: 0.0005, vlan: 50, clock_offset: [-3, 3], clock_drift_ppm: [-40, 40]}
+    vars:
+      sensor: dmz
+      pc_count: {range: [4, 6]}
+      ws_count: {range: [2, 4]}
+      dns: true
+      chatter: true
+      chatter_rate: 1
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200]
+      plc_count: {range: [2, 3]}
+      hmi_interval: 1.0
+      operator_writes: 3
+      replication_interval: 60
+      replication_tags: [280, 420]
+      engineer_account: r.lewandowski
+      ot_admin_account: ot-admin
+      rdp_start: [0.1, 0.25]
+      rdp_duration: [900, 1800]
+      rdp_interval: 5
+  hard:
+    duration: 2h
+    impairments: {retransmit_rate: 0.001, mid_session: true, span_duplicates: 0.005, sensor_drop: 0.001, vlan: 150, clock_offset: [-90, 90], clock_drift_ppm: [-150, 150]}
+    vars:
+      sensor: control
+      pc_count: {range: [6, 10]}
+      ws_count: {range: [3, 6]}
+      dns: true
+      chatter: true
+      chatter_rate: 2
+      domain: true
+      ipv6: true
+      visits_per_hour: [3, 8]
+      wsus_update: true
+      process: {choose: [water_treatment, wastewater_treatment, hvac_building, power_substation]}
+      plc_devices: [schneider-m340, siemens-s7-1200, rockwell-micro850, abb-ac500, phoenix-axc-f2152, wago-pfc200, beckhoff-cx9020, honeywell-controledge]
+      plc_count: {range: [3, 4]}
+      hmi_interval: 1.0
+      operator_writes: 6
+      replication_interval: 60
+      replication_tags: [320, 460]
+      engineer_account: r.lewandowski
+      ot_admin_account: ot-admin
+      rdp_start: [0.08, 0.2]
+      rdp_duration: [1800, 3600]
+      rdp_interval: 5
+
+questions:
+  - id: jump_host
+    when: "vars.sensor == 'dmz'"
+    text: >-
+      Office engineers reach a single host in the DMZ over RDP (TCP 3389) to get to the plant. Which
+      host is that jump host? Give its IP address.
+    answer: "${facts.jump_rdp_service.hosts[0].ip}"
+    type: ip
+    points: 10
+    hint: >-
+      Look for RDP Connection Requests (an X.224 Connection Request carrying a Cookie: mstshash cookie)
+      arriving from the office LAN; their destination is the jump host.
+    check:
+      filter: "rdp.rt_cookie && tcp.dstport == 3389 && ip.dst == ${facts.jump_rdp_service.hosts[0].ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: rdp
+      spl: "index=* sourcetype=pcapforge:rdp dest_port=3389 | stats count values(cookie_user) AS users BY src, dest | sort - count"
+      kql: "dest_port : 3389"
+      zeek: {log: rdp, count_by: [id.resp_h]}
+      look_for: The destination of the RDP connection requests coming from the office LAN.
+  - id: rdp_account
+    text: >-
+      The jump host opens RDP into the control network. Which account name does that connection present
+      in its cleartext RDP cookie (the mstshash field of the X.224 Connection Request)?
+    answer: "${facts.jump_remote_access.account}"
+    accept: ["${facts.jump_remote_access.account}"]
+    type: text
+    points: 15
+    hint: >-
+      The mstshash cookie is sent in the clear in the first RDP packet, before TLS starts. Read
+      rdp.rt_cookie on the connection into the control network.
+    check:
+      filter: 'rdp.rt_cookie contains "mstshash=${facts.jump_remote_access.account}"'
+      expect: {min: 1}
+    hunt:
+      dataset: rdp
+      spl: "index=* sourcetype=pcapforge:rdp cookie_user=* | stats count BY src, dest, cookie_user"
+      kql: "cookie_user : *"
+      zeek: {log: rdp, show: [id.orig_h, id.resp_h, cookie]}
+      look_for: The mstshash user in the RDP cookie; the connection whose destination is on the control network.
+  - id: control_rdp_target
+    text: >-
+      From the jump host, which control-network host is reached over RDP (the engineering workstation)?
+      Give its IP address.
+    answer: "${facts.ews_rdp_service.hosts[0].ip}"
+    type: ip
+    points: 10
+    hint: The RDP connection request whose destination is on the plant control network.
+    check:
+      filter: "rdp.rt_cookie && tcp.dstport == 3389 && ip.dst == ${facts.ews_rdp_service.hosts[0].ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: rdp
+      spl: "index=* sourcetype=pcapforge:rdp dest_port=3389 | stats count BY src, dest, cookie_user"
+      kql: "dest_port : 3389"
+      zeek: {log: rdp, count_by: [id.resp_h]}
+      look_for: The RDP destination inside the control network, reached from the DMZ jump host.
+  - id: replica_host
+    text: >-
+      The plant historian replicates its data to a replica historian in the DMZ over HTTPS. Which host
+      is that replica (the replication destination)? Give its IP address.
+    answer: "${facts.replica_service.hosts[0].ip}"
+    type: ip
+    points: 10
+    hint: >-
+      A steady, periodic TLS session from the control network to a DMZ host on TCP 443. The server
+      presents a self-signed certificate for its own host name.
+    check:
+      filter: "tls.handshake.type == 1 && tcp.dstport == 443 && ip.dst == ${facts.replica_service.hosts[0].ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: tls
+      spl: "index=* sourcetype=pcapforge:tls dest_port=443 | stats count BY src, dest, server_name"
+      kql: "dest_port : 443"
+      zeek: {log: ssl, count_by: [id.resp_h]}
+      look_for: The TLS server the control-network historian opens a session to in the DMZ.
+  - id: replication_source
+    text: >-
+      Which host on the control network pushes data out to the DMZ replica historian (the source of the
+      replication)? Give its IP address.
+    answer: "${facts.ot_historian_replication.source.ip}"
+    type: ip
+    points: 10
+    hint: The control-network end of the TCP 443 session to the DMZ replica historian.
+    check:
+      filter: "tcp.dstport == 443 && ip.src == ${facts.ot_historian_replication.source.ip} && ip.dst == ${facts.replica_service.hosts[0].ip}"
+      expect: {min: 1}
+    hunt:
+      dataset: tls
+      spl: "index=* sourcetype=pcapforge:tls dest_port=443 | stats count BY src, dest"
+      kql: "dest_port : 443"
+      zeek: {log: ssl, count_by: [id.orig_h, id.resp_h]}
+      look_for: The control-network host that originates the replication session.
+  - id: replication_interval
+    text: >-
+      How often does the plant historian replicate to the DMZ replica? Give the interval between
+      consecutive replication pushes, in seconds.
+    answer: "${facts.ot_historian_replication.interval_s}"
+    type: number
+    tolerance: 5
+    points: 10
+    hint: >-
+      Measure the time between consecutive application-data bursts on the control-to-DMZ TCP 443 session
+      (Statistics > Conversations, or frame.time_delta on tls && tcp.dstport == 443).
+    hunt:
+      dataset: flows
+      wireshark: "tls && tcp.dstport == 443 && ip.dst == ${facts.replica_service.hosts[0].ip}"
+      look_for: The steady cadence of the replication pushes; the gap between them is the interval.
+  - id: approved_writer
+    when: "vars.sensor == 'control'"
+    text: >-
+      On the control network, which host makes the approved setpoint changes to the PLCs (the
+      engineering workstation)? Give its IP address.
+    answer: "${facts.operator_changes.source.ip}"
+    type: ip
+    points: 10
+    hint: >-
+      Only one host sends Modbus write function codes (5, 6, 15, 16) to the PLCs; every other host only
+      reads. That writer is the approved engineering workstation.
+    check:
+      filter: "mbtcp && modbus.func_code in {5, 6, 15, 16} && ip.src == ${facts.operator_changes.source.ip} && !modbus.request_frame"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus write=true | stats count BY src, dest"
+      kql: "write : true"
+      zeek: {log: modbus, where: {pdu_type: REQ, func: [WRITE_SINGLE_COIL, WRITE_SINGLE_REGISTER, WRITE_MULTIPLE_COILS, WRITE_MULTIPLE_REGISTERS]}, count_by: [id.orig_h, id.resp_h]}
+      look_for: The only host writing to the PLCs; on this baseline it is the approved engineering workstation.
+  - id: plc_count
+    when: "vars.sensor == 'control'"
+    text: How many PLCs answer Modbus/TCP requests on the control network in this capture?
+    answer: "${vars.plc_count}"
+    type: number
+    points: 10
+    hint: Count the distinct hosts replying from TCP source port 502 to read requests.
+    check:
+      filter: "mbtcp && tcp.srcport == 502 && modbus.func_code in {1, 2, 3, 4}"
+      expect: {min: 1}
+    hunt:
+      dataset: modbus
+      spl: "index=* sourcetype=pcapforge:modbus dest_port=502 function_code IN (1,2,3,4) | stats dc(dest) AS plcs values(dest) AS plc_ips"
+      kql: "dest_port : 502 and function_code : (1 or 2 or 3 or 4)"
+      zeek: {log: modbus, where: {pdu_type: RESP, func: [READ_COILS, READ_DISCRETE_INPUTS, READ_HOLDING_REGISTERS, READ_INPUT_REGISTERS]}, count_by: [id.resp_h]}
+      look_for: The distinct PLC addresses (the TCP 502 side) answering read requests.
+
+translations:
+  pl:
+    title: Punkt odniesienia połączonej sieci IT i OT ze strefą DMZ przemysłową (bez incydentu)
+    briefing: |
+      Dołączasz do SOC obiektu {site_name} ({domain}). Obiekt to jedna zapora z trzema strefami
+      bezpieczeństwa: sieć biurowa, przemysłowa strefa DMZ i sieć sterowania zakładu ({process_title}).
+      Dołączone przechwycenie pochodzi z portu SPAN przełącznika {sensor_subnet}. Zgodnie z polityką
+      sieć biurowa i sieć sterowania nigdy nie komunikują się bezpośrednio; DMZ jest jedynym mostem.
+      Historian zakładowy replikuje dane do historiana repliki w DMZ, inżynierowie łączą się z zakładem
+      przez host przesiadkowy (jump host) w DMZ, a sieć sterowania przyjmuje zdalny dostęp wyłącznie z
+      tego hosta. Nie ma incydentu. Udokumentuj legalny ruch międzystrefowy: kto replikuje do kogo, czym
+      i jak często; które hosty wchodzą do sieci sterowania i skąd; oraz jak wygląda normalny ruch w
+      sieci zakładu, aby móc ustalić punkt odniesienia dla segmentacji przed polowaniem.
+    questions:
+      jump_host:
+        text: >-
+          Inżynierowie z biura łączą się z jednym hostem w DMZ przez RDP (TCP 3389), aby dostać się do
+          zakładu. Który host to ten host przesiadkowy (jump host)? Podaj jego adres IP.
+        hint: >-
+          Szukaj żądań połączenia RDP (X.224 Connection Request z ciasteczkiem Cookie: mstshash)
+          przychodzących z sieci biurowej; ich celem jest host przesiadkowy.
+      rdp_account:
+        text: >-
+          Host przesiadkowy otwiera RDP do sieci sterowania. Jaką nazwę konta prezentuje to połączenie w
+          jawnym ciasteczku RDP (pole mstshash żądania X.224 Connection Request)?
+        hint: >-
+          Ciasteczko mstshash jest wysyłane jawnie w pierwszym pakiecie RDP, przed startem TLS. Odczytaj
+          rdp.rt_cookie dla połączenia do sieci sterowania.
+      control_rdp_target:
+        text: >-
+          Z hosta przesiadkowego, który host sieci sterowania jest osiągany przez RDP (stacja inżynierska)?
+          Podaj jego adres IP.
+        hint: Żądanie połączenia RDP, którego celem jest host w sieci sterowania zakładu.
+      replica_host:
+        text: >-
+          Historian zakładowy replikuje swoje dane do historiana repliki w DMZ przez HTTPS. Który host
+          jest tą repliką (celem replikacji)? Podaj jego adres IP.
+        hint: >-
+          Stała, okresowa sesja TLS z sieci sterowania do hosta w DMZ na TCP 443. Serwer prezentuje
+          certyfikat samopodpisany dla własnej nazwy hosta.
+      replication_source:
+        text: >-
+          Który host w sieci sterowania wypycha dane do historiana repliki w DMZ (źródło replikacji)?
+          Podaj jego adres IP.
+        hint: Koniec sesji TCP 443 po stronie sieci sterowania, prowadzącej do historiana repliki w DMZ.
+      replication_interval:
+        text: >-
+          Jak często historian zakładowy replikuje do repliki w DMZ? Podaj odstęp między kolejnymi
+          wypchnięciami replikacji, w sekundach.
+        hint: >-
+          Zmierz czas między kolejnymi porcjami danych aplikacji w sesji TCP 443 z sieci sterowania do DMZ
+          (Statystyki > Konwersacje lub frame.time_delta na tls && tcp.dstport == 443).
+      approved_writer:
+        text: >-
+          W sieci sterowania który host dokonuje zatwierdzonych zmian nastaw w PLC (stacja inżynierska)?
+          Podaj jego adres IP.
+        hint: >-
+          Tylko jeden host wysyła kody funkcji zapisu Modbus (5, 6, 15, 16) do PLC; każdy inny tylko
+          odczytuje. Ten zapisujący to zatwierdzona stacja inżynierska.
+      plc_count:
+        text: Ile PLC odpowiada na żądania Modbus/TCP w sieci sterowania w tym przechwyceniu?
+        hint: Policz odrębne hosty odpowiadające z portu źródłowego TCP 502 na żądania odczytu.
+  de:
+    title: Grundlinie eines kombinierten IT- und OT-Standorts mit industrieller DMZ (kein Vorfall)
+    briefing: |
+      Sie treten dem SOC des Standorts {site_name} ({domain}) bei. Der Standort ist eine Firewall mit
+      drei Sicherheitszonen: das Büro-LAN, eine industrielle DMZ und das Steuernetz der Anlage
+      ({process_title}). Die beigefügte Aufzeichnung stammt vom SPAN-Port des Switches {sensor_subnet}.
+      Laut Richtlinie kommunizieren das Büro-LAN und das Steuernetz nie direkt miteinander; die DMZ ist
+      die einzige Brücke. Der Anlagen-Historian repliziert zu einem Replica-Historian in der DMZ,
+      Techniker erreichen die Anlage über einen Sprungserver (Jump Host) in der DMZ, und das Steuernetz
+      akzeptiert Fernzugriff nur von diesem Jump Host. Es gibt keinen Vorfall. Dokumentieren Sie den
+      legitimen zonenübergreifenden Verkehr: wer repliziert zu wem, womit und wie oft; welche Hosts in
+      das Steuernetz gelangen und von wo; und wie der Normalzustand im Anlagennetz aussieht, um die
+      Segmentierung vor der Jagd zu baselinen.
+    questions:
+      jump_host:
+        text: >-
+          Bürotechniker erreichen einen einzigen Host in der DMZ über RDP (TCP 3389), um zur Anlage zu
+          gelangen. Welcher Host ist dieser Jump Host? Geben Sie seine IP-Adresse an.
+        hint: >-
+          Suchen Sie nach RDP-Verbindungsanfragen (eine X.224 Connection Request mit einem Cookie:
+          mstshash) aus dem Büro-LAN; ihr Ziel ist der Jump Host.
+      rdp_account:
+        text: >-
+          Der Jump Host öffnet RDP ins Steuernetz. Welchen Kontonamen zeigt diese Verbindung in ihrem
+          Klartext-RDP-Cookie (dem Feld mstshash der X.224 Connection Request)?
+        hint: >-
+          Das mstshash-Cookie wird im Klartext im ersten RDP-Paket gesendet, bevor TLS beginnt. Lesen Sie
+          rdp.rt_cookie der Verbindung ins Steuernetz.
+      control_rdp_target:
+        text: >-
+          Welcher Host des Steuernetzes wird vom Jump Host über RDP erreicht (die Engineering-Workstation)?
+          Geben Sie seine IP-Adresse an.
+        hint: Die RDP-Verbindungsanfrage, deren Ziel im Steuernetz der Anlage liegt.
+      replica_host:
+        text: >-
+          Der Anlagen-Historian repliziert seine Daten über HTTPS zu einem Replica-Historian in der DMZ.
+          Welcher Host ist dieses Replikat (das Replikationsziel)? Geben Sie seine IP-Adresse an.
+        hint: >-
+          Eine stetige, periodische TLS-Sitzung vom Steuernetz zu einem DMZ-Host auf TCP 443. Der Server
+          zeigt ein selbstsigniertes Zertifikat für seinen eigenen Hostnamen.
+      replication_source:
+        text: >-
+          Welcher Host im Steuernetz schiebt Daten zum Replica-Historian in der DMZ (die Quelle der
+          Replikation)? Geben Sie seine IP-Adresse an.
+        hint: Das steuernetzseitige Ende der TCP-443-Sitzung zum Replica-Historian in der DMZ.
+      replication_interval:
+        text: >-
+          Wie oft repliziert der Anlagen-Historian zum Replikat in der DMZ? Geben Sie den Abstand
+          zwischen aufeinanderfolgenden Replikations-Pushes in Sekunden an.
+        hint: >-
+          Messen Sie die Zeit zwischen aufeinanderfolgenden Anwendungsdaten-Bursts auf der TCP-443-Sitzung
+          vom Steuernetz zur DMZ (Statistik > Verbindungen oder frame.time_delta auf tls && tcp.dstport == 443).
+      approved_writer:
+        text: >-
+          Welcher Host im Steuernetz nimmt die genehmigten Sollwertänderungen an den PLCs vor (die
+          Engineering-Workstation)? Geben Sie seine IP-Adresse an.
+        hint: >-
+          Nur ein Host sendet Modbus-Schreibfunktionscodes (5, 6, 15, 16) an die PLCs; jeder andere liest
+          nur. Dieser Schreiber ist die genehmigte Engineering-Workstation.
+      plc_count:
+        text: Wie viele PLCs beantworten Modbus/TCP-Anfragen im Steuernetz in dieser Aufzeichnung?
+        hint: Zählen Sie die unterschiedlichen Hosts, die vom TCP-Quellport 502 auf Leseanfragen antworten.

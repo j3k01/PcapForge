@@ -526,7 +526,8 @@
                   "ldap",
                   "smb",
                   "tls",
-                  "http"
+                  "http",
+                  "rdp"
                 ],
                 "description": "SIEM export file the SPL/KQL queries search"
               },
