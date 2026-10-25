@@ -140,6 +140,10 @@
   Elasticsearch's find-structure API (it needs two lines), and timestamp answers match within the
   question's `tolerance_s`, as grading does.
 
+### Packaging
+- The PyPI distribution name is `pcapforge-it-ot` (`pcapforge` is taken on PyPI by an unrelated project):
+  `pip install pcapforge-it-ot`. The command and the Python package stay `pcapforge`.
+
 ## 0.4.0 - 2026-10-22
 
 Seeds are not stable across versions: the plans of the existing scenarios (actions, timing, answers) are

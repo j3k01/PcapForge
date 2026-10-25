@@ -1,8 +1,8 @@
 name: publish
 
-# Manual on purpose: run it only after the distribution name in pyproject.toml is final
-# ("pcapforge" is already taken on PyPI) and the PyPI trusted publisher is configured for this
-# repository and the "pypi" environment.
+# Manual on purpose: run it only once the PyPI trusted publisher is configured for this repository
+# (project "pcapforge-it-ot", workflow publish.yml, environment "pypi"). The distribution is
+# "pcapforge-it-ot" because "pcapforge" is taken on PyPI; the command and import name stay "pcapforge".
 on:
   workflow_dispatch:
 

@@ -39,6 +39,9 @@ Requirements:
     [platform notes](docs/how-it-works.md#platform-notes)), otherwise `sudo setcap cap_net_raw,cap_net_admin=eip $(which dumpcap)`
     plus, once per boot, `sudo ip route add local 127.77.0.0/16 dev lo table local quickack 1`
 
+From PyPI the distribution is `pcapforge-it-ot` (`pip install pcapforge-it-ot`); the command is `pcapforge`.
+From a checkout:
+
 ```console
 $ pip install -e .                # medium/hard of the OT scenarios also need: pip install -e .[opcua,s7]
 $ pcapforge list

@@ -29,7 +29,7 @@ Effort: **S** = hours, **M** = 1–3 days, **L** = a week or more.
 Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ### Next up (open items, highest value first)
-- Platform: PyPI distribution name, Docker image, docs site, macOS check (section 6).
+- Platform: first PyPI release, Docker image, docs site deployment (section 6).
 
 ## 1. Realism of the traffic (highest value, fully defensive)
 
@@ -119,7 +119,7 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ## 6. Platform and project
 
-- [~] **Publish to PyPI** (S): the wheel now ships the scenarios (`pcapforge._scenarios`), and a manual trusted-publishing workflow exists (`.github/workflows/publish.yml`). Still open: the name `pcapforge` is taken on PyPI by an unrelated project, so a distribution name has to be chosen before publishing.
+- [~] **Publish to PyPI** (S): the wheel ships the scenarios (`pcapforge._scenarios`) and a manual trusted-publishing workflow exists (`.github/workflows/publish.yml`). The distribution name is `pcapforge-it-ot` (`pcapforge` is taken on PyPI); the command and import name stay `pcapforge`. Still open: configure the trusted publisher on PyPI and run the first release.
 - [ ] **Docker image** (M): Wireshark, Suricata and pcapforge with rootless capture, so Windows/macOS users don't need Npcap or WSL.
 - [ ] **macOS support check** (S): loopback aliases for 127.77.0.0/16 and a CI job on `macos-latest`.
 - [x] **Docs site** (S): MkDocs (`mkdocs.yml`, `pip install -e .[docs]`, `mkdocs build --strict` in CI). README, CONTRIBUTING and ROADMAP are included at build time (one source of truth); `scripts/gen_docs.py` (MkDocs hook) generates the CLI, actor (params by static analysis), device, process, scenario-schema and answers.json reference pages. Still open: GitHub Pages deployment.
