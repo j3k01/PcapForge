@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-10-25
+
+Seeds are not stable across versions: the IT scenarios give different captures than in 0.4.0 (Windows
+Update Agent behaviour, TLS session tickets on the beacon and upload servers; see Traffic realism).
 
 ### Scenarios
 - `it-ldap-reconnaissance`: Active Directory reconnaissance over LDAP (MITRE ATT&CK T1087.002,
