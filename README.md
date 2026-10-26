@@ -165,9 +165,9 @@ reproducibility and long captures (24 h works): [docs/how-it-works.md](docs/how-
 - [How it works](docs/how-it-works.md): pipeline, reproducibility, long captures, tests, platform notes
 - [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md), [ROADMAP.md](ROADMAP.md), [design notes](docs/DESIGN.md)
 
-The documentation site (these pages plus reference pages generated from the code: CLI, actor types,
-device and process profiles, scenario schema, answers.json keys) builds with MkDocs:
-`pip install -e .[docs]` then `mkdocs build --strict` (or `mkdocs serve`).
+The documentation site, <https://j3k01.github.io/PcapForge/>, has these pages plus reference pages
+generated from the code (CLI, actor types, device and process profiles, scenario schema, answers.json
+keys). Build it locally with `pip install -e .[docs]` then `mkdocs build --strict` (or `mkdocs serve`).
 
 ## Development
 

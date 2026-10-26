@@ -19,3 +19,25 @@ jobs:
       # schema), so the build installs pcapforge itself; no capture tools are needed.
       - run: pip install -e .[docs]
       - run: mkdocs build --strict
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+  # GitHub Pages (Settings > Pages > Source: GitHub Actions): https://j3k01.github.io/PcapForge/
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

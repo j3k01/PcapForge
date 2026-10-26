@@ -1,5 +1,6 @@
 site_name: pcapforge
 site_description: Realistic, labeled PCAPs with answer keys for blue-team and detection-engineering training
+site_url: https://j3k01.github.io/PcapForge/
 repo_url: https://github.com/j3k01/PcapForge
 edit_uri: ""
 

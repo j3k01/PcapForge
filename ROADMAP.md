@@ -29,7 +29,7 @@ Effort: **S** = hours, **M** = 1–3 days, **L** = a week or more.
 Status: `[ ]` open, `[~]` partly done, `[x]` done.
 
 ### Next up (open items, highest value first)
-- Platform: Docker image, docs site deployment (section 6).
+- Platform: Docker image (section 6).
 
 ## 1. Realism of the traffic (highest value, fully defensive)
 
@@ -122,10 +122,10 @@ Status: `[ ]` open, `[~]` partly done, `[x]` done.
 - [x] **Publish to PyPI** (S): `pip install pcapforge-it-ot` (`pcapforge` is taken on PyPI; the command and import name stay `pcapforge`). The wheel ships the scenarios (`pcapforge._scenarios`); releases go out through the manual trusted-publishing workflow `.github/workflows/publish.yml` (first release 0.5.0).
 - [ ] **Docker image** (M): Wireshark, Suricata and pcapforge with rootless capture, so Windows/macOS users don't need Npcap or WSL.
 - [ ] **macOS support check** (S): loopback aliases for 127.77.0.0/16 and a CI job on `macos-latest`.
-- [x] **Docs site** (S): MkDocs (`mkdocs.yml`, `pip install -e .[docs]`, `mkdocs build --strict` in CI). README, CONTRIBUTING and ROADMAP are included at build time (one source of truth); `scripts/gen_docs.py` (MkDocs hook) generates the CLI, actor (params by static analysis), device, process, scenario-schema and answers.json reference pages. Still open: GitHub Pages deployment.
+- [x] **Docs site** (S): MkDocs (`mkdocs.yml`, `pip install -e .[docs]`, `mkdocs build --strict` in CI), published to GitHub Pages from `main` (<https://j3k01.github.io/PcapForge/>). README, CONTRIBUTING and ROADMAP are included at build time (one source of truth); `scripts/gen_docs.py` (MkDocs hook) generates the CLI, actor (params by static analysis), device, process, scenario-schema and answers.json reference pages.
 - [ ] **LLM "director"** (M, optional): turn a text description into a draft scenario YAML that a human reviews and that `pcapforge validate` checks. It never generates packets.
 - [x] **Web UI** (L): `pcapforge ui`, local, standard library only. Scenario catalog with level matrix; generation and batches (seed lists, base seed) with live progress (background job queue); run pages with network map, traffic strip chart (`traffic` action, cached `traffic.json`) and top conversations, timeline, answer key, files, submissions and class results, and the run actions (verify, export, traffic, grade, report, package, package all, CTFd). `pcapforge ui --student [--show-score]`: exercises, downloads, answer form with hints in the exercise's language, submissions in the `pcapforge grade` format; class roster with one-time access codes (salted PBKDF2 hashes, signed sessions, own submission only), honour system without a roster. Mobile layout, keyboard focus and error pages checked. Still open: HTTPS for class networks (put a reverse proxy in front for now).
-- [~] **Repository housekeeping** (S; badges, Dependabot and issue templates done; GitHub description/topics and labels still open):
+- [~] **Repository housekeeping** (S; badges, Dependabot, issue templates, description and topics done; labels still open):
   - README badges (CI, release, license);
   - GitHub description and topics;
   - Dependabot;
