@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.1 - 2026-10-25
+
+### Fixes
+- Sensor drops (`impairments.sensor_drop`, medium/hard) could remove a packet that continues a TLS
+  record: a write larger than one loopback segment is recorded as several data packets, and only the
+  composer's own segment trains were protected. tshark then parsed the rest of the record as a new one
+  ("TLSCiphertext length MUST NOT exceed 2^14 + 2048") and verification failed, depending on how the
+  recording host's stack split the write (seen in the 0.5.0 release job on `it-baseline-operations`
+  hard). A data packet that follows another from the same side, with no data from the peer in between,
+  is now never dropped or duplicated. Captures with `sensor_drop` or `span_duplicates` can differ from
+  0.5.0 for the same seed.
+- `actors/smb_lateral.py`: no `SyntaxWarning` (invalid escape sequence) on import.
+
 ## 0.5.0 - 2026-10-25
 
 Seeds are not stable across versions: the IT scenarios give different captures than in 0.4.0 (Windows

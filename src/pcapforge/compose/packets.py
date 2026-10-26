@@ -134,6 +134,7 @@ class Flow:
     headers: object = None                          # headers._FlowHeaders
     v6port: int | None = None                       # source port of the flow's IPv6 twin datagrams
     kinds: set[str] | None = None                   # packet kinds seen (host firewall model)
+    data_side: int | None = None                    # side of the last recorded TCP data packet
 
     @property
     def client_port(self) -> int:
@@ -158,7 +159,7 @@ class Packet:
     time: float = 0.0
     retransmission: bool = False
     more: bool = False  # a segment of a message that continues in the next segment
-    train: bool = False  # one of the segments of a message larger than the MSS
+    train: bool = False  # part of a message split across segments (by the composer or the recording stack)
     pair_end: bool = False  # last segment of a train that ends on a full, acknowledged pair
 
     @property

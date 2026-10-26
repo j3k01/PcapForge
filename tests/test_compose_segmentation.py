@@ -13,6 +13,8 @@ from scapy.utils import RawPcapWriter
 
 from pcapforge import ports
 from pcapforge.compose import compose
+from pcapforge.compose.flows import assign_flows
+from pcapforge.compose.packets import read_ipv4
 from pcapforge.plan import build_plan
 from pcapforge.record import MARKER_MAGIC
 from pcapforge.scenario import Scenario
@@ -163,3 +165,35 @@ def test_window_limited_burst_decodes_every_pipelined_request_and_receiver_acks_
     frame = result.action_frames[burst_action]
     last = tshark(result.path, "tcp.dstport == 502 && tcp.len > 0", "frame.number")[-1][0]
     assert frame == int(last)
+
+
+def test_message_split_by_the_recording_stack_is_never_dropped_mid_pdu(tmp_path):
+    """A write larger than one loopback segment arrives in several data packets; the sensor may drop
+    the first (it starts a PDU) but never a later one, which would leave tshark parsing mid-record."""
+    plan = build_plan(scenario(), "easy", "segments")
+    hmi, dc = plan.topology.by_id["hmi"].loopback, plan.topology.by_id["dc"].loopback
+    first = next(a for a in plan.actions if a.host == "hmi")
+    recording = Recording()
+    recording.marker(hmi, first.id)
+
+    def send(src, dst, sp, dp, seq, ack, flags, payload=b""):
+        recording.packets.append(IP(src=src, dst=dst) / TCP(sport=sp, dport=dp, seq=seq, ack=ack, flags=flags)
+                                 / payload)
+
+    c, s = 1001, 5001
+    send(hmi, dc, 50001, 443, 1000, 0, "S")
+    send(dc, hmi, 443, 50001, 5000, c, "SA")
+    send(hmi, dc, 50001, 443, c, s, "A")
+    send(hmi, dc, 50001, 443, c, s, "PA", b"q" * 100)              # request
+    c += 100
+    send(dc, hmi, 443, 50001, s, c, "PA", b"h" * 2000)             # response head (starts a PDU)
+    send(hmi, dc, 50001, 443, c, s + 2000, "A")                    # a pure ACK does not end the write
+    send(dc, hmi, 443, 50001, s + 2000, c, "PA", b"t" * 300)       # response tail (mid-PDU)
+    s += 2300
+    send(hmi, dc, 50001, 443, c, s, "PA", b"r" * 50)               # next request
+    c += 50
+    send(dc, hmi, 443, 50001, s, c, "PA", b"o" * 80)               # its one-packet response
+
+    packets = [p for p in assign_flows(plan, read_ipv4(recording.write(tmp_path / "rec.pcap"))) if p.payload]
+    assert [(p.payload[:1], p.train) for p in packets] == [
+        (b"q", False), (b"h", False), (b"t", True), (b"r", False), (b"o", False)]

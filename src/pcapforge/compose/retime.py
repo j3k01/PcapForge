@@ -6,7 +6,8 @@ the sensor and the sender plus the sender's reaction (application processing, de
 handshake turnaround). Delayed pure ACKs that a stack would piggyback on the next segment
 are not sent. Loss after the sensor is modelled as a retransmission after the stack's RTO.
 
-The loopback recording carries every message in one segment (MSS 65495); messages larger
+The loopback recording carries a message in one segment (MSS 65495; larger writes arrive in
+several, see ``flows.assign_flows``); messages larger
 than the path MSS go out as a train of full-sized segments at the sender's link rate,
 limited by its congestion window and the receiver's window, and the receiver acknowledges
 every second segment.

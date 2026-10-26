@@ -1,4 +1,4 @@
-"""SMB lateral-movement incident actors for the IT line (MITRE ATT&CK T1021.002 SMB/Windows Admin
+r"""SMB lateral-movement incident actors for the IT line (MITRE ATT&CK T1021.002 SMB/Windows Admin
 Shares, T1078.002 Valid Accounts: Domain Accounts).
 
 The *observable pattern* only, produced with the correct Kerberos / SMB 3.1.1 clients and servers on

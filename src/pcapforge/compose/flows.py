@@ -115,6 +115,13 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> Iterator[Packet]:
                 # Window update of the loopback stack: the composed windows are constant,
                 # so it would only show up as a duplicate ACK.
                 continue
+        # A write larger than the loopback stack sends at once (MSS 65495, or less when the
+        # receiver's window is short) arrives as several data packets from one side with no data
+        # from the peer in between; the later ones continue a message mid-PDU (a TLS record),
+        # so the sensor must never drop or duplicate them, like the composer's segment trains.
+        continuation = False
+        if proto == TCP and payload:
+            continuation, flow.data_side = flow.data_side == side, side
         if side == 0 and (payload or proto == UDP or flags & (SYN | FIN)):
             flow.action = current
         elif side == 1 and payload and current.host == src_host.id:
@@ -122,7 +129,7 @@ def assign_flows(plan: Plan, records: Iterable[bytes]) -> Iterator[Packet]:
         action = flow.action
         if action is None or action.phase == "teardown" or (action.phase == "setup" and mid_session):
             continue
-        yield Packet(order, flow, side, kind, flags, seq, ack, bytes(payload), action)
+        yield Packet(order, flow, side, kind, flags, seq, ack, bytes(payload), action, train=continuation)
 
 
 def _guess_flow(proto: int, src_host, dst_host, here: tuple, there: tuple) -> Flow:
